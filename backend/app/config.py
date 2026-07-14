@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_name: str = "StudyPilot API"
+    app_env: str = "development"
+    api_v1_prefix: str = "/api/v1"
+    database_url: str = "sqlite:///./backend/studypilot.db"
+    jwt_secret: str = "development-only-change-me"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 120
+    auto_create_tables: bool = True
+    sync_document_processing: bool = False
+    upload_dir: Path = Path("./backend/storage/uploads")
+    max_upload_bytes: int = 10 * 1024 * 1024
+    rag_top_k: int = 5
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
+    )
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        # SQLAlchemy 2 + psycopg 3. Hosted platforms often expose the legacy form.
+        if value.startswith("postgres://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgres://")
+        if value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+        return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
