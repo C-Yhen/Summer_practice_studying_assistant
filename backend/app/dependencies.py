@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Iterator
 from typing import Annotated
 
@@ -41,7 +40,7 @@ def get_current_user(
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise unauthorized
     try:
-        user_id: uuid.UUID = decode_access_token(
+        user_id: int = decode_access_token(
             credentials.credentials, settings.jwt_secret, settings.jwt_algorithm
         )
     except ValueError:
@@ -55,4 +54,3 @@ def get_current_user(
 DBSession = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AppSettings = Annotated[Settings, Depends(get_settings_from_request)]
-

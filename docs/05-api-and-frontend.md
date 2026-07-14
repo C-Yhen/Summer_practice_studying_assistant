@@ -63,7 +63,7 @@
 | 方法与 URL | 参数 / 请求 JSON | 响应 JSON | 特有错误 | JWT | Redis/长任务/确认 |
 |---|---|---|---|:---:|---|
 | `POST /courses/{course_id}/chat-sessions` | `{"title":"范式复习","mode":"strict","document_ids":[21]}` | `{"session_id":"...","mode":"strict"}` | `DOCUMENT_SCOPE_INVALID` | 是 | 会话/否/否 |
-| `POST /chat-sessions/{session_id}/messages` | `{"question":"什么是第三范式？","mode":"strict","document_ids":[21],"top_k":6}` | `{"message_id":"...","answer":"...","sufficient_evidence":true,"citations":[{"source_id":"S2","document_id":21,"document_name":"第3章.pdf","version":1,"page_number":18,"chapter_name":"3NF","quote":"..."}]}` | `DOCUMENT_NOT_READY`, `NO_RETRIEVABLE_DOCUMENT`, `LLM_SCHEMA_INVALID` | 是 | QA+检索/否/否 |
+| `POST /chat-sessions/{session_id}/messages` | `{"question":"什么是第三范式？","mode":"strict","document_ids":[21],"top_k":6}` | `{"message_id":"...","answer":"...","sufficient_evidence":true,"citations":[{"source_id":"S2","document_id":21,"document_name":"第3章.pdf","document_version":1,"page_number":18,"chapter_name":"3NF","quote":"..."}]}` | `DOCUMENT_NOT_READY`, `NO_RETRIEVABLE_DOCUMENT`, `LLM_SCHEMA_INVALID` | 是 | QA+检索/否/否 |
 | `GET /chat-sessions/{session_id}/messages` | Query `cursor?,limit<=100` | `{"items":[{"id":"...","role":"user","content":"..."}],"next_cursor":null}` | `SESSION_NOT_FOUND` | 是 | 会话/否/否 |
 | `GET /chat-messages/{message_id}/citations` | — | `{"items":[{"chunk_id":301,"document_name":"第3章.pdf","page_number":18,"quote":"...","version_valid":true}]}` | `MESSAGE_NOT_FOUND` | 是 | 是/否/否 |
 | `DELETE /chat-sessions/{session_id}` | `{"preview_only":false}` + 确认头 | `{"session_id":"...","deleted":true}` | `CONFIRMATION_REQUIRED` | 是 | 清会话/否/是 |

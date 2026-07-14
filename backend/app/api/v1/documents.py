@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile, status
+from sqlalchemy import select
+
+from backend.app.api.v1.courses import _owned_course
+from backend.app.dependencies import AppSettings, CurrentUser, DBSession
+from backend.app.models import AsyncTask, Document, DocumentVersion
+from backend.app.providers.llm import get_llm_provider
+from backend.app.responses import ok
+from backend.app.schemas import DocumentRead
+from backend.app.services.confirmation import issue_confirmation, verify_confirmation
+from backend.app.services.documents import process_document
+
+router = APIRouter(tags=["documents"])
+ALLOWED_TYPES = {"pdf", "txt", "md", "markdown"}
+
+
+def _owned_document(db: DBSession, document_id: int, owner_id: int) -> Document:
+    document = db.scalar(
+        select(Document)
+        .join(Document.course)
+        .where(Document.id == document_id, Document.course.has(owner_id=owner_id))
+    )
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+@router.post("/courses/{course_id}/documents", status_code=status.HTTP_201_CREATED)
+async def upload_document(
+    course_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+    settings: AppSettings,
+    file: UploadFile = File(...),
+    title: str | None = None,
+) -> dict:
+    _owned_course(db, course_id, current_user.id)
+    filename = Path(file.filename or "document").name
+    extension = Path(filename).suffix.lower().lstrip(".")
+    if extension not in ALLOWED_TYPES:
+        raise HTTPException(status_code=415, detail="FILE_TYPE_UNSUPPORTED")
+    content = await file.read(settings.max_upload_bytes + 1)
+    if len(content) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="FILE_TOO_LARGE")
+    directory = settings.upload_dir / str(course_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{uuid.uuid4().hex}.{extension}"
+    target.write_bytes(content)
+    document = Document(
+        course_id=course_id,
+        title=(title or filename).strip(),
+        file_type="md" if extension == "markdown" else extension,
+        file_path=str(target.resolve()),
+        status="uploaded",
+    )
+    db.add(document)
+    db.flush()
+    db.add(
+        DocumentVersion(
+            document_id=document.id,
+            version_no=1,
+            file_path=document.file_path,
+            status="uploaded",
+        )
+    )
+    task = AsyncTask(
+        user_id=current_user.id,
+        task_type="document_parse",
+        resource_type="document",
+        resource_id=str(document.id),
+        input_data={"document_id": document.id, "version": document.current_version},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(document)
+    db.refresh(task)
+    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
+        await process_document(db, document, task, get_llm_provider(settings))
+    else:
+        from backend.app.tasks.jobs import process_document_job
+
+        process_document_job.delay(document.id, task.public_id)
+    return ok({
+        "document": DocumentRead.model_validate(document).model_dump(mode="json"),
+        "async_task_id": task.public_id,
+    }, "uploaded")
+
+
+@router.get("/courses/{course_id}/documents")
+def list_documents(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+    _owned_course(db, course_id, current_user.id)
+    documents = list(
+        db.scalars(
+            select(Document)
+            .where(Document.course_id == course_id, Document.is_deleted.is_(False))
+            .order_by(Document.created_at.desc())
+        )
+    )
+    items = [DocumentRead.model_validate(item).model_dump(mode="json") for item in documents]
+    return ok({"items": items, "total": len(items)})
+
+
+@router.get("/documents/{document_id}")
+def read_document(document_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+    document = _owned_document(db, document_id, current_user.id)
+    return ok(DocumentRead.model_validate(document).model_dump(mode="json"))
+
+
+@router.post("/documents/{document_id}/reparse")
+async def reparse_document(
+    document_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+    settings: AppSettings,
+) -> dict:
+    document = _owned_document(db, document_id, current_user.id)
+    target_version = document.current_version + 1
+    db.add(
+        DocumentVersion(
+            document_id=document.id,
+            version_no=target_version,
+            file_path=document.file_path,
+            status="uploaded",
+        )
+    )
+    task = AsyncTask(
+        user_id=current_user.id,
+        task_type="document_parse",
+        resource_type="document",
+        resource_id=str(document.id),
+        input_data={"document_id": document.id, "version": target_version},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
+        await process_document(db, document, task, get_llm_provider(settings))
+    else:
+        from backend.app.tasks.jobs import process_document_job
+
+        process_document_job.delay(document.id, task.public_id)
+    return ok({"document_id": document.id, "version": target_version, "async_task_id": task.public_id})
+
+
+@router.get("/documents/{document_id}/versions")
+def list_document_versions(
+    document_id: int, db: DBSession, current_user: CurrentUser
+) -> dict:
+    document = _owned_document(db, document_id, current_user.id)
+    versions = list(
+        db.scalars(
+            select(DocumentVersion)
+            .where(DocumentVersion.document_id == document.id)
+            .order_by(DocumentVersion.version_no.desc())
+        )
+    )
+    return ok({
+        "items": [
+            {
+                "version": item.version_no,
+                "status": item.status,
+                "page_count": item.page_count,
+                "chunk_count": item.chunk_count,
+                "error_message": item.error_message,
+                "is_current": item.version_no == document.current_version,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in versions
+        ],
+        "total": len(versions),
+    })
+
+
+@router.delete("/documents/{document_id}")
+def delete_document(
+    document_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+    settings: AppSettings,
+    preview_only: bool = Query(True),
+    confirmation_token: str = Header("", alias="X-Confirmation-Token"),
+) -> dict:
+    document = _owned_document(db, document_id, current_user.id)
+    if preview_only:
+        token = issue_confirmation(
+            settings.jwt_secret,
+            user_id=current_user.id,
+            action="delete_document",
+            resource_id=str(document.id),
+        )
+        return ok({"status": "confirmation_required", "preview": {"document_id": document.id, "title": document.title}, "confirmation_token": token})
+    try:
+        verify_confirmation(
+            confirmation_token,
+            settings.jwt_secret,
+            user_id=current_user.id,
+            action="delete_document",
+            resource_id=str(document.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    document.is_deleted = True
+    document.status = "deleted"
+    db.commit()
+    return ok({"document_id": document.id, "status": "deleted"})
+
+
+@router.get("/documents/{document_id}/tasks/latest")
+def latest_document_task(document_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+    document = _owned_document(db, document_id, current_user.id)
+    task = db.scalar(
+        select(AsyncTask)
+        .where(
+            AsyncTask.user_id == current_user.id,
+            AsyncTask.resource_type == "document",
+            AsyncTask.resource_id == str(document.id),
+        )
+        .order_by(AsyncTask.created_at.desc())
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
+    return ok({"task_id": task.public_id, "status": task.status, "progress": task.progress, "current_step": task.current_step})

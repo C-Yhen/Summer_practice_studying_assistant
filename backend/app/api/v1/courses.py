@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import uuid
-
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 
 from backend.app.dependencies import CurrentUser, DBSession
 from backend.app.models import Course
+from backend.app.responses import ok
 from backend.app.schemas import CourseCreate, CourseRead, CourseUpdate, ExamDateUpdate
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
 
-def _owned_course(db: DBSession, course_id: uuid.UUID, owner_id: uuid.UUID) -> Course:
+def _owned_course(db: DBSession, course_id: int, owner_id: int) -> Course:
     course = db.scalar(
         select(Course).where(Course.id == course_id, Course.owner_id == owner_id)
     )
@@ -22,67 +21,71 @@ def _owned_course(db: DBSession, course_id: uuid.UUID, owner_id: uuid.UUID) -> C
     return course
 
 
-@router.post("", response_model=CourseRead, status_code=status.HTTP_201_CREATED)
-def create_course(payload: CourseCreate, db: DBSession, current_user: CurrentUser) -> Course:
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_course(payload: CourseCreate, db: DBSession, current_user: CurrentUser) -> dict:
     course = Course(owner_id=current_user.id, **payload.model_dump())
     db.add(course)
     db.commit()
     db.refresh(course)
-    return course
+    return ok(CourseRead.model_validate(course).model_dump(mode="json"), "created")
 
 
-@router.get("", response_model=list[CourseRead])
+@router.get("")
 def list_courses(
     db: DBSession,
     current_user: CurrentUser,
     include_archived: bool = Query(False),
-) -> list[Course]:
+) -> dict:
     statement = select(Course).where(Course.owner_id == current_user.id)
     if not include_archived:
         statement = statement.where(Course.archived.is_(False))
-    return list(db.scalars(statement.order_by(Course.created_at.desc())))
+    items = [
+        CourseRead.model_validate(item).model_dump(mode="json")
+        for item in db.scalars(statement.order_by(Course.created_at.desc()))
+    ]
+    return ok({"items": items, "total": len(items)})
 
 
-@router.get("/{course_id}", response_model=CourseRead)
-def read_course(course_id: uuid.UUID, db: DBSession, current_user: CurrentUser) -> Course:
-    return _owned_course(db, course_id, current_user.id)
+@router.get("/{course_id}")
+def read_course(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+    course = _owned_course(db, course_id, current_user.id)
+    return ok(CourseRead.model_validate(course).model_dump(mode="json"))
 
 
-@router.patch("/{course_id}", response_model=CourseRead)
+@router.patch("/{course_id}")
 def update_course(
-    course_id: uuid.UUID,
+    course_id: int,
     payload: CourseUpdate,
     db: DBSession,
     current_user: CurrentUser,
-) -> Course:
+) -> dict:
     course = _owned_course(db, course_id, current_user.id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(course, field, value)
     db.commit()
     db.refresh(course)
-    return course
+    return ok(CourseRead.model_validate(course).model_dump(mode="json"))
 
 
-@router.put("/{course_id}/exam-date", response_model=CourseRead)
+@router.put("/{course_id}/exam-date")
 def set_exam_date(
-    course_id: uuid.UUID,
+    course_id: int,
     payload: ExamDateUpdate,
     db: DBSession,
     current_user: CurrentUser,
-) -> Course:
+) -> dict:
     course = _owned_course(db, course_id, current_user.id)
-    course.exam_date = payload.exam_date
+    course.exam_date = payload.resolved_date()
     db.commit()
     db.refresh(course)
-    return course
+    return ok(CourseRead.model_validate(course).model_dump(mode="json"))
 
 
-@router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{course_id}")
 def delete_course(
-    course_id: uuid.UUID, db: DBSession, current_user: CurrentUser
-) -> Response:
+    course_id: int, db: DBSession, current_user: CurrentUser
+) -> dict:
     course = _owned_course(db, course_id, current_user.id)
-    db.delete(course)
+    course.archived = True
     db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
+    return ok({"id": course.id, "status": "archived"})

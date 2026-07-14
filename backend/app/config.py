@@ -16,10 +16,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 120
     auto_create_tables: bool = True
-    sync_document_processing: bool = False
+    sync_document_processing: bool = True
     upload_dir: Path = Path("./backend/storage/uploads")
     max_upload_bytes: int = 10 * 1024 * 1024
     rag_top_k: int = 5
+    embedding_dimension: int = 1024
+    llm_provider: str = "mock"
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_chat_model: str = ""
+    llm_embedding_model: str = ""
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/2"
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )
@@ -45,4 +54,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import os
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -47,7 +46,7 @@ def verify_password(password: str, encoded: str) -> bool:
 
 
 def create_access_token(
-    subject: uuid.UUID | str,
+    subject: int | str,
     secret: str,
     algorithm: str = "HS256",
     expires_minutes: int = 120,
@@ -65,12 +64,11 @@ def create_access_token(
     return jwt.encode(payload, secret, algorithm=algorithm)
 
 
-def decode_access_token(token: str, secret: str, algorithm: str = "HS256") -> uuid.UUID:
+def decode_access_token(token: str, secret: str, algorithm: str = "HS256") -> int:
     try:
         payload = jwt.decode(token, secret, algorithms=[algorithm])
         if payload.get("type") != "access" or not payload.get("sub"):
             raise InvalidTokenError("invalid token type")
-        return uuid.UUID(payload["sub"])
+        return int(payload["sub"])
     except (InvalidTokenError, ValueError, TypeError) as exc:
         raise ValueError("invalid or expired access token") from exc
-

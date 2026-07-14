@@ -4,7 +4,11 @@ export function subscribeTaskProgress(taskId: string, onMessage: (data: Progress
   const base = import.meta.env.VITE_WS_URL
   if (!base) return () => undefined
   const token = sessionStorage.getItem('studypilot_token') || ''
-  const socket = new WebSocket(`${base}/${taskId}?token=${encodeURIComponent(token)}`)
+  const url = new URL(base, window.location.href)
+  url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  url.searchParams.set('task_id', taskId)
+  url.searchParams.set('token', token)
+  const socket = new WebSocket(url)
   socket.onmessage = (event) => onMessage(JSON.parse(event.data) as ProgressMessage)
   socket.onerror = () => socket.close()
   return () => socket.close()

@@ -38,5 +38,4 @@ def auth_headers(client: TestClient) -> dict[str, str]:
         json={"email": "learner@example.com", "password": "correct-horse-battery-staple"},
     )
     assert login.status_code == 200
-    return {"Authorization": f"Bearer {login.json()['access_token']}"}
-
+    return {"Authorization": f"Bearer {login.json()['data']['access_token']}"}

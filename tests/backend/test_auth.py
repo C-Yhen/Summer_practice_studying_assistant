@@ -16,8 +16,8 @@ def test_register_login_and_me(client: TestClient) -> None:
         },
     )
     assert registration.status_code == 201
-    assert registration.json()["email"] == "alice@example.com"
-    assert "password_hash" not in registration.json()
+    assert registration.json()["data"]["email"] == "alice@example.com"
+    assert "password_hash" not in registration.json()["data"]
 
     duplicate = client.post(
         "/api/v1/auth/register",
@@ -40,14 +40,14 @@ def test_register_login_and_me(client: TestClient) -> None:
         json={"email": "alice@example.com", "password": "a-secure-password"},
     )
     assert login.status_code == 200
-    body = login.json()
+    body = login.json()["data"]
     assert body["token_type"] == "bearer"
     me = client.get(
         "/api/v1/users/me",
         headers={"Authorization": f"Bearer {body['access_token']}"},
     )
     assert me.status_code == 200
-    assert me.json()["full_name"] == "Alice"
+    assert me.json()["data"]["display_name"] == "Alice"
 
 
 def test_me_requires_valid_token(client: TestClient) -> None:
@@ -58,4 +58,3 @@ def test_me_requires_valid_token(client: TestClient) -> None:
         ).status_code
         == 401
     )
-

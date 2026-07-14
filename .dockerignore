@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.pytest_cache
+__pycache__
+*.py[cod]
+*.log
+.env
+backend/studypilot.db
+backend/storage
+frontend/node_modules
+frontend/dist
+frontend/.vite
+tests
+docs
+mcp-server

@@ -15,8 +15,9 @@ uploads/
 data/
 *.db
 *.sqlite3
+*.log
+*.log.err
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-
