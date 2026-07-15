@@ -266,6 +266,99 @@ export interface TaskCompleteResponse {
   idempotent_replay: boolean
 }
 
+export interface DashboardCourseFocus {
+  id: number
+  name: string
+  code: string | null
+  exam_date: string | null
+  days_until_exam: number | null
+  has_active_plan: boolean
+}
+
+export interface DashboardTodayTask {
+  id: number
+  course_id: number
+  title: string
+  task_type: string
+  estimated_minutes: number
+  actual_minutes: number | null
+  priority: number
+  difficulty: string
+  status: string
+  scheduled_date: string
+}
+
+export interface DashboardTodaySummary {
+  items: DashboardTodayTask[]
+  total_count: number
+  completed_count: number
+  pending_count: number
+  planned_minutes: number
+  actual_minutes: number
+  completion_rate: number
+}
+
+export interface DashboardMetrics {
+  today_focus_minutes: number
+  today_completion_rate: number
+  average_mastery: number | null
+  active_course_count: number
+  ready_document_count: number
+  study_days_in_range: number
+}
+
+export interface DashboardTrendPoint {
+  date: string
+  label: string
+  learning_minutes: number
+  scheduled_tasks: number
+  completed_tasks: number
+  completion_rate: number
+}
+
+export interface DashboardWeakPoint {
+  knowledge_point_id: number
+  knowledge_point: string
+  course_id: number
+  course_name: string
+  score: number
+  attempts: number
+  confidence: number
+}
+
+export interface DashboardNextAction {
+  type: string
+  title: string
+  reason: string
+  route: string
+}
+
+export interface DashboardAsyncTask {
+  task_id: string
+  task_type: string
+  status: string
+  progress: number
+  current_step: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+export interface DashboardOverview {
+  target_date: string
+  range_start: string
+  range_end: string
+  timezone: string
+  course_count: number
+  ready_document_count: number
+  focus_course: DashboardCourseFocus | null
+  today: DashboardTodaySummary
+  metrics: DashboardMetrics
+  trend: DashboardTrendPoint[]
+  weak_points: DashboardWeakPoint[]
+  next_action: DashboardNextAction
+  recent_async_tasks: DashboardAsyncTask[]
+}
+
 export type TaskStatus = 'todo' | 'doing' | 'done'
 
 export interface StudyTask {

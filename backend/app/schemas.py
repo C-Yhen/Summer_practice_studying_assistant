@@ -265,6 +265,99 @@ class TaskComplete(BaseModel):
     completed_at: datetime | None = None
 
 
+class DashboardCourseFocus(BaseModel):
+    id: int
+    name: str
+    code: str | None
+    exam_date: date | None
+    days_until_exam: int | None
+    has_active_plan: bool
+
+
+class DashboardTodayTask(BaseModel):
+    id: int
+    course_id: int
+    title: str
+    task_type: str
+    estimated_minutes: int
+    actual_minutes: int | None
+    priority: float
+    difficulty: str
+    status: str
+    scheduled_date: date
+
+
+class DashboardToday(BaseModel):
+    items: list[DashboardTodayTask]
+    total_count: int
+    completed_count: int
+    pending_count: int
+    planned_minutes: int
+    actual_minutes: int
+    completion_rate: float
+
+
+class DashboardMetrics(BaseModel):
+    today_focus_minutes: int
+    today_completion_rate: float
+    average_mastery: float | None
+    active_course_count: int
+    ready_document_count: int
+    study_days_in_range: int
+
+
+class DashboardTrendPoint(BaseModel):
+    date: date
+    label: str
+    learning_minutes: int
+    scheduled_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class DashboardWeakPoint(BaseModel):
+    knowledge_point_id: int
+    knowledge_point: str
+    course_id: int
+    course_name: str
+    score: float
+    attempts: int
+    confidence: float
+
+
+class DashboardNextAction(BaseModel):
+    type: str
+    title: str
+    reason: str
+    route: str
+
+
+class DashboardAsyncTask(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    progress: int
+    current_step: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class DashboardOverview(BaseModel):
+    target_date: date
+    range_start: date
+    range_end: date
+    timezone: str
+    course_count: int
+    ready_document_count: int
+    focus_course: DashboardCourseFocus | None
+    today: DashboardToday
+    metrics: DashboardMetrics
+    trend: list[DashboardTrendPoint]
+    weak_points: list[DashboardWeakPoint]
+    next_action: DashboardNextAction
+    recent_async_tasks: list[DashboardAsyncTask]
+
+
 class LearningRecordCreate(BaseModel):
     course_id: int
     task_id: int | None = None
