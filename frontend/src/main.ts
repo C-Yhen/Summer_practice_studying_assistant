@@ -6,5 +6,17 @@ import 'element-plus/dist/index.css'
 import './styles/global.css'
 import App from './App.vue'
 import router from './router'
+import { useAuthStore } from './stores/auth'
 
-createApp(App).use(createPinia()).use(router).use(ElementPlus, { locale: zhCn }).mount('#app')
+async function bootstrap() {
+  const app = createApp(App)
+  const pinia = createPinia()
+  app.use(pinia)
+
+  const auth = useAuthStore(pinia)
+  await auth.restoreSession()
+
+  app.use(router).use(ElementPlus, { locale: zhCn }).mount('#app')
+}
+
+void bootstrap()

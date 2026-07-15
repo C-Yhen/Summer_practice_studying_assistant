@@ -12,7 +12,7 @@ node_modules/
 dist/
 .vite/
 uploads/
-data/
+/data/
 *.db
 *.sqlite3
 *.log

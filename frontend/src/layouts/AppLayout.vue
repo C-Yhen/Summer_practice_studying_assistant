@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { mockEnabled } from '@/api/client'
 import AppLogo from '@/components/AppLogo.vue'
 import {
   Bell, Calendar, ChatDotRound, Collection, DataAnalysis, Document, Files, Finished,
@@ -49,7 +50,10 @@ function syncViewport() {
   mobile.value = window.innerWidth < 900
   if (window.innerWidth < 1180 && !mobile.value) collapsed.value = true
 }
-function logout() { auth.logout(); router.replace('/login') }
+async function logout() {
+  auth.logout()
+  await router.replace('/login')
+}
 function go(path: string) { drawerOpen.value = false; router.push(path) }
 
 onMounted(() => { syncViewport(); window.addEventListener('resize', syncViewport) })
@@ -97,12 +101,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', syncViewport))
           <kbd>⌘ K</kbd>
         </div>
         <div class="top-actions">
-          <span class="demo-state"><i></i><span>演示数据</span></span>
+          <span v-if="mockEnabled" class="demo-state"><i></i><span>演示模式</span></span>
           <el-tooltip content="2 条新通知"><button class="icon-button"><el-icon><Bell /></el-icon><b class="notify-dot"></b></button></el-tooltip>
           <el-dropdown trigger="click">
             <div class="user-chip">
               <el-avatar :size="34" class="user-avatar"><UserFilled /></el-avatar>
-              <div v-if="!mobile"><strong>{{ auth.user?.name || '学习者' }}</strong><small>数据库冲刺组</small></div>
+              <div v-if="!mobile"><strong>{{ auth.user?.displayName || '学习者' }}</strong><small>{{ auth.user?.email }}</small></div>
             </div>
             <template #dropdown><el-dropdown-menu><el-dropdown-item @click="router.push('/settings')">个人设置</el-dropdown-item><el-dropdown-item divided @click="logout">退出登录</el-dropdown-item></el-dropdown-menu></template>
           </el-dropdown>

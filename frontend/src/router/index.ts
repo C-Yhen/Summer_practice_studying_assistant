@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -33,10 +34,13 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
-  const hasToken = Boolean(sessionStorage.getItem('studypilot_token'))
-  if (!to.meta.guest && !hasToken) return { name: 'login', query: { redirect: to.fullPath } }
-  if (to.meta.guest && hasToken) return { name: 'dashboard' }
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  await auth.restoreSession()
+  if (!to.meta.guest && !auth.authenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.guest && auth.authenticated) return { name: 'dashboard' }
 })
 
 router.afterEach((to) => {

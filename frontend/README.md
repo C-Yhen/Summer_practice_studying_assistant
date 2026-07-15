@@ -15,7 +15,26 @@ npm run dev
 npm run build
 ```
 
-演示登录信息已经预填在登录页，直接点击登录即可。演示令牌只保存在当前浏览器标签页的 `sessionStorage` 中，不作为真实用户数据源。
+## 运行模式
+
+默认为真实后端模式，Mock 不会在未配置时静默开启。复制 `.env.example` 为 `.env.local` 后可按下面两种方式配置。
+
+真实后端模式：
+
+```env
+VITE_API_BASE_URL=/api/v1
+VITE_ENABLE_MOCK=false
+```
+
+该模式需要后端、PostgreSQL 和 Redis 等服务正常运行。注册会发送 `display_name`、`email` 和 `password`；登录使用后端签发的真实 JWT，并通过 `/users/me` 在页面刷新后恢复用户信息。令牌仅保存在当前浏览器标签页的 `sessionStorage` 中。
+
+演示模式：
+
+```env
+VITE_ENABLE_MOCK=true
+```
+
+只有值严格等于字符串 `true` 时才会开启。演示模式会使用虚拟账号、演示令牌和 Mock 业务数据，不会把注册信息写入真实后端。页面顶部会显示“演示模式”标识。
 
 ## 页面路由
 
@@ -34,12 +53,12 @@ npm run build
 | 日历同步 | `/calendar` |
 | 个人设置 | `/settings` |
 
-## API 与演示数据回退
+## API 与演示数据
 
 - API 基地址由 `VITE_API_BASE_URL` 配置，默认使用同源 `/api/v1`；Vite 开发服务器会把 `/api` 代理到 `http://localhost:8000`。
-- Axios 实例、JWT 请求拦截与统一回退逻辑位于 `src/api/client.ts`，领域请求封装位于 `src/api/services.ts`。
-- 默认 `VITE_ENABLE_MOCK=true`。请求后端失败时，页面会经过一个短延迟后回退到 `src/data/mock.ts` 的演示数据，因此后端未启动也能完成前端答辩。
-- 联调或生产环境应设置 `VITE_ENABLE_MOCK=false`，此时接口错误会正常抛出，不会用演示数据掩盖故障。
+- Axios 实例、JWT 请求拦截、统一 Envelope 解包和 API 错误提取位于 `src/api/client.ts`，领域请求封装位于 `src/api/services.ts`。
+- 真实模式下，认证请求失败会显示 401、409、422、网络错误或后端 `detail`，不会生成虚假 Token 或用户。
+- 显式设置 `VITE_ENABLE_MOCK=true` 后，业务请求才可在后端失败时回退到 `src/data/mock.ts` 的演示数据。认证流程会直接走独立的虚拟账号路径。
 - 长时任务 WebSocket 封装位于 `src/api/taskSocket.ts`。未配置 `VITE_WS_URL` 时，处理进度页使用可预测的本地演示进度；配置后会消费后端进度消息。
 
 期望的统一响应结构：

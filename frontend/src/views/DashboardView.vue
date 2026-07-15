@@ -8,8 +8,10 @@ import MetricCard from '@/components/MetricCard.vue'
 import EChart from '@/components/EChart.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import { asyncTasks, knowledgeMastery, todayTasks as taskSource, trendData } from '@/data/mock'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const auth = useAuthStore()
 const tasks = ref(taskSource.map((task) => ({ ...task })))
 const doneCount = computed(() => tasks.value.filter((task) => task.status === 'done').length)
 const trendOption = computed<EChartsOption>(() => ({
@@ -33,7 +35,7 @@ function toggleTask(task: (typeof tasks.value)[number]) { task.status = task.sta
 
 <template>
   <div>
-    <PageHeader title="上午好，林知夏 👋" eyebrow="LEARNING OVERVIEW" description="今天是冲刺第 3 天，保持节奏，你已经比计划领先 18 分钟。">
+    <PageHeader :title="`上午好，${auth.user?.displayName || '学习者'} 👋`" eyebrow="LEARNING OVERVIEW" description="今天是冲刺第 3 天，保持节奏，你已经比计划领先 18 分钟。">
       <el-button plain @click="router.push('/chat')"><el-icon><ChatDotRound /></el-icon>问问 AI</el-button>
       <el-button type="primary" @click="router.push('/today')"><el-icon><Reading /></el-icon>开始今日学习</el-button>
     </PageHeader>

@@ -47,5 +47,34 @@ export interface ApiEnvelope<T> {
   code: number
   message: string
   data: T
-  request_id?: string
+  request_id: string
+}
+
+export interface BackendUser {
+  id: number
+  email: string
+  display_name: string
+  full_name: string
+  timezone: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface AuthUser {
+  id: number
+  email: string
+  displayName: string
+  fullName: string
+  timezone: string
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuthTokenResponse {
+  access_token: string
+  token_type: 'bearer'
+  expires_in: number
+  user: BackendUser
 }
