@@ -11,6 +11,10 @@ from backend.app.models import Document, DocumentChunk
 from backend.app.providers.llm import LLMProvider, text_terms
 
 
+class RagProviderError(RuntimeError):
+    """A provider failed or returned an unusable response."""
+
+
 def cosine(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
@@ -49,9 +53,18 @@ async def retrieve(
     )
     if document_ids:
         statement = statement.where(Document.id.in_(document_ids))
-    query_embedding = (await provider.embed([query]))[0]
+    rows = list(db.execute(statement))
+    if not rows:
+        return []
+    try:
+        embeddings = await provider.embed([query])
+        if len(embeddings) != 1 or not embeddings[0]:
+            raise ValueError("invalid embedding response")
+        query_embedding = embeddings[0]
+    except Exception as exc:
+        raise RagProviderError("embedding provider unavailable") from exc
     scored: list[dict[str, Any]] = []
-    for chunk, document in db.execute(statement):
+    for chunk, document in rows:
         lexical = lexical_score(query, chunk.content)
         semantic = max(0.0, cosine(query_embedding, chunk.embedding))
         score = 0.65 * lexical + 0.35 * semantic
@@ -91,4 +104,10 @@ async def answer_from_sources(
         f"回答模式：{mode}。只能使用以下资料回答，并在结论后标注 [S编号]。\n"
         f"问题：{question}\n资料：\n{context}"
     )
-    return await provider.chat([{"role": "user", "content": prompt}]), True
+    try:
+        answer = await provider.chat([{"role": "user", "content": prompt}])
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("invalid chat response")
+        return answer, True
+    except Exception as exc:
+        raise RagProviderError("chat provider unavailable") from exc

@@ -143,12 +143,56 @@ class ChatSessionCreate(BaseModel):
     mode: Literal["basic", "exam", "strict", "teacher"] = "strict"
     document_ids: list[int] = Field(default_factory=list)
 
+    @field_validator("title")
+    @classmethod
+    def clean_chat_title(cls, value: str) -> str:
+        return value.strip() or "新对话"
+
+
+class ChatSessionRead(BaseModel):
+    session_id: str
+    course_id: int
+    title: str
+    mode: str
+    document_ids: list[int]
+    created_at: datetime
+    updated_at: datetime
+
+
+class RagCitationRead(BaseModel):
+    source_id: str
+    chunk_id: int
+    document_id: int
+    document_name: str
+    document_version: int
+    page_number: int | None
+    chapter_name: str | None
+    quote: str
+    score: float
+
+
+class ChatMessageRead(BaseModel):
+    id: str
+    role: str
+    content: str
+    citations: list[RagCitationRead]
+    sufficient_evidence: bool | None
+    created_at: datetime
+
 
 class ChatAsk(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     mode: Literal["basic", "exam", "strict", "teacher"] | None = None
     document_ids: list[int] = Field(default_factory=list)
     top_k: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("question")
+    @classmethod
+    def clean_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("question cannot be blank")
+        return value
 
 
 class RagSearch(BaseModel):
@@ -157,6 +201,14 @@ class RagSearch(BaseModel):
     document_ids: list[int] = Field(default_factory=list)
     top_k: int = Field(default=5, ge=1, le=20)
     strict: bool = True
+
+    @field_validator("query")
+    @classmethod
+    def clean_rag_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("query cannot be blank")
+        return value
 
 
 class PlanGenerate(BaseModel):

@@ -100,6 +100,71 @@ export interface LatestDocumentTaskResponse {
   current_step: string | null
 }
 
+export type ChatMode = 'basic' | 'exam' | 'strict' | 'teacher'
+
+export interface ChatSession {
+  session_id: string
+  course_id: number
+  title: string
+  mode: ChatMode
+  document_ids: number[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatSessionListResponse {
+  items: ChatSession[]
+  total: number
+}
+
+export interface ChatSessionCreateRequest {
+  title?: string
+  mode?: ChatMode
+  document_ids?: number[]
+}
+
+export type ChatSessionCreateResponse = ChatSession
+
+export interface ChatAskRequest {
+  question: string
+  mode?: ChatMode
+  document_ids?: number[]
+  top_k?: number
+}
+
+export interface RagCitation {
+  source_id: string
+  chunk_id: number
+  document_id: number
+  document_name: string
+  document_version: number
+  page_number: number | null
+  chapter_name: string | null
+  quote: string
+  score: number
+}
+
+export interface ChatAnswerResponse {
+  message_id: string
+  answer: string
+  sufficient_evidence: boolean
+  citations: RagCitation[]
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  citations: RagCitation[]
+  sufficient_evidence: boolean | null
+  created_at: string
+}
+
+export interface ChatMessageListResponse {
+  items: ChatMessage[]
+  next_cursor: string | null
+}
+
 export type TaskStatus = 'todo' | 'doing' | 'done'
 
 export interface StudyTask {
