@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
@@ -73,6 +74,19 @@ def _version_payload(version: StudyPlanVersion) -> dict:
     }
 
 
+def _plan_payload(plan: StudyPlan, version: StudyPlanVersion) -> dict:
+    return {
+        "plan_id": plan.id,
+        "course_id": plan.course_id,
+        "goal": plan.goal,
+        "start_date": plan.start_date.isoformat(),
+        "end_date": plan.end_date.isoformat(),
+        "active_version": plan.active_version,
+        "plan_status": plan.status,
+        **_version_payload(version),
+    }
+
+
 @router.post("/courses/{course_id}/study-plans/generate")
 def generate_plan(
     course_id: int,
@@ -115,33 +129,53 @@ def generate_plan(
             for point in points
         ],
     )
-    plan = StudyPlan(user_id=current_user.id, course_id=course_id, goal=payload.goal, start_date=payload.start_date, end_date=payload.end_date)
-    db.add(plan)
-    db.flush()
-    version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason="首次生成", summary=f"共安排 {len(skeleton['tasks'])} 项任务。", risks=skeleton["risks"])
-    db.add(version)
-    db.flush()
-    for item in skeleton["tasks"]:
-        db.add(StudyTask(plan_version_id=version.id, user_id=current_user.id, course_id=course_id, knowledge_point_id=item["knowledge_point_id"], scheduled_date=item["scheduled_date"], title=item["title"], task_type=item["task_type"], estimated_minutes=item["estimated_minutes"], priority=item["priority"], difficulty=item["difficulty"]))
-    task = AsyncTask(user_id=current_user.id, task_type="plan_generation", resource_type="study_plan", resource_id=str(plan.id), status="success", progress=100, current_step="completed", result_data={"plan_id": plan.id, "version": 1})
-    db.add(task)
-    db.commit()
+    try:
+        plan = StudyPlan(user_id=current_user.id, course_id=course_id, goal=payload.goal, start_date=payload.start_date, end_date=payload.end_date)
+        db.add(plan)
+        db.flush()
+        version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason="首次生成", summary=f"共安排 {len(skeleton['tasks'])} 项任务。", risks=skeleton["risks"])
+        db.add(version)
+        db.flush()
+        for item in skeleton["tasks"]:
+            db.add(StudyTask(plan_version_id=version.id, user_id=current_user.id, course_id=course_id, knowledge_point_id=item["knowledge_point_id"], scheduled_date=item["scheduled_date"], title=item["title"], task_type=item["task_type"], estimated_minutes=item["estimated_minutes"], priority=item["priority"], difficulty=item["difficulty"]))
+        task = AsyncTask(user_id=current_user.id, task_type="plan_generation", resource_type="study_plan", resource_id=str(plan.id), status="success", progress=100, current_step="completed", result_data={"plan_id": plan.id, "version": 1})
+        db.add(task)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="PLAN_GENERATION_FAILED") from None
     db.refresh(version)
     token = issue_confirmation(settings.jwt_secret, user_id=current_user.id, action="confirm_plan", resource_id=f"{plan.id}:1", payload={"base_version": 0})
-    return ok({"async_task_id": task.public_id, "plan_id": plan.id, "candidate_version": _version_payload(version), "confirmation_token": token})
+    return ok({"async_task_id": task.public_id, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
 
 
 @router.get("/courses/{course_id}/study-plans/current")
-def current_plan(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+def current_plan(course_id: int, db: DBSession, current_user: CurrentUser, settings: AppSettings) -> dict:
     _owned_course(db, course_id, current_user.id)
     plan = db.scalar(select(StudyPlan).where(StudyPlan.course_id == course_id, StudyPlan.user_id == current_user.id).order_by(StudyPlan.created_at.desc()))
     if plan is None:
         raise HTTPException(status_code=404, detail="PLAN_NOT_FOUND")
-    target_version = plan.active_version or max((item.version for item in plan.versions), default=0)
-    version = next((item for item in plan.versions if item.version == target_version), None)
+    candidates = [item for item in plan.versions if item.status == "candidate"]
+    if candidates:
+        version = max(candidates, key=lambda item: item.version)
+    else:
+        version = next((item for item in plan.versions if item.version == plan.active_version), None)
     if version is None:
         raise HTTPException(status_code=404, detail="VERSION_NOT_FOUND")
-    return ok({"plan_id": plan.id, "active_version": plan.active_version, "status": plan.status, **_version_payload(version)})
+    response = _plan_payload(plan, version)
+    if version.status == "candidate":
+        response["expected_base_version"] = plan.active_version
+        response["confirmation_token"] = issue_confirmation(
+            settings.jwt_secret,
+            user_id=current_user.id,
+            action="confirm_plan",
+            resource_id=f"{plan.id}:{version.version}",
+            payload={"base_version": plan.active_version},
+        )
+    else:
+        response["expected_base_version"] = None
+        response["confirmation_token"] = None
+    return ok(response)
 
 
 @router.post("/study-plans/{plan_id}/versions/{version_number}/confirm")
@@ -160,11 +194,26 @@ def confirm_plan(plan_id: int, version_number: int, payload: PlanConfirm, db: DB
     for item in plan.versions:
         if item.status == "active":
             item.status = "superseded"
+    other_plans = list(
+        db.scalars(
+            select(StudyPlan).where(
+                StudyPlan.user_id == current_user.id,
+                StudyPlan.course_id == plan.course_id,
+                StudyPlan.id != plan.id,
+                StudyPlan.status == "active",
+            )
+        )
+    )
+    for other_plan in other_plans:
+        other_plan.status = "superseded"
+        for item in other_plan.versions:
+            if item.status == "active":
+                item.status = "superseded"
     candidate.status = "active"
     plan.active_version = version_number
     plan.status = "active"
     db.commit()
-    return ok({"plan_id": plan.id, "active_version": version_number, "previous_version": previous})
+    return ok({"plan_id": plan.id, "active_version": version_number, "previous_version": previous, "status": plan.status, "version_status": candidate.status})
 
 
 @router.post("/study-plans/{plan_id}/adjustments")
@@ -198,11 +247,25 @@ def plan_versions(plan_id: int, db: DBSession, current_user: CurrentUser) -> dic
 @router.get("/study-tasks/today")
 def today_tasks(db: DBSession, current_user: CurrentUser, course_id: int | None = None, target_date: date | None = None) -> dict:
     day = target_date or date.today()
-    statement = select(StudyTask).where(StudyTask.user_id == current_user.id, StudyTask.scheduled_date == day)
+    if course_id is not None:
+        _owned_course(db, course_id, current_user.id)
+    statement = (
+        select(StudyTask)
+        .join(StudyPlanVersion, StudyPlanVersion.id == StudyTask.plan_version_id)
+        .join(StudyPlan, StudyPlan.id == StudyPlanVersion.plan_id)
+        .where(
+            StudyTask.user_id == current_user.id,
+            StudyTask.scheduled_date == day,
+            StudyPlan.user_id == current_user.id,
+            StudyPlan.status == "active",
+            StudyPlanVersion.status == "active",
+            StudyPlan.active_version == StudyPlanVersion.version,
+        )
+    )
     if course_id is not None:
         statement = statement.where(StudyTask.course_id == course_id)
     tasks = list(db.scalars(statement.order_by(StudyTask.priority.desc())))
-    return ok({"items": [{"id": item.id, "course_id": item.course_id, "title": item.title, "task_type": item.task_type, "estimated_minutes": item.estimated_minutes, "priority": item.priority, "difficulty": item.difficulty, "status": item.status, "scheduled_date": item.scheduled_date.isoformat()} for item in tasks], "total": len(tasks)})
+    return ok({"items": [{"id": item.id, "course_id": item.course_id, "knowledge_point_id": item.knowledge_point_id, "title": item.title, "task_type": item.task_type, "estimated_minutes": item.estimated_minutes, "actual_minutes": item.actual_minutes, "priority": item.priority, "difficulty": item.difficulty, "status": item.status, "scheduled_date": item.scheduled_date.isoformat()} for item in tasks], "total": len(tasks)})
 
 
 @router.post("/study-tasks/{task_id}/complete")
@@ -210,8 +273,28 @@ def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_us
     task = db.scalar(select(StudyTask).where(StudyTask.id == task_id, StudyTask.user_id == current_user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
+    active = db.scalar(
+        select(StudyTask.id)
+        .join(StudyPlanVersion, StudyPlanVersion.id == StudyTask.plan_version_id)
+        .join(StudyPlan, StudyPlan.id == StudyPlanVersion.plan_id)
+        .where(
+            StudyTask.id == task.id,
+            StudyPlan.user_id == current_user.id,
+            StudyPlan.status == "active",
+            StudyPlanVersion.status == "active",
+            StudyPlan.active_version == StudyPlanVersion.version,
+        )
+    )
+    if active is None:
+        raise HTTPException(status_code=409, detail="TASK_NOT_ACTIVE")
     if task.status == "completed":
-        return ok({"task_id": task.id, "status": task.status, "idempotent_replay": True})
+        mastery_score = db.scalar(
+            select(KnowledgeMastery.score).where(
+                KnowledgeMastery.user_id == current_user.id,
+                KnowledgeMastery.knowledge_point_id == task.knowledge_point_id,
+            )
+        ) if task.knowledge_point_id else None
+        return ok({"task_id": task.id, "status": task.status, "actual_minutes": task.actual_minutes, "mastery_score": mastery_score, "idempotent_replay": True})
     task.status = "completed"
     task.actual_minutes = payload.actual_minutes
     task.completed_at = payload.completed_at or datetime.now(timezone.utc)
@@ -236,5 +319,9 @@ def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_us
         mastery.correct_attempts += 1
         mastery.last_studied_at = task.completed_at
         mastery_score = mastery.score
-    db.commit()
-    return ok({"task_id": task.id, "status": task.status, "mastery_score": mastery_score, "idempotent_replay": False})
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="TASK_COMPLETION_FAILED") from None
+    return ok({"task_id": task.id, "status": task.status, "actual_minutes": task.actual_minutes, "mastery_score": mastery_score, "idempotent_replay": False})

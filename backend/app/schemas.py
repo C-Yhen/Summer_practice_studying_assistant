@@ -223,6 +223,29 @@ class PlanGenerate(BaseModel):
     def validate_dates(self) -> PlanGenerate:
         if self.end_date < self.start_date:
             raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 180:
+            raise ValueError("plan date range must not exceed 180 days")
+        self.goal = self.goal.strip()
+        if not self.goal:
+            raise ValueError("goal cannot be blank")
+        default_minutes = self.daily_availability.get("default_minutes", 120)
+        if not 15 <= default_minutes <= 720:
+            raise ValueError("default_minutes must be between 15 and 720")
+        if self.session_minutes > default_minutes:
+            raise ValueError("session_minutes must not exceed default_minutes")
+        for raw_date, minutes in self.daily_availability.items():
+            if raw_date == "default_minutes":
+                continue
+            try:
+                override_date = date.fromisoformat(raw_date)
+            except ValueError as exc:
+                raise ValueError(f"daily availability date is invalid: {raw_date}") from exc
+            if not self.start_date <= override_date <= self.end_date:
+                raise ValueError("daily availability date must be within plan range")
+            if not 0 <= minutes <= 720:
+                raise ValueError("daily availability minutes must be between 0 and 720")
+        if any(day < self.start_date or day > self.end_date for day in self.unavailable_dates):
+            raise ValueError("unavailable_dates must be within plan range")
         return self
 
 
@@ -238,7 +261,7 @@ class PlanConfirm(BaseModel):
 
 
 class TaskComplete(BaseModel):
-    actual_minutes: int = Field(ge=0, le=1440)
+    actual_minutes: int = Field(ge=1, le=1440)
     completed_at: datetime | None = None
 
 

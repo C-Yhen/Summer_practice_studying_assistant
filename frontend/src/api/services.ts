@@ -1,4 +1,4 @@
-import { ApiEnvelopeError, apiClient, mockEnabled, unwrapApiResponse, withMockFallback } from './client'
+import { ApiEnvelopeError, apiClient, isApiError, mockEnabled, unwrapApiResponse, withMockFallback } from './client'
 import { asyncTasks, courses, todayTasks } from '@/data/mock'
 import type {
   AsyncTask,
@@ -17,11 +17,22 @@ import type {
   CourseCreateRequest,
   CourseListItem,
   CourseListResult,
+  CurrentStudyPlanResponse,
   DocumentListResponse,
   DocumentUploadResponse,
   LatestDocumentTaskResponse,
   RagCitation,
+  PlanConfirmRequest,
+  PlanConfirmResponse,
+  StudyPlanGenerateRequest,
+  StudyPlanGenerateResponse,
+  StudyPlanTask,
+  StudyPlanVersion,
   StudyTask,
+  TaskCompleteRequest,
+  TaskCompleteResponse,
+  TodayTask,
+  TodayTaskListResponse,
 } from '@/types'
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
@@ -194,6 +205,161 @@ function parseChatAnswer(value: unknown): ChatAnswerResponse {
   }
 }
 
+function parseStudyPlanTask(value: unknown): StudyPlanTask {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.id)
+    || typeof value.scheduled_date !== 'string'
+    || (value.knowledge_point_id !== null && !Number.isInteger(value.knowledge_point_id))
+    || typeof value.title !== 'string'
+    || typeof value.task_type !== 'string'
+    || !Number.isInteger(value.estimated_minutes)
+    || (value.actual_minutes !== null && !Number.isInteger(value.actual_minutes))
+    || typeof value.priority !== 'number'
+    || typeof value.difficulty !== 'string'
+    || typeof value.status !== 'string'
+  ) {
+    throw new ApiEnvelopeError('后端返回的计划任务信息不完整')
+  }
+  return value as unknown as StudyPlanTask
+}
+
+function parseStudyPlanVersion(value: unknown): StudyPlanVersion {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.version)
+    || typeof value.status !== 'string'
+    || (value.reason !== null && typeof value.reason !== 'string')
+    || (value.summary !== null && typeof value.summary !== 'string')
+    || !Array.isArray(value.risks)
+    || !value.risks.every((risk) => typeof risk === 'string')
+    || !isRecord(value.diff)
+    || !Array.isArray(value.tasks)
+  ) {
+    throw new ApiEnvelopeError('后端返回的计划版本信息不完整')
+  }
+  return {
+    version: value.version as number,
+    status: value.status,
+    reason: value.reason as string | null,
+    summary: value.summary as string | null,
+    risks: value.risks as string[],
+    diff: value.diff,
+    tasks: value.tasks.map(parseStudyPlanTask),
+  }
+}
+
+function parseGeneratedPlan(value: unknown): StudyPlanGenerateResponse {
+  if (
+    !isRecord(value)
+    || typeof value.async_task_id !== 'string'
+    || !Number.isInteger(value.plan_id)
+    || !Number.isInteger(value.course_id)
+    || typeof value.goal !== 'string'
+    || typeof value.start_date !== 'string'
+    || typeof value.end_date !== 'string'
+    || !Number.isInteger(value.expected_base_version)
+    || typeof value.confirmation_token !== 'string'
+  ) {
+    throw new ApiEnvelopeError('后端返回的候选计划信息不完整')
+  }
+  return {
+    async_task_id: value.async_task_id,
+    plan_id: value.plan_id as number,
+    course_id: value.course_id as number,
+    goal: value.goal,
+    start_date: value.start_date,
+    end_date: value.end_date,
+    expected_base_version: value.expected_base_version as number,
+    candidate_version: parseStudyPlanVersion(value.candidate_version),
+    confirmation_token: value.confirmation_token,
+  }
+}
+
+function parseCurrentPlan(value: unknown): CurrentStudyPlanResponse {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.plan_id)
+    || !Number.isInteger(value.course_id)
+    || typeof value.goal !== 'string'
+    || typeof value.start_date !== 'string'
+    || typeof value.end_date !== 'string'
+    || !Number.isInteger(value.active_version)
+    || typeof value.plan_status !== 'string'
+    || (value.expected_base_version !== null && !Number.isInteger(value.expected_base_version))
+    || (value.confirmation_token !== null && typeof value.confirmation_token !== 'string')
+  ) {
+    throw new ApiEnvelopeError('后端返回的当前计划信息不完整')
+  }
+  return {
+    plan_id: value.plan_id as number,
+    course_id: value.course_id as number,
+    goal: value.goal,
+    start_date: value.start_date,
+    end_date: value.end_date,
+    active_version: value.active_version as number,
+    plan_status: value.plan_status,
+    expected_base_version: value.expected_base_version as number | null,
+    confirmation_token: value.confirmation_token as string | null,
+    ...parseStudyPlanVersion(value),
+  }
+}
+
+function parsePlanConfirmation(value: unknown): PlanConfirmResponse {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.plan_id)
+    || !Number.isInteger(value.active_version)
+    || !Number.isInteger(value.previous_version)
+    || typeof value.status !== 'string'
+    || typeof value.version_status !== 'string'
+  ) {
+    throw new ApiEnvelopeError('后端返回的计划确认结果不完整')
+  }
+  return value as unknown as PlanConfirmResponse
+}
+
+function parseTodayTask(value: unknown): TodayTask {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.id)
+    || !Number.isInteger(value.course_id)
+    || (value.knowledge_point_id !== null && !Number.isInteger(value.knowledge_point_id))
+    || typeof value.title !== 'string'
+    || typeof value.task_type !== 'string'
+    || !Number.isInteger(value.estimated_minutes)
+    || (value.actual_minutes !== null && !Number.isInteger(value.actual_minutes))
+    || typeof value.priority !== 'number'
+    || typeof value.difficulty !== 'string'
+    || typeof value.status !== 'string'
+    || typeof value.scheduled_date !== 'string'
+  ) {
+    throw new ApiEnvelopeError('后端返回的今日任务信息不完整')
+  }
+  return value as unknown as TodayTask
+}
+
+function parseTodayTaskList(value: unknown): TodayTaskListResponse {
+  if (!isRecord(value) || !Array.isArray(value.items) || typeof value.total !== 'number') {
+    throw new ApiEnvelopeError('后端返回的今日任务列表结构无法识别')
+  }
+  return { items: value.items.map(parseTodayTask), total: value.total }
+}
+
+function parseTaskCompletion(value: unknown): TaskCompleteResponse {
+  if (
+    !isRecord(value)
+    || !Number.isInteger(value.task_id)
+    || typeof value.status !== 'string'
+    || (value.actual_minutes !== null && !Number.isInteger(value.actual_minutes))
+    || (value.mastery_score !== null && typeof value.mastery_score !== 'number')
+    || typeof value.idempotent_replay !== 'boolean'
+  ) {
+    throw new ApiEnvelopeError('后端返回的任务完成结果不完整')
+  }
+  return value as unknown as TaskCompleteResponse
+}
+
 const mockDocuments: BackendDocument[] = [{
   id: 1001,
   course_id: mockCourseRecords[0]?.id || 1,
@@ -210,6 +376,10 @@ const mockTasks = new Map<string, BackendAsyncTask>()
 const mockDocumentTaskIds = new Map<number, string>()
 const mockChatSessions: ChatSession[] = []
 const mockChatMessages = new Map<string, ChatMessage[]>()
+const mockPlans = new Map<number, CurrentStudyPlanResponse>()
+const mockTodayTaskItems: TodayTask[] = []
+let mockPlanId = 2000
+let mockPlanTaskId = 3000
 
 export const courseApi = {
   async list(): Promise<CourseListResult> {
@@ -444,6 +614,111 @@ export const chatApi = {
       return { message_id: messages[messages.length - 1].id, answer, sufficient_evidence: sufficient, citations }
     }
     return parseChatAnswer(unwrapApiResponse<unknown>(await apiClient.post(`/chat-sessions/${encodeURIComponent(sessionId)}/messages`, payload)))
+  },
+}
+
+export const planApi = {
+  async getCurrent(courseId: number): Promise<CurrentStudyPlanResponse | null> {
+    if (mockEnabled) {
+      await mockDelay()
+      return structuredClone(mockPlans.get(courseId) || null)
+    }
+    try {
+      return parseCurrentPlan(unwrapApiResponse<unknown>(await apiClient.get(`/courses/${courseId}/study-plans/current`)))
+    } catch (error) {
+      if (isApiError(error, 404, 'PLAN_NOT_FOUND')) return null
+      throw error
+    }
+  },
+
+  async generate(courseId: number, payload: StudyPlanGenerateRequest): Promise<StudyPlanGenerateResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const planId = ++mockPlanId
+      const token = `mock-confirm-${planId}-${Date.now()}`
+      const dates: string[] = []
+      const unavailable = new Set(payload.unavailable_dates || [])
+      const cursor = new Date(`${payload.start_date}T00:00:00`)
+      const end = new Date(`${payload.end_date}T00:00:00`)
+      while (cursor <= end) {
+        const day = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`
+        if (!unavailable.has(day)) dates.push(day)
+        cursor.setDate(cursor.getDate() + 1)
+      }
+      const tasks: StudyPlanTask[] = dates.slice(0, 3).map((scheduledDate, index) => ({
+        id: ++mockPlanTaskId,
+        scheduled_date: scheduledDate,
+        knowledge_point_id: index + 1,
+        title: `演示规则任务 ${index + 1}`,
+        task_type: index === 2 ? '间隔复习' : '学习新知识',
+        estimated_minutes: payload.session_minutes,
+        actual_minutes: null,
+        priority: Number((0.9 - index * 0.1).toFixed(2)),
+        difficulty: index === 0 ? 'basic' : 'intermediate',
+        status: 'todo',
+      }))
+      const risks = tasks.length ? [] : ['可学习日期为空，无法安排任务。']
+      const version: StudyPlanVersion = { version: 1, status: 'candidate', reason: '首次生成', summary: `共安排 ${tasks.length} 项任务。`, risks, diff: {}, tasks }
+      mockPlans.set(courseId, {
+        plan_id: planId,
+        course_id: courseId,
+        goal: payload.goal,
+        start_date: payload.start_date,
+        end_date: payload.end_date,
+        active_version: 0,
+        plan_status: 'draft',
+        expected_base_version: 0,
+        confirmation_token: token,
+        ...version,
+      })
+      return { async_task_id: `mock-plan-task-${planId}`, plan_id: planId, course_id: courseId, goal: payload.goal, start_date: payload.start_date, end_date: payload.end_date, expected_base_version: 0, candidate_version: version, confirmation_token: token }
+    }
+    return parseGeneratedPlan(unwrapApiResponse<unknown>(await apiClient.post(`/courses/${courseId}/study-plans/generate`, payload)))
+  },
+
+  async confirm(planId: number, version: number, payload: PlanConfirmRequest): Promise<PlanConfirmResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const entry = [...mockPlans.values()].find((plan) => plan.plan_id === planId && plan.version === version)
+      if (!entry || entry.status !== 'candidate' || entry.confirmation_token !== payload.confirmation_token || entry.active_version !== payload.expected_base_version) {
+        throw new ApiEnvelopeError('演示计划已变化，请重新加载')
+      }
+      mockTodayTaskItems.splice(0, mockTodayTaskItems.length, ...mockTodayTaskItems.filter((task) => task.course_id !== entry.course_id))
+      mockTodayTaskItems.push(...entry.tasks.map((task) => ({ ...task, course_id: entry.course_id })))
+      entry.active_version = version
+      entry.plan_status = 'active'
+      entry.status = 'active'
+      entry.expected_base_version = null
+      entry.confirmation_token = null
+      return { plan_id: planId, active_version: version, previous_version: payload.expected_base_version, status: 'active', version_status: 'active' }
+    }
+    return parsePlanConfirmation(unwrapApiResponse<unknown>(await apiClient.post(`/study-plans/${planId}/versions/${version}/confirm`, payload)))
+  },
+}
+
+export const studyTaskApi = {
+  async listToday(params: { target_date: string; course_id?: number }): Promise<TodayTaskListResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const items = mockTodayTaskItems.filter((task) => task.scheduled_date === params.target_date && (params.course_id === undefined || task.course_id === params.course_id))
+      return structuredClone({ items, total: items.length })
+    }
+    const search = new URLSearchParams({ target_date: params.target_date })
+    if (params.course_id !== undefined) search.set('course_id', String(params.course_id))
+    return parseTodayTaskList(unwrapApiResponse<unknown>(await apiClient.get(`/study-tasks/today?${search.toString()}`)))
+  },
+
+  async complete(taskId: number, payload: TaskCompleteRequest): Promise<TaskCompleteResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const task = mockTodayTaskItems.find((item) => item.id === taskId)
+      if (!task) throw new ApiEnvelopeError('演示任务不存在或尚未生效')
+      if (task.status === 'completed') return { task_id: task.id, status: task.status, actual_minutes: task.actual_minutes, mastery_score: 0.45, idempotent_replay: true }
+      task.status = 'completed'
+      task.actual_minutes = payload.actual_minutes
+      return { task_id: task.id, status: task.status, actual_minutes: task.actual_minutes, mastery_score: 0.45, idempotent_replay: false }
+    }
+    return parseTaskCompletion(unwrapApiResponse<unknown>(await apiClient.post(`/study-tasks/${taskId}/complete`, payload)))
   },
 }
 

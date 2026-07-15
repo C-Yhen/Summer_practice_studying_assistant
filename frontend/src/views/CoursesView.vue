@@ -62,6 +62,7 @@ async function loadCourses() {
 }
 
 async function createCourse() {
+  if (creating.value) return
   const name = form.name.trim()
   if (!name) return ElMessage.warning('请填写课程名称')
 

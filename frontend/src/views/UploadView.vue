@@ -90,6 +90,7 @@ function handleRemove() {
 }
 
 async function startUpload() {
+  if (uploading.value) return
   if (courseId.value === null) return ElMessage.warning('请选择归属课程')
   if (!selectedFile.value) return ElMessage.warning('请选择一个文件')
   const validationError = validateFile(selectedFile.value)

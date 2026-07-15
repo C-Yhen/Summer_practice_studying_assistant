@@ -165,6 +165,107 @@ export interface ChatMessageListResponse {
   next_cursor: string | null
 }
 
+export interface StudyPlanGenerateRequest {
+  start_date: string
+  end_date: string
+  daily_availability: Record<string, number>
+  unavailable_dates?: string[]
+  session_minutes: number
+  goal: string
+}
+
+export interface StudyPlanTask {
+  id: number
+  scheduled_date: string
+  knowledge_point_id: number | null
+  title: string
+  task_type: string
+  estimated_minutes: number
+  actual_minutes: number | null
+  priority: number
+  difficulty: string
+  status: string
+}
+
+export interface StudyPlanVersion {
+  version: number
+  status: string
+  reason: string | null
+  summary: string | null
+  risks: string[]
+  diff: Record<string, unknown>
+  tasks: StudyPlanTask[]
+}
+
+export interface StudyPlanGenerateResponse {
+  async_task_id: string
+  plan_id: number
+  course_id: number
+  goal: string
+  start_date: string
+  end_date: string
+  expected_base_version: number
+  candidate_version: StudyPlanVersion
+  confirmation_token: string
+}
+
+export interface CurrentStudyPlanResponse extends StudyPlanVersion {
+  plan_id: number
+  course_id: number
+  goal: string
+  start_date: string
+  end_date: string
+  active_version: number
+  plan_status: string
+  expected_base_version: number | null
+  confirmation_token: string | null
+}
+
+export interface PlanConfirmRequest {
+  expected_base_version: number
+  confirmation_token: string
+}
+
+export interface PlanConfirmResponse {
+  plan_id: number
+  active_version: number
+  previous_version: number
+  status: string
+  version_status: string
+}
+
+export interface TodayTask {
+  id: number
+  course_id: number
+  knowledge_point_id: number | null
+  title: string
+  task_type: string
+  estimated_minutes: number
+  actual_minutes: number | null
+  priority: number
+  difficulty: string
+  status: string
+  scheduled_date: string
+}
+
+export interface TodayTaskListResponse {
+  items: TodayTask[]
+  total: number
+}
+
+export interface TaskCompleteRequest {
+  actual_minutes: number
+  completed_at?: string
+}
+
+export interface TaskCompleteResponse {
+  task_id: number
+  status: string
+  actual_minutes: number | null
+  mastery_score: number | null
+  idempotent_replay: boolean
+}
+
 export type TaskStatus = 'todo' | 'doing' | 'done'
 
 export interface StudyTask {
