@@ -1,9 +1,27 @@
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from threading import Barrier
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 
-from backend.app.models import KnowledgeMastery, LearningRecord, StudyPlanVersion
+from backend.app.api.v1.plans import complete_task
+from backend.app.database import Database
+from backend.app.models import (
+    Course,
+    KnowledgeMastery,
+    KnowledgePoint,
+    LearningRecord,
+    StudyPlan,
+    StudyPlanVersion,
+    StudyTask,
+    User,
+)
+from backend.app.schemas import TaskComplete
+from backend.app.security import hash_password
 
 
 def _course(client: TestClient, headers: dict[str, str], name: str) -> int:
@@ -281,3 +299,137 @@ def test_plan_input_validation_and_no_available_dates(
     )
     assert unavailable["candidate_version"]["tasks"] == []
     assert unavailable["candidate_version"]["risks"]
+
+
+def test_postgresql_concurrent_task_completion_is_idempotent() -> None:
+    database_url = os.getenv("DATABASE_URL", "")
+    if not database_url.startswith("postgresql"):
+        pytest.skip("PostgreSQL is required to verify SELECT FOR UPDATE behavior")
+
+    database = Database(database_url)
+    database.create_all()
+    inspector = inspect(database.engine)
+    constraint_names = {
+        item["name"] for item in inspector.get_unique_constraints("learning_records")
+    }
+    index_names = {item["name"] for item in inspector.get_indexes("learning_records")}
+    assert "uq_learning_records_task_id" in constraint_names | index_names
+    unique = uuid.uuid4().hex
+    with database.session_factory() as db:
+        user = User(
+            email=f"concurrent-plan-{unique}@example.com",
+            display_name="Concurrent Plan Test",
+            password_hash=hash_password("concurrent-plan-password"),
+        )
+        db.add(user)
+        db.flush()
+        course = Course(owner_id=user.id, name=f"Concurrent Plan {unique}")
+        db.add(course)
+        db.flush()
+        point = KnowledgePoint(
+            course_id=course.id,
+            name="Concurrent mastery point",
+            importance=1.0,
+            estimated_minutes=45,
+        )
+        db.add(point)
+        db.flush()
+        plan = StudyPlan(
+            user_id=user.id,
+            course_id=course.id,
+            goal="Verify row locking",
+            start_date=date.today(),
+            end_date=date.today(),
+            active_version=1,
+            status="active",
+        )
+        db.add(plan)
+        db.flush()
+        version = StudyPlanVersion(
+            plan_id=plan.id,
+            version=1,
+            status="active",
+            summary="Concurrent completion test",
+        )
+        db.add(version)
+        db.flush()
+        task = StudyTask(
+            plan_version_id=version.id,
+            user_id=user.id,
+            course_id=course.id,
+            knowledge_point_id=point.id,
+            scheduled_date=date.today(),
+            title="Complete exactly once",
+            task_type="study",
+            estimated_minutes=45,
+            priority=1.0,
+            difficulty="basic",
+        )
+        db.add(task)
+        db.commit()
+        user_id, course_id, point_id, task_id = user.id, course.id, point.id, task.id
+
+    barrier = Barrier(2)
+
+    def submit(actual_minutes: int) -> tuple[int, dict]:
+        with database.session_factory() as db:
+            current_user = db.get(User, user_id)
+            assert current_user is not None
+            barrier.wait(timeout=10)
+            response = complete_task(
+                task_id,
+                TaskComplete(actual_minutes=actual_minutes),
+                db,
+                current_user,
+            )
+            return actual_minutes, response["data"]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(submit, (31, 47)))
+
+        first_results = [item for item in results if item[1]["idempotent_replay"] is False]
+        replay_results = [item for item in results if item[1]["idempotent_replay"] is True]
+        assert len(first_results) == 1
+        assert len(replay_results) == 1
+        first_minutes = first_results[0][0]
+        assert first_results[0][1]["actual_minutes"] == first_minutes
+        assert replay_results[0][1]["actual_minutes"] == first_minutes
+
+        with database.session_factory() as db:
+            persisted_task = db.get(StudyTask, task_id)
+            assert persisted_task is not None
+            assert persisted_task.actual_minutes == first_minutes
+            records = list(db.scalars(select(LearningRecord).where(LearningRecord.task_id == task_id)))
+            assert len(records) == 1
+            assert records[0].duration_seconds == first_minutes * 60
+            mastery = db.scalar(
+                select(KnowledgeMastery).where(
+                    KnowledgeMastery.user_id == user_id,
+                    KnowledgeMastery.knowledge_point_id == point_id,
+                )
+            )
+            assert mastery is not None
+            assert mastery.attempts == 1
+            assert mastery.score == 0.405
+
+            db.add_all(
+                [
+                    LearningRecord(user_id=user_id, course_id=course_id, task_id=None, duration_seconds=60),
+                    LearningRecord(user_id=user_id, course_id=course_id, task_id=None, duration_seconds=120),
+                ]
+            )
+            db.commit()
+            assert db.scalar(
+                select(func.count(LearningRecord.id)).where(
+                    LearningRecord.user_id == user_id,
+                    LearningRecord.task_id.is_(None),
+                )
+            ) == 2
+    finally:
+        with database.session_factory() as db:
+            user = db.get(User, user_id)
+            if user is not None:
+                db.delete(user)
+                db.commit()
+        database.engine.dispose()

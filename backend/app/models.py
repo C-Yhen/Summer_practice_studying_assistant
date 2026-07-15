@@ -335,6 +335,9 @@ class StudyTask(TimestampMixin, Base):
 
 class LearningRecord(TimestampMixin, Base):
     __tablename__ = "learning_records"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_learning_records_task_id"),
+    )
 
     id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))

@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
@@ -270,7 +270,11 @@ def today_tasks(db: DBSession, current_user: CurrentUser, course_id: int | None 
 
 @router.post("/study-tasks/{task_id}/complete")
 def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_user: CurrentUser) -> dict:
-    task = db.scalar(select(StudyTask).where(StudyTask.id == task_id, StudyTask.user_id == current_user.id))
+    task = db.scalar(
+        select(StudyTask)
+        .where(StudyTask.id == task_id, StudyTask.user_id == current_user.id)
+        .with_for_update()
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
     active = db.scalar(
@@ -321,6 +325,23 @@ def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_us
         mastery_score = mastery.score
     try:
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        persisted = db.scalar(
+            select(StudyTask).where(
+                StudyTask.id == task_id,
+                StudyTask.user_id == current_user.id,
+            )
+        )
+        if persisted is not None and persisted.status == "completed":
+            persisted_mastery_score = db.scalar(
+                select(KnowledgeMastery.score).where(
+                    KnowledgeMastery.user_id == current_user.id,
+                    KnowledgeMastery.knowledge_point_id == persisted.knowledge_point_id,
+                )
+            ) if persisted.knowledge_point_id else None
+            return ok({"task_id": persisted.id, "status": persisted.status, "actual_minutes": persisted.actual_minutes, "mastery_score": persisted_mastery_score, "idempotent_replay": True})
+        raise HTTPException(status_code=500, detail="TASK_COMPLETION_FAILED") from None
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="TASK_COMPLETION_FAILED") from None

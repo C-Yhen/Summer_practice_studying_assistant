@@ -31,8 +31,10 @@ class Database:
 
     def create_all(self) -> None:
         from backend.app import models  # noqa: F401
+        from backend.app.migrations import apply_schema_migrations
 
         Base.metadata.create_all(self.engine)
+        apply_schema_migrations(self.engine)
 
     def drop_all(self) -> None:
         Base.metadata.drop_all(self.engine)
