@@ -68,6 +68,9 @@ def test_course_isolation_between_users(
         json={"email": "second@example.com", "password": "second-password"},
     ).json()["data"]
     second_headers = {"Authorization": f"Bearer {login['access_token']}"}
+    second_listing = client.get("/api/v1/courses", headers=second_headers)
+    assert second_listing.status_code == 200
+    assert second_listing.json()["data"] == {"items": [], "total": 0}
     assert (
         client.get(f"/api/v1/courses/{course['id']}", headers=second_headers).status_code
         == 404
@@ -80,3 +83,17 @@ def test_course_isolation_between_users(
         ).status_code
         == 404
     )
+
+
+def test_course_list_requires_auth_and_blank_name_is_rejected(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    assert client.get("/api/v1/courses").status_code == 401
+    assert client.post("/api/v1/courses", json={"name": "No Auth"}).status_code == 401
+
+    blank = client.post(
+        "/api/v1/courses",
+        headers=auth_headers,
+        json={"name": "   "},
+    )
+    assert blank.status_code == 422
