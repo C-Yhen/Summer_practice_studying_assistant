@@ -57,6 +57,49 @@ export interface CourseListResult {
   total: number
 }
 
+export interface BackendDocument {
+  id: number
+  course_id: number
+  title: string
+  file_type: string
+  current_version: number
+  status: string
+  page_count: number | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DocumentListResponse {
+  items: BackendDocument[]
+  total: number
+}
+
+export interface DocumentUploadResponse {
+  document: BackendDocument
+  async_task_id: string
+}
+
+export interface BackendAsyncTask {
+  task_id: string
+  task_type: string
+  status: string
+  progress: number
+  current_step: string | null
+  result_data: Record<string, unknown> | null
+  error_message: string | null
+  retry_count: number
+  cancel_requested: boolean
+  created_at: string
+}
+
+export interface LatestDocumentTaskResponse {
+  task_id: string
+  status: string
+  progress: number
+  current_step: string | null
+}
+
 export type TaskStatus = 'todo' | 'doing' | 'done'
 
 export interface StudyTask {

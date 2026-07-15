@@ -92,6 +92,8 @@ async def process_document(
             cleaned = clean_text(raw)
             for chunk in split_text(cleaned):
                 pending.append((page_number, chunk, chapter_for(chunk)))
+        if not pending:
+            raise ValueError("DOCUMENT_TEXT_EMPTY")
 
         version.status = "embedding"
         if target_version == document.current_version:

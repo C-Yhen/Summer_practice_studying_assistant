@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 
 from backend.app.api.v1.courses import _owned_course
@@ -37,54 +38,80 @@ async def upload_document(
     current_user: CurrentUser,
     settings: AppSettings,
     file: UploadFile = File(...),
-    title: str | None = None,
+    title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> dict:
     _owned_course(db, course_id, current_user.id)
-    filename = Path(file.filename or "document").name
+    filename = Path((file.filename or "document").replace("\\", "/")).name or "document"
     extension = Path(filename).suffix.lower().lstrip(".")
     if extension not in ALLOWED_TYPES:
         raise HTTPException(status_code=415, detail="FILE_TYPE_UNSUPPORTED")
     content = await file.read(settings.max_upload_bytes + 1)
     if len(content) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="FILE_TOO_LARGE")
+    if not content:
+        raise HTTPException(status_code=422, detail="FILE_EMPTY")
+    resolved_title = (title or filename).strip() or filename
+    if len(resolved_title) > 255:
+        raise HTTPException(status_code=422, detail="DOCUMENT_TITLE_TOO_LONG")
     directory = settings.upload_dir / str(course_id)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{uuid.uuid4().hex}.{extension}"
-    target.write_bytes(content)
     document = Document(
         course_id=course_id,
-        title=(title or filename).strip(),
+        title=resolved_title,
         file_type="md" if extension == "markdown" else extension,
         file_path=str(target.resolve()),
         status="uploaded",
     )
-    db.add(document)
-    db.flush()
-    db.add(
-        DocumentVersion(
+    try:
+        target.write_bytes(content)
+        db.add(document)
+        db.flush()
+        version = DocumentVersion(
             document_id=document.id,
             version_no=1,
             file_path=document.file_path,
             status="uploaded",
         )
-    )
-    task = AsyncTask(
-        user_id=current_user.id,
-        task_type="document_parse",
-        resource_type="document",
-        resource_id=str(document.id),
-        input_data={"document_id": document.id, "version": document.current_version},
-    )
-    db.add(task)
-    db.commit()
+        db.add(version)
+        task = AsyncTask(
+            user_id=current_user.id,
+            task_type="document_parse",
+            resource_type="document",
+            resource_id=str(document.id),
+            input_data={"document_id": document.id, "version": document.current_version},
+        )
+        db.add(task)
+        db.commit()
+    except Exception:
+        db.rollback()
+        target.unlink(missing_ok=True)
+        raise
     db.refresh(document)
     db.refresh(task)
     if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
-        await process_document(db, document, task, get_llm_provider(settings))
+        try:
+            await process_document(db, document, task, get_llm_provider(settings))
+        except Exception:
+            # process_document persists a consistent failed document/version/task state.
+            db.refresh(document)
+            db.refresh(task)
     else:
         from backend.app.tasks.jobs import process_document_job
 
-        process_document_job.delay(document.id, task.public_id)
+        try:
+            process_document_job.delay(document.id, task.public_id)
+        except Exception as exc:
+            document.status = "failed"
+            document.error_message = f"TASK_DISPATCH_FAILED: {exc}"
+            version.status = "failed"
+            version.error_message = document.error_message
+            task.status = "failed"
+            task.current_step = "dispatch_failed"
+            task.error_message = document.error_message
+            db.commit()
+            db.refresh(document)
+            db.refresh(task)
     return ok({
         "document": DocumentRead.model_validate(document).model_dump(mode="json"),
         "async_task_id": task.public_id,

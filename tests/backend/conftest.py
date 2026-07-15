@@ -9,12 +9,14 @@ from backend.app.main import create_app
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(tmp_path) -> TestClient:
     settings = Settings(
         database_url="sqlite://",
         jwt_secret="test-secret-that-is-long-enough",
         auto_create_tables=True,
         cors_origins=[],
+        sync_document_processing=True,
+        upload_dir=tmp_path / "uploads",
     )
     database = Database(settings.database_url)
     app = create_app(settings=settings, database=database)

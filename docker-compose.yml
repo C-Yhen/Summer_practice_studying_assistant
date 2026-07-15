@@ -48,6 +48,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       UPLOAD_DIR: /app/backend/storage/uploads
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -83,6 +84,12 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       UPLOAD_DIR: /app/backend/storage/uploads
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-}
     volumes:
       - uploads:/app/backend/storage/uploads
     depends_on:

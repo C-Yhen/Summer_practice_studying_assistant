@@ -1,54 +1,346 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Check, Clock, Document, RefreshRight, VideoPause } from '@element-plus/icons-vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Document, RefreshRight, Upload } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
-import { subscribeTaskProgress } from '@/api/taskSocket'
+import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
+import { asyncTaskApi, courseApi, documentApi } from '@/api/services'
+import type { BackendAsyncTask, BackendDocument, CourseListItem } from '@/types'
 
-const progress = ref(72)
-const stepIndex = computed(() => progress.value < 15 ? 0 : progress.value < 32 ? 1 : progress.value < 50 ? 2 : progress.value < 78 ? 3 : 4)
-const stages = ['解析文档结构', '文本清洗与切块', '生成 Embedding', '写入 pgvector', '建立索引并收尾']
-let timer: number | undefined
-let unsubscribe: () => void = () => {}
-onMounted(() => {
-  timer = window.setInterval(() => { if (progress.value < 88) progress.value += 1 }, 1800)
-  unsubscribe = subscribeTaskProgress('tsk_20260714_a81f', (message) => { progress.value = message.progress })
-})
-onBeforeUnmount(() => { if (timer) window.clearInterval(timer); unsubscribe() })
-const rows = [
-  { name: '数据库系统概论（第6版）.pdf', version: 'v2', size: '18.6 MB', status: 'processing', progress: 72, chunks: '865 / 1,204', updated: '刚刚' },
-  { name: '数据库课程讲义-范式.pptx', version: 'v1', size: '8.2 MB', status: 'success', progress: 100, chunks: '186', updated: '昨天 21:20' },
-  { name: '期末复习重点.md', version: 'v3', size: '126 KB', status: 'success', progress: 100, chunks: '48', updated: '昨天 19:12' },
-  { name: '事务与并发控制.docx', version: 'v1', size: '3.4 MB', status: 'queued', progress: 0, chunks: '—', updated: '排队 2 分钟' },
+const POLL_INTERVAL_MS = 1500
+const MAX_POLL_FAILURES = 3
+const TERMINAL_STATUSES = new Set(['success', 'failed', 'cancelled'])
+const STEP_LABELS: Record<string, string> = {
+  queued: '等待处理',
+  worker_started: '任务已开始',
+  extracting: '提取文本',
+  chunking: '清洗与切块',
+  embedding: '生成向量',
+  completed: '处理完成',
+  cancelled_by_user: '用户已取消',
+}
+const PIPELINE_STAGES = [
+  { key: 'queued', label: '等待处理' },
+  { key: 'worker_started', label: '任务启动' },
+  { key: 'extracting', label: '提取文本' },
+  { key: 'chunking', label: '清洗与切块' },
+  { key: 'embedding', label: '生成向量' },
+  { key: 'completed', label: '处理完成' },
 ]
+
+const route = useRoute()
+const router = useRouter()
+const courses = ref<CourseListItem[]>([])
+const selectedCourseId = ref<number | null>(null)
+const coursesLoading = ref(false)
+const coursesError = ref('')
+const documents = ref<BackendDocument[]>([])
+const documentsLoading = ref(false)
+const documentsError = ref('')
+const activeDocument = ref<BackendDocument | null>(null)
+const documentError = ref('')
+const task = ref<BackendAsyncTask | null>(null)
+const activeTaskId = ref('')
+const taskError = ref('')
+const polling = ref(false)
+let pollTimer: number | undefined
+let pollFailures = 0
+let initializationVersion = 0
+
+const selectedCourse = computed(() => courses.value.find((course) => course.id === selectedCourseId.value) || null)
+const progress = computed(() => Math.min(100, Math.max(0, Math.round(task.value?.progress || 0))))
+const chunkCount = computed(() => {
+  const value = task.value?.result_data?.chunk_count
+  return typeof value === 'number' ? value : null
+})
+const currentStepLabel = computed(() => {
+  const step = task.value?.current_step
+  return step ? STEP_LABELS[step] || step : '暂无步骤信息'
+})
+const currentStageIndex = computed(() => {
+  if (!task.value) return -1
+  if (task.value.status === 'success') return PIPELINE_STAGES.length - 1
+  return PIPELINE_STAGES.findIndex((stage) => stage.key === task.value?.current_step)
+})
+const refreshLabel = computed(() => {
+  if (taskError.value) return '状态读取失败'
+  if (task.value && TERMINAL_STATUSES.has(task.value.status)) return '处理已停止'
+  return polling.value ? '自动刷新中' : '未启动自动刷新'
+})
+
+function parsePositiveId(value: unknown): number | null {
+  const raw = Array.isArray(value) ? value[0] : value
+  const parsed = typeof raw === 'string' ? Number(raw) : NaN
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function parseTaskId(value: unknown): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
+function documentErrorMessage(error: unknown, fallback: string) {
+  return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
+}
+
+function stopPolling() {
+  if (pollTimer !== undefined) window.clearTimeout(pollTimer)
+  pollTimer = undefined
+  polling.value = false
+}
+
+function schedulePoll(taskId: string) {
+  stopPolling()
+  if (!task.value || TERMINAL_STATUSES.has(task.value.status) || activeTaskId.value !== taskId) return
+  polling.value = true
+  pollTimer = window.setTimeout(() => void readTask(taskId, true), POLL_INTERVAL_MS)
+}
+
+async function loadCourses() {
+  coursesLoading.value = true
+  coursesError.value = ''
+  try {
+    const result = await courseApi.list()
+    courses.value = result.items.filter((course) => !course.archived)
+  } catch (error) {
+    courses.value = []
+    coursesError.value = documentErrorMessage(error, '课程列表加载失败')
+  } finally {
+    coursesLoading.value = false
+  }
+}
+
+async function loadDocuments(courseId: number) {
+  documentsLoading.value = true
+  documentsError.value = ''
+  try {
+    const result = await documentApi.list(courseId)
+    if (selectedCourseId.value === courseId) documents.value = result.items
+  } catch (error) {
+    if (selectedCourseId.value === courseId) {
+      documents.value = []
+      documentsError.value = documentErrorMessage(error, '文档列表加载失败')
+    }
+  } finally {
+    if (selectedCourseId.value === courseId) documentsLoading.value = false
+  }
+}
+
+async function refreshActiveDocument(documentId: number) {
+  documentError.value = ''
+  try {
+    const result = await documentApi.get(documentId)
+    if (activeDocument.value?.id === documentId || activeDocument.value === null) activeDocument.value = result
+  } catch (error) {
+    documentError.value = documentErrorMessage(error, '文档详情读取失败')
+  }
+}
+
+async function readTask(taskId: string, isPoll = false) {
+  try {
+    const result = await asyncTaskApi.get(taskId)
+    if (activeTaskId.value !== taskId) return
+    task.value = result
+    taskError.value = ''
+    pollFailures = 0
+    if (TERMINAL_STATUSES.has(result.status)) {
+      stopPolling()
+      if (activeDocument.value) void refreshActiveDocument(activeDocument.value.id)
+      if (selectedCourseId.value) void loadDocuments(selectedCourseId.value)
+    } else {
+      schedulePoll(taskId)
+    }
+  } catch (error) {
+    if (activeTaskId.value !== taskId) return
+    pollFailures += 1
+    taskError.value = documentErrorMessage(error, '任务状态读取失败')
+    if (pollFailures >= MAX_POLL_FAILURES || !isPoll) {
+      stopPolling()
+    } else {
+      schedulePoll(taskId)
+    }
+  }
+}
+
+async function resolveTask(documentId: number, requestedTaskId: string) {
+  let taskId = requestedTaskId
+  if (!taskId) {
+    try {
+      taskId = (await documentApi.getLatestTask(documentId)).task_id
+    } catch (error) {
+      taskError.value = documentErrorMessage(error, '该文档暂无处理任务')
+      return
+    }
+  }
+  activeTaskId.value = taskId
+  await readTask(taskId)
+}
+
+async function initialize() {
+  const version = ++initializationVersion
+  stopPolling()
+  pollFailures = 0
+  selectedCourseId.value = null
+  documents.value = []
+  activeDocument.value = null
+  activeTaskId.value = ''
+  task.value = null
+  documentsError.value = ''
+  documentError.value = ''
+  taskError.value = ''
+
+  await loadCourses()
+  if (version !== initializationVersion || coursesError.value) return
+
+  const requestedCourseId = parsePositiveId(route.query.courseId)
+  const requestedDocumentId = parsePositiveId(route.query.documentId)
+  const requestedTaskId = parseTaskId(route.query.taskId)
+
+  if (requestedCourseId) {
+    if (!courses.value.some((course) => course.id === requestedCourseId)) {
+      coursesError.value = 'URL 中的课程不属于当前账号或已归档'
+      return
+    }
+    selectedCourseId.value = requestedCourseId
+  }
+
+  if (requestedDocumentId) {
+    try {
+      const document = await documentApi.get(requestedDocumentId)
+      if (version !== initializationVersion) return
+      if (!courses.value.some((course) => course.id === document.course_id)) {
+        documentError.value = '文档所属课程不在当前账号的课程列表中'
+        return
+      }
+      if (selectedCourseId.value && selectedCourseId.value !== document.course_id) {
+        documentError.value = 'URL 中的课程与文档不匹配'
+        return
+      }
+      activeDocument.value = document
+      selectedCourseId.value = document.course_id
+    } catch (error) {
+      documentError.value = documentErrorMessage(error, '文档详情读取失败')
+      return
+    }
+  }
+
+  if (selectedCourseId.value) await loadDocuments(selectedCourseId.value)
+  if (version !== initializationVersion) return
+  if (requestedDocumentId) await resolveTask(requestedDocumentId, requestedTaskId)
+}
+
+function selectCourse(courseId: number) {
+  router.replace({ name: 'document-tasks', query: { courseId: String(courseId) } })
+}
+
+function selectDocument(document: BackendDocument) {
+  router.replace({
+    name: 'document-tasks',
+    query: { courseId: String(document.course_id), documentId: String(document.id) },
+  })
+}
+
+async function refreshAll() {
+  if (selectedCourseId.value) await loadDocuments(selectedCourseId.value)
+  if (activeDocument.value) await refreshActiveDocument(activeDocument.value.id)
+  if (activeTaskId.value) {
+    stopPolling()
+    pollFailures = 0
+    await readTask(activeTaskId.value)
+  }
+}
+
+function retryTaskStatus() {
+  stopPolling()
+  pollFailures = 0
+  taskError.value = ''
+  if (activeTaskId.value) {
+    void readTask(activeTaskId.value)
+  } else if (activeDocument.value) {
+    void resolveTask(activeDocument.value.id, '')
+  }
+}
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' }).format(date)
+}
+
+watch(() => route.fullPath, () => void initialize(), { immediate: true })
+onBeforeUnmount(() => {
+  initializationVersion += 1
+  stopPolling()
+})
 </script>
 
 <template>
   <div>
-    <PageHeader title="文档处理进度" eyebrow="RAG PIPELINE" description="实时查看资料从上传到进入向量知识库的每一步。">
-      <span class="socket-state"><i></i>WebSocket 已连接</span><el-button plain :icon="RefreshRight">刷新状态</el-button>
+    <PageHeader title="文档处理进度" eyebrow="RAG PIPELINE" description="通过 REST 自动刷新真实文档与解析任务状态。">
+      <span class="refresh-state" :class="{ error: taskError }"><i></i>{{ refreshLabel }}</span>
+      <el-button plain :icon="RefreshRight" @click="refreshAll">刷新状态</el-button>
     </PageHeader>
-    <section class="active-task">
-      <div class="active-top"><div class="file-icon"><el-icon><Document /></el-icon></div><div class="active-info"><span>正在处理 · 数据库系统</span><h2>数据库系统概论（第6版）.pdf</h2><p class="mono">task_id: tsk_20260714_a81f · Celery worker-02</p></div><strong>{{ progress }}<small>%</small></strong></div>
-      <el-progress :percentage="progress" :show-text="false" :stroke-width="9" color="#6675ed" />
-      <div class="stage-list"><div v-for="(stage,index) in stages" :key="stage" :class="{ done: index < stepIndex, active: index === stepIndex }"><span><el-icon v-if="index < stepIndex"><Check /></el-icon><i v-else></i></span><b>{{ stage }}</b><small>{{ index < stepIndex ? '已完成' : index === stepIndex ? '处理中' : '等待中' }}</small></div></div>
-      <div class="task-detail"><span><el-icon><Clock /></el-icon>已用时 1分42秒</span><span>当前步骤：生成向量并写入 pgvector（865 / 1,204）</span><button @click="ElMessage.info('已请求安全取消，当前批次完成后停止')"><el-icon><VideoPause /></el-icon>取消任务</button></div>
+
+    <section class="content-card card-pad selector-card">
+      <div>
+        <b>课程</b>
+        <el-select :model-value="selectedCourseId" placeholder="选择课程查看资料" :loading="coursesLoading" style="width:min(360px,100%)" @change="selectCourse">
+          <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
+        </el-select>
+      </div>
+      <el-button type="primary" plain :icon="Upload" :disabled="!selectedCourseId" @click="router.push({ name: 'upload', query: selectedCourseId ? { courseId: String(selectedCourseId) } : {} })">上传新资料</el-button>
     </section>
 
-    <section class="content-card card-pad table-card">
-      <div class="card-header"><div><h2>课程资料</h2><p>数据库系统 · 共 12 份</p></div><el-select model-value="全部状态" size="small" style="width:110px"><el-option label="全部状态" value="全部状态" /></el-select></div>
-      <el-table :data="rows">
-        <el-table-column label="文档" min-width="270"><template #default="scope"><div class="document-cell"><span>{{ scope.row.name.split('.').pop()?.toUpperCase() }}</span><div><b>{{ scope.row.name }}</b><small>{{ scope.row.version }} · {{ scope.row.size }}</small></div></div></template></el-table-column>
+    <el-alert v-if="coursesError" :title="coursesError" type="error" :closable="false" show-icon class="state-alert">
+      <template #default><el-button size="small" @click="initialize">重新加载</el-button></template>
+    </el-alert>
+    <el-empty v-else-if="!coursesLoading && !courses.length" description="当前账号还没有课程">
+      <el-button type="primary" @click="router.push('/courses')">前往课程管理</el-button>
+    </el-empty>
+
+    <el-alert v-if="documentError" :title="documentError" type="error" :closable="false" show-icon class="state-alert" />
+    <section v-if="activeDocument" class="active-task">
+      <div class="active-top">
+        <div class="file-icon"><el-icon><Document /></el-icon></div>
+        <div class="active-info"><span>{{ selectedCourse?.name || '当前课程' }}</span><h2>{{ activeDocument.title }}</h2><p>{{ activeDocument.file_type.toUpperCase() }} · v{{ activeDocument.current_version }} · 文档状态：{{ activeDocument.status }}</p></div>
+        <strong v-if="task">{{ progress }}<small>%</small></strong>
+      </div>
+
+      <template v-if="task">
+        <el-progress :percentage="progress" :show-text="false" :stroke-width="9" color="#6675ed" />
+        <div class="stage-list">
+          <div v-for="(stage,index) in PIPELINE_STAGES" :key="stage.key" :class="{ done: index < currentStageIndex || task.status === 'success', active: index === currentStageIndex && task.status !== 'success' }"><span><i></i></span><b>{{ stage.label }}</b></div>
+        </div>
+        <div class="task-detail-grid">
+          <p><span>任务 ID</span><b class="mono">{{ task.task_id }}</b></p>
+          <p><span>任务状态</span><StatusPill :status="task.status" /></p>
+          <p><span>当前步骤</span><b>{{ currentStepLabel }}</b></p>
+          <p><span>文档页数</span><b>{{ activeDocument.page_count ?? '待生成' }}</b></p>
+          <p><span>文本块数</span><b>{{ chunkCount ?? '待生成' }}</b></p>
+          <p><span>创建时间</span><b>{{ formatDate(task.created_at) }}</b></p>
+        </div>
+        <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" show-icon class="inner-alert" />
+        <el-alert v-if="taskError" :title="taskError" type="error" :closable="false" show-icon class="inner-alert"><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>
+      </template>
+      <el-alert v-else-if="taskError" :title="taskError" type="warning" :closable="false" show-icon><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>
+      <el-empty v-else description="该文档暂无处理任务" />
+    </section>
+
+    <section v-if="selectedCourseId" class="content-card card-pad table-card">
+      <div class="card-header"><div><h2>课程资料</h2><p>{{ selectedCourse?.name }} · {{ documents.length }} 份真实文档</p></div><el-button :icon="RefreshRight" :loading="documentsLoading" @click="loadDocuments(selectedCourseId)">刷新列表</el-button></div>
+      <el-alert v-if="documentsError" :title="documentsError" type="error" :closable="false" show-icon class="state-alert"><template #default><el-button size="small" @click="loadDocuments(selectedCourseId)">重新加载</el-button></template></el-alert>
+      <el-table v-else v-loading="documentsLoading" :data="documents" empty-text="该课程还没有文档">
+        <el-table-column label="文档" min-width="250"><template #default="scope"><div class="document-cell"><span>{{ scope.row.file_type.toUpperCase() }}</span><div><b>{{ scope.row.title }}</b><small>版本 v{{ scope.row.current_version }}</small></div></div></template></el-table-column>
         <el-table-column label="状态" width="115"><template #default="scope"><StatusPill :status="scope.row.status" /></template></el-table-column>
-        <el-table-column label="进度" min-width="170"><template #default="scope"><div class="row-progress"><el-progress :percentage="scope.row.progress" :show-text="false" :stroke-width="6" /><span>{{ scope.row.progress }}%</span></div></template></el-table-column>
-        <el-table-column prop="chunks" label="文本块" width="110" /><el-table-column prop="updated" label="更新时间" width="130" />
-        <el-table-column label="操作" width="130"><template #default="scope"><el-button link type="primary">详情</el-button><el-button v-if="scope.row.status === 'success'" link>重新解析</el-button></template></el-table-column>
+        <el-table-column label="页数" width="85"><template #default="scope">{{ scope.row.page_count ?? '—' }}</template></el-table-column>
+        <el-table-column label="更新时间" min-width="150"><template #default="scope">{{ formatDate(scope.row.updated_at) }}</template></el-table-column>
+        <el-table-column label="失败原因" min-width="180"><template #default="scope">{{ scope.row.error_message || '—' }}</template></el-table-column>
+        <el-table-column label="操作" width="110"><template #default="scope"><el-button link type="primary" @click="selectDocument(scope.row)">查看状态</el-button></template></el-table-column>
       </el-table>
     </section>
   </div>
 </template>
 
 <style scoped>
-.socket-state{display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:999px;background:#eaf8f4;color:#158e78;font-size:9px;font-weight:700}.socket-state i{width:7px;height:7px;border-radius:50%;background:#19ae8e;box-shadow:0 0 0 4px #d5f0e9}.active-task{padding:25px 27px;margin-bottom:18px;border:1px solid #dfe3f5;border-radius:19px;background:linear-gradient(145deg,#fff,#f8f9ff);box-shadow:var(--shadow-soft)}.active-top{display:flex;align-items:center;gap:13px;margin-bottom:20px}.file-icon{width:45px;height:49px;display:grid;place-items:center;border-radius:12px;background:#eef0ff;color:#6472e9;font-size:20px}.active-info{flex:1}.active-info>span{color:#6674df;font-size:9px;font-weight:700}.active-info h2{margin:5px 0;color:#36415d;font-size:15px}.active-info p{margin:0;color:#9aa3b4;font-size:8px}.active-top>strong{color:#5362de;font-size:30px}.active-top>strong small{font-size:13px}.stage-list{display:grid;grid-template-columns:repeat(5,1fr);margin:23px 0 19px}.stage-list>div{position:relative;display:flex;align-items:center;flex-direction:column;color:#a0a8b8}.stage-list>div::after{content:"";position:absolute;left:60%;right:-40%;top:12px;height:2px;background:#e5e8ef}.stage-list>div:last-child::after{display:none}.stage-list span{position:relative;z-index:1;width:25px;height:25px;display:grid;place-items:center;border:2px solid #dfe3eb;border-radius:50%;background:#fff;font-size:10px}.stage-list span i{width:5px;height:5px;border-radius:50%;background:#b3bac8}.stage-list b{margin-top:8px;font-size:9px}.stage-list small{margin-top:4px;font-size:8px}.stage-list .done span{color:#fff;border-color:#16a98d;background:#16a98d}.stage-list .done::after{background:#6fd2c0}.stage-list .active span{border-color:#6574eb;box-shadow:0 0 0 5px #edf0ff}.stage-list .active span i{background:#6271e8}.stage-list .active b{color:#5362dd}.stage-list .active small{color:#6976dd}.task-detail{display:flex;align-items:center;gap:24px;padding:10px 13px;border-radius:10px;background:#f3f5fb;color:#7d879b;font-size:9px}.task-detail span{display:flex;align-items:center;gap:5px}.task-detail button{display:flex;align-items:center;gap:5px;margin-left:auto;border:0;background:transparent;color:#dc676c;font-size:9px;cursor:pointer}.document-cell{display:flex;align-items:center;gap:10px}.document-cell>span{width:34px;height:38px;display:grid;place-items:center;border-radius:8px;background:#fff0ed;color:#d96857;font-size:7px;font-weight:800}.document-cell>div{display:flex;flex-direction:column}.document-cell b{font-size:10px;color:#424d67}.document-cell small{margin-top:4px;color:#979faf;font-size:8px}.row-progress{display:flex;align-items:center;gap:8px}.row-progress .el-progress{flex:1}.row-progress span{width:28px;color:#7c869b;font-size:9px}@media(max-width:800px){.stage-list{grid-template-columns:1fr}.stage-list>div{align-items:flex-start;flex-direction:row;gap:8px;padding:6px 0}.stage-list>div::after{display:none}.stage-list b,.stage-list small{margin:5px 0}.task-detail{align-items:flex-start;flex-direction:column;gap:8px}.task-detail button{margin-left:0}.active-info p{display:none}.active-top>strong{font-size:22px}}
+.refresh-state{display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:999px;background:#eef1ff;color:#5868de;font-size:9px;font-weight:700}.refresh-state i{width:7px;height:7px;border-radius:50%;background:currentColor}.refresh-state.error{background:#ffeded;color:#dc5f5f}.selector-card{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:18px}.selector-card>div{display:flex;flex:1;flex-direction:column;gap:8px;color:#4b5670;font-size:10px}.state-alert{margin-bottom:18px}.state-alert :deep(.el-alert__content),.inner-alert :deep(.el-alert__content){width:100%}.state-alert :deep(.el-alert__description),.inner-alert :deep(.el-alert__description){display:flex;justify-content:flex-end;margin:0}.active-task{padding:25px 27px;margin-bottom:18px;border:1px solid #dfe3f5;border-radius:19px;background:linear-gradient(145deg,#fff,#f8f9ff);box-shadow:var(--shadow-soft)}.active-top{display:flex;align-items:center;gap:13px;margin-bottom:20px}.file-icon{width:45px;height:49px;display:grid;place-items:center;border-radius:12px;background:#eef0ff;color:#6472e9;font-size:20px}.active-info{flex:1}.active-info>span{color:#6674df;font-size:9px;font-weight:700}.active-info h2{margin:5px 0;color:#36415d;font-size:15px}.active-info p{margin:0;color:#8c96aa;font-size:9px}.active-top>strong{color:#5362de;font-size:30px}.active-top>strong small{font-size:13px}.stage-list{display:grid;grid-template-columns:repeat(6,1fr);margin:23px 0 19px}.stage-list>div{position:relative;display:flex;align-items:center;flex-direction:column;color:#a0a8b8}.stage-list>div::after{content:"";position:absolute;left:60%;right:-40%;top:12px;height:2px;background:#e5e8ef}.stage-list>div:last-child::after{display:none}.stage-list span{position:relative;z-index:1;width:25px;height:25px;display:grid;place-items:center;border:2px solid #dfe3eb;border-radius:50%;background:#fff}.stage-list span i{width:5px;height:5px;border-radius:50%;background:#b3bac8}.stage-list b{margin-top:8px;font-size:9px}.stage-list .done span{border-color:#16a98d;background:#16a98d}.stage-list .done span i{background:white}.stage-list .done::after{background:#6fd2c0}.stage-list .active span{border-color:#6574eb;box-shadow:0 0 0 5px #edf0ff}.stage-list .active span i{background:#6271e8}.stage-list .active b{color:#5362dd}.task-detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:13px;border-radius:12px;background:#f3f5fb}.task-detail-grid p{display:flex;min-width:0;flex-direction:column;gap:5px;margin:0;color:#8b95a9;font-size:9px}.task-detail-grid b{overflow-wrap:anywhere;color:#4d5872;font-size:10px}.inner-alert{margin-top:14px}.table-card{margin-top:18px}.document-cell{display:flex;align-items:center;gap:10px}.document-cell>span{width:34px;height:38px;display:grid;place-items:center;border-radius:8px;background:#fff0ed;color:#d96857;font-size:7px;font-weight:800}.document-cell>div{display:flex;flex-direction:column}.document-cell b{font-size:10px;color:#424d67}.document-cell small{margin-top:4px;color:#979faf;font-size:8px}@media(max-width:800px){.selector-card{align-items:stretch;flex-direction:column}.stage-list{grid-template-columns:repeat(3,1fr);gap:12px}.stage-list>div::after{display:none}.task-detail-grid{grid-template-columns:1fr 1fr}.active-info p{display:none}.active-top>strong{font-size:22px}}@media(max-width:520px){.stage-list,.task-detail-grid{grid-template-columns:1fr}.stage-list>div{align-items:flex-start}.active-task{padding:18px}}
 </style>
