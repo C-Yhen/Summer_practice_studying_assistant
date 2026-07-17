@@ -57,9 +57,11 @@ async function saveProfile() {
   saving.value = true
   try {
     const updated = await profileApi.updateUser({ ...profileDraft })
+    profileDraft.display_name = updated.display_name
+    profileDraft.timezone = updated.timezone
     user.value = updated
-    auth.updateCurrentUser(updated)
     savedProfile = JSON.stringify(profileDraft)
+    auth.updateCurrentUser(updated)
     ElMessage.success('个人资料已保存')
   } catch (cause) { ElMessage.error(getApiErrorMessage(cause, '个人资料保存失败')) } finally { saving.value = false }
 }

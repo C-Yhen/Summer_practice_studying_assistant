@@ -1,9 +1,10 @@
 from datetime import date
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.app.models import KnowledgeMastery, KnowledgePoint, User
+from backend.app.models import KnowledgeMastery, KnowledgePoint, StudyPlanVersion, User
 
 
 def _course(client: TestClient, headers: dict[str, str], name: str = "Personalized course") -> int:
@@ -58,6 +59,30 @@ def test_profile_and_preferences_are_partial_validated_and_user_scoped(client: T
     assert other_profile["preferences"]["daily_minutes"] == 120
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "foundation_level", "learning_order", "preferred_difficulty",
+        "preferred_resource_types", "session_minutes", "daily_minutes",
+        "needs_exam_focus", "needs_error_points", "needs_derivation",
+    ],
+)
+def test_patch_rejects_explicit_null_without_changing_saved_values(
+    client: TestClient, auth_headers: dict[str, str], field: str
+) -> None:
+    baseline_profile = client.get("/api/v1/users/me/profile", headers=auth_headers).json()["data"]
+    assert client.patch("/api/v1/users/me", headers=auth_headers, json={"display_name": None}).status_code == 422
+    assert client.patch("/api/v1/users/me", headers=auth_headers, json={"timezone": None}).status_code == 422
+    response = client.patch("/api/v1/users/me/preferences", headers=auth_headers, json={field: None})
+    assert response.status_code == 422
+    after_null = client.get("/api/v1/users/me/profile", headers=auth_headers).json()["data"]
+    assert after_null["user"] == baseline_profile["user"]
+    assert after_null["preferences"] == baseline_profile["preferences"]
+    assert client.patch("/api/v1/users/me", headers=auth_headers, json={}).status_code == 200
+    assert client.patch("/api/v1/users/me/preferences", headers=auth_headers, json={}).status_code == 200
+    assert client.get("/api/v1/users/me/profile", headers=auth_headers).json()["data"] == baseline_profile
+
+
 def test_plan_uses_preferences_overrides_and_preserves_generation_snapshot(client: TestClient, auth_headers: dict[str, str]) -> None:
     course_id = _course(client, auth_headers)
     assert client.patch("/api/v1/users/me/preferences", headers=auth_headers, json={
@@ -80,9 +105,18 @@ def test_plan_uses_preferences_overrides_and_preserves_generation_snapshot(clien
     for task in tasks: by_day[task["scheduled_date"]] = by_day.get(task["scheduled_date"], 0) + task["estimated_minutes"]
     assert all(minutes <= 60 for minutes in by_day.values())
 
+    daily_only = _generate(client, auth_headers, course_id, daily_availability={"default_minutes": 90})
+    assert daily_only["candidate_version"]["diff"]["generation_context"]["overrides"] == {"daily_minutes": True, "session_minutes": False}
+    restored_defaults = _generate(client, auth_headers, course_id)
+    assert restored_defaults["candidate_version"]["diff"]["generation_context"]["overrides"] == {"daily_minutes": False, "session_minutes": False}
+    session_only = _generate(client, auth_headers, course_id, session_minutes=20)
+    assert session_only["candidate_version"]["diff"]["generation_context"]["overrides"] == {"daily_minutes": False, "session_minutes": True}
+
     assert client.patch("/api/v1/users/me/preferences", headers=auth_headers, json={"daily_minutes": 120, "session_minutes": 45, "needs_derivation": False, "needs_exam_focus": True}).status_code == 200
-    current = client.get(f"/api/v1/courses/{course_id}/study-plans/current", headers=auth_headers).json()["data"]
-    assert current["diff"]["generation_context"] == context
+    with client.app.state.database.session_factory() as db:
+        original_version = db.scalar(select(StudyPlanVersion).where(StudyPlanVersion.plan_id == first["plan_id"]))
+        assert original_version is not None
+        assert original_version.diff["generation_context"] == context
     overridden = _generate(client, auth_headers, course_id, daily_availability={"default_minutes": 90}, session_minutes=20)
     override_context = overridden["candidate_version"]["diff"]["generation_context"]
     assert override_context["daily_minutes"] == 90 and override_context["session_minutes"] == 20

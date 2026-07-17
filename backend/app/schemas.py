@@ -65,6 +65,13 @@ class UserUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(item is None for item in value.values()):
+            raise ValueError("explicit null is not allowed")
+        return value
+
     @field_validator("display_name")
     @classmethod
     def clean_optional_display_name(cls, value: str | None) -> str | None:
@@ -88,6 +95,13 @@ class PreferenceUpdate(BaseModel):
     needs_exam_focus: bool | None = None
     needs_error_points: bool | None = None
     needs_derivation: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(item is None for item in value.values()):
+            raise ValueError("explicit null is not allowed")
+        return value
 
     @field_validator("preferred_resource_types")
     @classmethod

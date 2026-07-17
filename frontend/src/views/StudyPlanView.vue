@@ -15,6 +15,7 @@ const selectedCourseId = ref<number | null>(null)
 const coursesLoading = ref(false)
 const coursesError = ref('')
 const preferences = ref<UserPreferences | null>(null)
+const preferenceDefaults = ref({ dailyMinutes: 0, sessionMinutes: 0 })
 const preferencesError = ref('')
 const preferencesLoading = ref(false)
 const plan = ref<CurrentStudyPlanResponse | null>(null)
@@ -96,9 +97,16 @@ async function loadCourses() {
 
 function applyPreferenceDefaults() {
   if (!preferences.value) return
-  form.dailyMinutes = preferences.value.daily_minutes
-  form.sessionMinutes = preferences.value.session_minutes
+  preferenceDefaults.value = {
+    dailyMinutes: preferences.value.daily_minutes,
+    sessionMinutes: preferences.value.session_minutes,
+  }
+  form.dailyMinutes = preferenceDefaults.value.dailyMinutes
+  form.sessionMinutes = preferenceDefaults.value.sessionMinutes
 }
+
+const dailyMinutesOverride = computed(() => form.dailyMinutes !== preferenceDefaults.value.dailyMinutes)
+const sessionMinutesOverride = computed(() => form.sessionMinutes !== preferenceDefaults.value.sessionMinutes)
 
 async function loadPreferences() {
   preferencesLoading.value = true
@@ -171,10 +179,10 @@ async function generatePlan() {
     goal,
     start_date: form.startDate,
     end_date: form.endDate,
-    daily_availability: { default_minutes: form.dailyMinutes },
-    session_minutes: form.sessionMinutes,
+    daily_availability: dailyMinutesOverride.value ? { default_minutes: form.dailyMinutes } : {},
     unavailable_dates: [],
   }
+  if (sessionMinutesOverride.value) payload.session_minutes = form.sessionMinutes
   generating.value = true
   planError.value = ''
   try {
