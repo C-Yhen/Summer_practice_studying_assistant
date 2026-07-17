@@ -292,9 +292,9 @@ export interface ChatMessageListResponse {
 export interface StudyPlanGenerateRequest {
   start_date: string
   end_date: string
-  daily_availability: Record<string, number>
+  daily_availability?: Record<string, number>
   unavailable_dates?: string[]
-  session_minutes: number
+  session_minutes?: number
   goal: string
 }
 
@@ -531,6 +531,33 @@ export interface BackendUser {
   is_active: boolean
   created_at: string
   updated_at: string
+}
+
+export type FoundationLevel = 'basic' | 'intermediate' | 'advanced'
+export type LearningOrder = 'explain_first' | 'weakness_first'
+export type PreferredDifficulty = 'basic' | 'adaptive' | 'advanced'
+export type PreferredResourceType = 'pdf' | 'ppt' | 'markdown' | 'text'
+
+export interface UserPreferences {
+  foundation_level: FoundationLevel
+  learning_order: LearningOrder
+  preferred_difficulty: PreferredDifficulty
+  preferred_resource_types: PreferredResourceType[]
+  session_minutes: number
+  daily_minutes: number
+  needs_exam_focus: boolean
+  needs_error_points: boolean
+  needs_derivation: boolean
+}
+
+export interface UserProfileResponse {
+  user: BackendUser
+  preferences: UserPreferences
+}
+
+export interface UserProfileUpdate {
+  display_name?: string
+  timezone?: string
 }
 
 export interface AuthUser {

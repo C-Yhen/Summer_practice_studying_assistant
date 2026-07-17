@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -7,10 +9,31 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import LearningRecord, StudyTask, User, UserPreference
 from backend.app.responses import ok
-from backend.app.schemas import LoginRequest, PreferenceUpdate, TokenResponse, UserRead, UserRegister
+from backend.app.schemas import (
+    LoginRequest,
+    PreferenceRead,
+    PreferenceUpdate,
+    TokenResponse,
+    UserRead,
+    UserRegister,
+    UserUpdate,
+)
 from backend.app.security import create_access_token, hash_password, verify_password
 
 router = APIRouter(tags=["authentication"])
+
+
+def _preference_for_user(db: DBSession, user_id: int) -> UserPreference:
+    preference = db.scalar(select(UserPreference).where(UserPreference.user_id == user_id))
+    if preference is None:
+        preference = UserPreference(user_id=user_id)
+        db.add(preference)
+        db.flush()
+    return preference
+
+
+def _preference_payload(preference: UserPreference) -> dict:
+    return PreferenceRead.model_validate(preference).model_dump()
 
 
 @router.post("/auth/register", status_code=status.HTTP_201_CREATED)
@@ -67,38 +90,47 @@ def read_me(current_user: CurrentUser) -> dict:
     return ok(UserRead.model_validate(current_user).model_dump(mode="json"))
 
 
+@router.patch("/users/me")
+def update_me(payload: UserUpdate, db: DBSession, current_user: CurrentUser) -> dict:
+    updates = payload.model_dump(exclude_unset=True)
+    if "timezone" in updates:
+        try:
+            ZoneInfo(updates["timezone"])
+        except ZoneInfoNotFoundError as exc:
+            raise HTTPException(status_code=422, detail="INVALID_TIMEZONE") from exc
+    for field, value in updates.items():
+        setattr(current_user, field, value)
+    db.commit()
+    db.refresh(current_user)
+    return ok(UserRead.model_validate(current_user).model_dump(mode="json"))
+
+
 @router.patch("/users/me/preferences")
 def update_preferences(
     payload: PreferenceUpdate, db: DBSession, current_user: CurrentUser
 ) -> dict:
-    preference = db.scalar(
-        select(UserPreference).where(UserPreference.user_id == current_user.id)
-    )
-    if preference is None:
-        preference = UserPreference(user_id=current_user.id)
-        db.add(preference)
-    for field, value in payload.model_dump().items():
+    preference = _preference_for_user(db, current_user.id)
+    updates = payload.model_dump(exclude_unset=True)
+    session_minutes = updates.get("session_minutes", preference.session_minutes)
+    daily_minutes = updates.get("daily_minutes", preference.daily_minutes)
+    if session_minutes > daily_minutes:
+        raise HTTPException(status_code=422, detail="SESSION_MINUTES_EXCEEDS_DAILY_MINUTES")
+    for field, value in updates.items():
         setattr(preference, field, value)
     db.commit()
     db.refresh(preference)
-    return ok({
-        "user_id": current_user.id,
-        **payload.model_dump(),
-        "updated_at": preference.updated_at.isoformat(),
-    })
+    return ok(_preference_payload(preference))
 
 
 @router.get("/users/me/profile")
 def read_profile(db: DBSession, current_user: CurrentUser, course_id: int | None = None) -> dict:
-    preference = db.scalar(
-        select(UserPreference).where(UserPreference.user_id == current_user.id)
-    )
+    preference = _preference_for_user(db, current_user.id)
+    db.commit()
+    db.refresh(preference)
     return ok({
         "user": UserRead.model_validate(current_user).model_dump(mode="json"),
         "course_id": course_id,
-        "preferences": PreferenceUpdate.model_validate(preference, from_attributes=True).model_dump()
-        if preference
-        else PreferenceUpdate().model_dump(),
+        "preferences": _preference_payload(preference),
     })
 
 

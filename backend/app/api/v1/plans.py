@@ -16,6 +16,7 @@ from backend.app.models import (
     StudyPlan,
     StudyPlanVersion,
     StudyTask,
+    UserPreference,
 )
 from backend.app.planning.engine import PlanInput, PlanningPoint, build_plan, reschedule
 from backend.app.responses import ok
@@ -97,8 +98,15 @@ def generate_plan(
 ) -> dict:
     _owned_course(db, course_id, current_user.id)
     points = _seed_points(db, course_id)
+    preference = db.scalar(
+        select(UserPreference).where(UserPreference.user_id == current_user.id)
+    )
+    if preference is None:
+        preference = UserPreference(user_id=current_user.id)
+        db.add(preference)
+        db.flush()
     masteries = {
-        item.knowledge_point_id: item.score
+        item.knowledge_point_id: item
         for item in db.scalars(
             select(KnowledgeMastery).where(
                 KnowledgeMastery.user_id == current_user.id,
@@ -106,13 +114,37 @@ def generate_plan(
             )
         )
     }
+    daily_override = "default_minutes" in payload.daily_availability
+    session_override = "session_minutes" in payload.model_fields_set
+    daily_minutes = payload.daily_availability.get("default_minutes", preference.daily_minutes)
+    session_minutes = payload.session_minutes if session_override else preference.session_minutes
+    if session_minutes is None or session_minutes > daily_minutes:
+        raise HTTPException(status_code=422, detail="SESSION_MINUTES_EXCEEDS_DAILY_MINUTES")
+    generation_context = {
+        "daily_minutes": daily_minutes,
+        "session_minutes": session_minutes,
+        "foundation_level": preference.foundation_level,
+        "learning_order": preference.learning_order,
+        "preferred_difficulty": preference.preferred_difficulty,
+        "preferred_resource_types": list(preference.preferred_resource_types or []),
+        "needs_exam_focus": preference.needs_exam_focus,
+        "needs_error_points": preference.needs_error_points,
+        "needs_derivation": preference.needs_derivation,
+        "overrides": {"daily_minutes": daily_override, "session_minutes": session_override},
+    }
     input_data = PlanInput(
         start_date=payload.start_date,
         end_date=payload.end_date,
-        default_daily_minutes=payload.daily_availability.get("default_minutes", 120),
-        session_minutes=payload.session_minutes,
+        default_daily_minutes=daily_minutes,
+        session_minutes=session_minutes,
         unavailable_dates=set(payload.unavailable_dates),
         daily_overrides={date.fromisoformat(key): value for key, value in payload.daily_availability.items() if key != "default_minutes"},
+        foundation_level=preference.foundation_level,
+        learning_order=preference.learning_order,
+        preferred_difficulty=preference.preferred_difficulty,
+        needs_exam_focus=preference.needs_exam_focus,
+        needs_error_points=preference.needs_error_points,
+        needs_derivation=preference.needs_derivation,
     )
     skeleton = build_plan(
         input_data,
@@ -121,7 +153,8 @@ def generate_plan(
                 id=point.id,
                 name=point.name,
                 importance=point.importance,
-                mastery=masteries.get(point.id, 0.3),
+                mastery=masteries[point.id].score if point.id in masteries else None,
+                has_mastery_record=point.id in masteries and masteries[point.id].attempts > 0,
                 estimated_minutes=point.estimated_minutes,
                 difficulty=point.difficulty,
                 prerequisite_ids=point.prerequisite_ids,
@@ -133,7 +166,7 @@ def generate_plan(
         plan = StudyPlan(user_id=current_user.id, course_id=course_id, goal=payload.goal, start_date=payload.start_date, end_date=payload.end_date)
         db.add(plan)
         db.flush()
-        version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason="首次生成", summary=f"共安排 {len(skeleton['tasks'])} 项任务。", risks=skeleton["risks"])
+        version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason="首次生成", summary=f"共安排 {len(skeleton['tasks'])} 项任务。", risks=skeleton["risks"], diff={"generation_context": generation_context})
         db.add(version)
         db.flush()
         for item in skeleton["tasks"]:

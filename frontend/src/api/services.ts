@@ -44,6 +44,10 @@ import type {
   WeeklyReportRequest,
   TodayTask,
   TodayTaskListResponse,
+  BackendUser,
+  UserPreferences,
+  UserProfileResponse,
+  UserProfileUpdate,
 } from '@/types'
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
@@ -95,6 +99,29 @@ function parseCourseList(data: BackendCourseListResponse): CourseListResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseBackendUser(value: unknown): BackendUser {
+  if (!isRecord(value) || !Number.isInteger(value.id) || typeof value.email !== 'string' || typeof value.display_name !== 'string' || typeof value.full_name !== 'string' || typeof value.timezone !== 'string' || typeof value.is_active !== 'boolean' || typeof value.created_at !== 'string' || typeof value.updated_at !== 'string') {
+    throw new ApiEnvelopeError('后端返回的用户资料不完整')
+  }
+  return value as unknown as BackendUser
+}
+
+function parsePreferences(value: unknown): UserPreferences {
+  const levels = ['basic', 'intermediate', 'advanced']
+  const orders = ['explain_first', 'weakness_first']
+  const difficulties = ['basic', 'adaptive', 'advanced']
+  const resourceTypes = ['pdf', 'ppt', 'markdown', 'text']
+  if (!isRecord(value) || !levels.includes(String(value.foundation_level)) || !orders.includes(String(value.learning_order)) || !difficulties.includes(String(value.preferred_difficulty)) || !Array.isArray(value.preferred_resource_types) || !value.preferred_resource_types.every((item) => resourceTypes.includes(String(item))) || !Number.isInteger(value.session_minutes) || !Number.isInteger(value.daily_minutes) || typeof value.needs_exam_focus !== 'boolean' || typeof value.needs_error_points !== 'boolean' || typeof value.needs_derivation !== 'boolean') {
+    throw new ApiEnvelopeError('后端返回的学习偏好不完整')
+  }
+  return value as unknown as UserPreferences
+}
+
+function parseProfile(value: unknown): UserProfileResponse {
+  if (!isRecord(value)) throw new ApiEnvelopeError('后端返回的个人资料结构无法识别')
+  return { user: parseBackendUser(value.user), preferences: parsePreferences(value.preferences) }
 }
 
 function parseDocument(value: unknown): BackendDocument {
@@ -449,8 +476,33 @@ const mockChatSessions: ChatSession[] = []
 const mockChatMessages = new Map<string, ChatMessage[]>()
 const mockPlans = new Map<number, CurrentStudyPlanResponse>()
 const mockTodayTaskItems: TodayTask[] = []
+const mockProfile: UserProfileResponse = {
+  user: { id: 1, email: 'demo@example.com', display_name: '演示学习者', full_name: '演示学习者', timezone: 'Asia/Shanghai', is_active: true, created_at: now, updated_at: now },
+  preferences: { foundation_level: 'basic', learning_order: 'explain_first', preferred_difficulty: 'adaptive', preferred_resource_types: ['pdf', 'markdown'], session_minutes: 45, daily_minutes: 120, needs_exam_focus: true, needs_error_points: true, needs_derivation: false },
+}
 let mockPlanId = 2000
 let mockPlanTaskId = 3000
+
+export const profileApi = {
+  async get(): Promise<UserProfileResponse> {
+    if (mockEnabled) { await mockDelay(); return structuredClone(mockProfile) }
+    return parseProfile(unwrapApiResponse<unknown>(await apiClient.get('/users/me/profile')))
+  },
+  async updateUser(payload: UserProfileUpdate): Promise<BackendUser> {
+    if (mockEnabled) {
+      await mockDelay()
+      if (payload.display_name !== undefined) { mockProfile.user.display_name = payload.display_name.trim(); mockProfile.user.full_name = mockProfile.user.display_name }
+      if (payload.timezone !== undefined) mockProfile.user.timezone = payload.timezone
+      mockProfile.user.updated_at = new Date().toISOString()
+      return structuredClone(mockProfile.user)
+    }
+    return parseBackendUser(unwrapApiResponse<unknown>(await apiClient.patch('/users/me', payload)))
+  },
+  async updatePreferences(payload: Partial<UserPreferences>): Promise<UserPreferences> {
+    if (mockEnabled) { await mockDelay(); Object.assign(mockProfile.preferences, payload); return structuredClone(mockProfile.preferences) }
+    return parsePreferences(unwrapApiResponse<unknown>(await apiClient.patch('/users/me/preferences', payload)))
+  },
+}
 
 export const courseApi = {
   async list(): Promise<CourseListResult> {
@@ -891,6 +943,8 @@ export const planApi = {
       const token = `mock-confirm-${planId}-${Date.now()}`
       const dates: string[] = []
       const unavailable = new Set(payload.unavailable_dates || [])
+      const dailyMinutes = payload.daily_availability?.default_minutes ?? mockProfile.preferences.daily_minutes
+      const sessionMinutes = payload.session_minutes ?? mockProfile.preferences.session_minutes
       const cursor = new Date(`${payload.start_date}T00:00:00`)
       const end = new Date(`${payload.end_date}T00:00:00`)
       while (cursor <= end) {
@@ -904,14 +958,14 @@ export const planApi = {
         knowledge_point_id: index + 1,
         title: `演示规则任务 ${index + 1}`,
         task_type: index === 2 ? '间隔复习' : '学习新知识',
-        estimated_minutes: payload.session_minutes,
+        estimated_minutes: sessionMinutes,
         actual_minutes: null,
         priority: Number((0.9 - index * 0.1).toFixed(2)),
         difficulty: index === 0 ? 'basic' : 'intermediate',
         status: 'todo',
       }))
       const risks = tasks.length ? [] : ['可学习日期为空，无法安排任务。']
-      const version: StudyPlanVersion = { version: 1, status: 'candidate', reason: '首次生成', summary: `共安排 ${tasks.length} 项任务。`, risks, diff: {}, tasks }
+      const version: StudyPlanVersion = { version: 1, status: 'candidate', reason: '首次生成', summary: `共安排 ${tasks.length} 项任务。`, risks, diff: { generation_context: { ...mockProfile.preferences, daily_minutes: dailyMinutes, session_minutes: sessionMinutes, overrides: { daily_minutes: payload.daily_availability?.default_minutes !== undefined, session_minutes: payload.session_minutes !== undefined } } }, tasks }
       mockPlans.set(courseId, {
         plan_id: planId,
         course_id: courseId,

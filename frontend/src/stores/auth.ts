@@ -170,6 +170,11 @@ export const useAuthStore = defineStore('auth', () => {
     restoreError.value = ''
   }
 
+  function updateCurrentUser(backendUser: BackendUser) {
+    user.value = toAuthUser(backendUser)
+    if (mockEnabled && user.value) sessionStorage.setItem(DEMO_USER_KEY, JSON.stringify(user.value))
+  }
+
   return {
     token,
     user,
@@ -181,5 +186,6 @@ export const useAuthStore = defineStore('auth', () => {
     register,
     restoreSession,
     logout,
+    updateCurrentUser,
   }
 })

@@ -5,8 +5,8 @@ import { ElMessage } from 'element-plus'
 import { Calendar, Check, Clock, Refresh, Warning } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { courseApi, planApi } from '@/api/services'
-import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask } from '@/types'
+import { courseApi, planApi, profileApi } from '@/api/services'
+import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask, UserPreferences } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -14,6 +14,9 @@ const courses = ref<CourseListItem[]>([])
 const selectedCourseId = ref<number | null>(null)
 const coursesLoading = ref(false)
 const coursesError = ref('')
+const preferences = ref<UserPreferences | null>(null)
+const preferencesError = ref('')
+const preferencesLoading = ref(false)
 const plan = ref<CurrentStudyPlanResponse | null>(null)
 const planLoading = ref(false)
 const planError = ref('')
@@ -53,6 +56,14 @@ const groupedTasks = computed(() => {
 const totalMinutes = computed(() => (plan.value?.tasks || []).reduce((sum, task) => sum + task.estimated_minutes, 0))
 const completedCount = computed(() => (plan.value?.tasks || []).filter((task) => task.status === 'completed').length)
 const isCandidate = computed(() => plan.value?.status === 'candidate')
+const generationContext = computed(() => {
+  const value = plan.value?.diff?.generation_context
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+})
+const generationOverrides = computed(() => {
+  const overrides = generationContext.value?.overrides
+  return overrides && typeof overrides === 'object' && !Array.isArray(overrides) ? overrides as Record<string, boolean> : null
+})
 
 function pageError(error: unknown, fallback: string) {
   return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
@@ -81,6 +92,24 @@ async function loadCourses() {
   } finally {
     coursesLoading.value = false
   }
+}
+
+function applyPreferenceDefaults() {
+  if (!preferences.value) return
+  form.dailyMinutes = preferences.value.daily_minutes
+  form.sessionMinutes = preferences.value.session_minutes
+}
+
+async function loadPreferences() {
+  preferencesLoading.value = true
+  preferencesError.value = ''
+  try {
+    preferences.value = (await profileApi.get()).preferences
+    applyPreferenceDefaults()
+  } catch (error) {
+    preferences.value = null
+    preferencesError.value = pageError(error, '学习偏好加载失败')
+  } finally { preferencesLoading.value = false }
 }
 
 async function loadCurrentPlan() {
@@ -113,8 +142,8 @@ async function initialize() {
   selectedCourseId.value = null
   plan.value = null
   planError.value = ''
-  await loadCourses()
-  if (version !== initializationVersion || coursesError.value || !courses.value.length) return
+  await Promise.all([loadCourses(), loadPreferences()])
+  if (version !== initializationVersion || coursesError.value || preferencesError.value || !courses.value.length) return
   const requested = queryCourseId()
   if (requested === -1 || (requested && !courses.value.some((course) => course.id === requested))) {
     coursesError.value = 'URL 中的课程不属于当前账号或已归档'
@@ -131,7 +160,7 @@ async function initialize() {
 }
 
 async function generatePlan() {
-  if (generating.value || !selectedCourseId.value) return
+  if (generating.value || !selectedCourseId.value || !preferences.value) return
   const goal = form.goal.trim()
   if (!goal) return ElMessage.warning('请填写学习目标')
   if (!form.startDate || !form.endDate) return ElMessage.warning('请选择计划起止日期')
@@ -200,6 +229,8 @@ function openTodayTasks() {
   router.push({ name: 'today', query: selectedCourseId.value ? { courseId: String(selectedCourseId.value) } : {} })
 }
 
+function resetPreferenceDefaults() { applyPreferenceDefaults() }
+
 function formatDay(value: string) {
   const date = new Date(`${value}T00:00:00`)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', weekday: 'short' }).format(date)
@@ -217,15 +248,17 @@ watch(() => route.query.courseId, () => {
         <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
       </el-select>
       <el-button v-if="plan" plain :loading="planLoading" @click="loadCurrentPlan"><el-icon><Refresh /></el-icon>刷新计划</el-button>
+      <el-button plain @click="router.push({ path: '/settings', query: { tab: 'learning' } })">调整默认偏好</el-button>
       <el-button v-if="plan?.plan_status === 'active'" type="primary" @click="openTodayTasks">进入今日任务</el-button>
     </PageHeader>
 
     <el-alert v-if="coursesError" :title="coursesError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="initialize">重试</el-button></template></el-alert>
+    <el-alert v-else-if="preferencesError" :title="preferencesError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadPreferences">重试</el-button></template></el-alert>
     <el-empty v-else-if="!coursesLoading && !courses.length" description="当前账号还没有课程"><el-button type="primary" @click="router.push('/courses')">前往课程管理</el-button></el-empty>
 
-    <template v-else-if="selectedCourseId">
+    <template v-else-if="selectedCourseId && preferences">
       <section class="content-card form-card">
-        <div class="section-head"><div><span>计划参数</span><h2>{{ plan ? '生成新计划' : '生成学习计划' }}</h2><p>后端会再次校验日期与学习时长；重新生成会创建新的候选计划。</p></div><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '生成中…' : '生成候选计划' }}</el-button></div>
+        <div class="section-head"><div><span>计划参数</span><h2>{{ plan ? '生成新计划' : '生成学习计划' }}</h2><p>每日预算和单次时长默认来自个人设置；本次编辑只作为临时覆盖，后端会再次校验。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复个人设置默认值</el-button><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '生成中…' : '生成候选计划' }}</el-button></div></div>
         <el-form label-position="top" class="plan-form">
           <el-form-item label="学习目标"><el-input v-model="form.goal" maxlength="500" show-word-limit /></el-form-item>
           <el-form-item label="开始日期"><el-input v-model="form.startDate" type="date" /></el-form-item>
@@ -253,6 +286,8 @@ watch(() => route.query.courseId, () => {
           <article><span>版本状态</span><strong class="text-value">{{ plan.status }}</strong><small>{{ plan.summary || '暂无汇总' }}</small></article>
         </section>
 
+        <section class="content-card context-card"><div class="section-head"><div><span>生成依据</span><h2>实际采用的偏好快照</h2></div></div><template v-if="generationContext"><p>每日预算 {{ generationContext.daily_minutes }} 分钟 · 单次时长 {{ generationContext.session_minutes }} 分钟 · 基础水平 {{ generationContext.foundation_level }} · 顺序 {{ generationContext.learning_order }} · 难度 {{ generationContext.preferred_difficulty }}</p><p>薄弱点优先：{{ generationContext.needs_error_points ? '开启' : '关闭' }} · 考试冲刺：{{ generationContext.needs_exam_focus ? '开启' : '关闭' }} · 推导任务：{{ generationContext.needs_derivation ? '开启' : '关闭' }}</p><small>本次覆盖：每日预算 {{ generationOverrides?.daily_minutes ? '是' : '否' }}；单次时长 {{ generationOverrides?.session_minutes ? '是' : '否' }}。资料类型仅被记录，不代表已绑定资料。</small></template><p v-else class="no-risk">该历史计划未记录生成偏好。</p></section>
+
         <section class="content-card risk-card"><div class="section-head"><div><span>计划风险</span><h2>真实排期检查</h2></div></div><p v-if="!plan.risks.length" class="no-risk">当前未检测到明显排期风险</p><ul v-else><li v-for="risk in plan.risks" :key="risk"><el-icon><Warning /></el-icon>{{ risk }}</li></ul></section>
 
         <el-empty v-if="!groupedTasks.length" description="当前候选计划没有可安排任务，请根据风险调整日期或预算" />
@@ -273,5 +308,5 @@ watch(() => route.query.courseId, () => {
 </template>
 
 <style scoped>
-.page-alert{margin-bottom:16px}.form-card{padding:18px;margin-bottom:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:18px}.section-head span{color:#6371df;font-size:9px;font-weight:750}.section-head h2{margin:5px 0;color:#3f4962;font-size:15px}.section-head p{margin:0;color:#929bad;font-size:9px}.plan-form{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:12px;margin-top:16px}.plan-form :deep(.el-form-item){margin:0}.plan-form :deep(.el-input-number){width:100%}.plan-loading{min-height:240px}.status-card{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;margin-bottom:14px;border-left:4px solid}.status-card.candidate{border-left-color:#e49a42;background:#fffaf3}.status-card.active{border-left-color:#18a78b;background:#f4fbf9}.status-card span{font-size:9px;font-weight:800}.candidate span{color:#cf7d24}.active span{color:#168d77}.status-card h2{margin:6px 0;color:#3f4962;font-size:15px}.status-card p{margin:0;color:#858fa4;font-size:9px}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:14px}.summary-grid article{display:flex;flex-direction:column;padding:17px;border:1px solid var(--line);border-radius:14px;background:white}.summary-grid span{color:#8f98aa;font-size:8px}.summary-grid strong{margin-top:7px;color:#42506d;font-size:20px}.summary-grid .text-value{font-size:14px}.summary-grid small{margin-top:5px;color:#9ca4b4;font-size:8px}.risk-card{padding:17px 20px;margin-bottom:14px}.risk-card ul,.confirm-box ul{display:grid;gap:7px;padding:0;margin:12px 0 0;list-style:none}.risk-card li{display:flex;align-items:center;gap:6px;color:#b96f2d;font-size:9px}.no-risk{margin:12px 0 0;color:#168d77;font-size:9px}.day-list{display:grid;gap:12px}.day-card{overflow:hidden}.day-card header{display:flex;align-items:center;justify-content:space-between;padding:13px 17px;border-bottom:1px solid #edf0f5;background:#fafbfc}.day-card header div{display:flex;align-items:center;gap:7px;color:#5362d7;font-size:10px;font-weight:750}.day-card header small{color:#8d96a8;font-size:8px}.tasks{display:grid}.tasks>div{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:13px 17px;border-bottom:1px solid #eff1f5}.tasks>div:last-child{border:0}.tasks>div.completed{opacity:.62;background:#f7faf9}.tasks .type{padding:4px 7px;border-radius:6px;background:#eef0ff;color:#5868dd;font-size:8px}.tasks b{display:block;color:#48536c;font-size:10px}.tasks small{display:block;margin-top:5px;color:#929bad;font-size:8px}.tasks em{display:flex;align-items:center;gap:4px;color:#768198;font-size:8px;font-style:normal}.confirm-box{display:flex;gap:12px;padding:15px;border-radius:12px;background:#fff7eb;color:#d9832d}.confirm-box>.el-icon{flex:none;font-size:20px}.confirm-box b{font-size:11px}.confirm-box p,.confirm-box li{color:#836a50;font-size:9px;line-height:1.6}@media(max-width:1050px){.plan-form{grid-template-columns:repeat(2,1fr)}.plan-form :first-child{grid-column:span 2}.summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:620px){.plan-form,.summary-grid{grid-template-columns:1fr}.plan-form :first-child{grid-column:auto}.status-card{align-items:flex-start;gap:14px;flex-direction:column}.tasks>div{grid-template-columns:auto 1fr}.tasks em{grid-column:2}}
+.page-alert{margin-bottom:16px}.form-card{padding:18px;margin-bottom:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:18px}.section-head span{color:#6371df;font-size:9px;font-weight:750}.section-head h2{margin:5px 0;color:#3f4962;font-size:15px}.section-head p{margin:0;color:#929bad;font-size:9px}.plan-form{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:12px;margin-top:16px}.plan-form :deep(.el-form-item){margin:0}.plan-form :deep(.el-input-number){width:100%}.plan-loading{min-height:240px}.status-card{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;margin-bottom:14px;border-left:4px solid}.status-card.candidate{border-left-color:#e49a42;background:#fffaf3}.status-card.active{border-left-color:#18a78b;background:#f4fbf9}.status-card span{font-size:9px;font-weight:800}.candidate span{color:#cf7d24}.active span{color:#168d77}.status-card h2{margin:6px 0;color:#3f4962;font-size:15px}.status-card p{margin:0;color:#858fa4;font-size:9px}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:14px}.summary-grid article{display:flex;flex-direction:column;padding:17px;border:1px solid var(--line);border-radius:14px;background:white}.summary-grid span{color:#8f98aa;font-size:8px}.summary-grid strong{margin-top:7px;color:#42506d;font-size:20px}.summary-grid .text-value{font-size:14px}.summary-grid small{margin-top:5px;color:#9ca4b4;font-size:8px}.risk-card,.context-card{padding:17px 20px;margin-bottom:14px}.risk-card ul,.confirm-box ul{display:grid;gap:7px;padding:0;margin:12px 0 0;list-style:none}.risk-card li{display:flex;align-items:center;gap:6px;color:#b96f2d;font-size:9px}.context-card p,.context-card small{display:block;margin:8px 0;color:#68738a;font-size:9px;line-height:1.6}.no-risk{margin:12px 0 0;color:#168d77;font-size:9px}.day-list{display:grid;gap:12px}.day-card{overflow:hidden}.day-card header{display:flex;align-items:center;justify-content:space-between;padding:13px 17px;border-bottom:1px solid #edf0f5;background:#fafbfc}.day-card header div{display:flex;align-items:center;gap:7px;color:#5362d7;font-size:10px;font-weight:750}.day-card header small{color:#8d96a8;font-size:8px}.tasks{display:grid}.tasks>div{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:13px 17px;border-bottom:1px solid #eff1f5}.tasks>div:last-child{border:0}.tasks>div.completed{opacity:.62;background:#f7faf9}.tasks .type{padding:4px 7px;border-radius:6px;background:#eef0ff;color:#5868dd;font-size:8px}.tasks b{display:block;color:#48536c;font-size:10px}.tasks small{display:block;margin-top:5px;color:#929bad;font-size:8px}.tasks em{display:flex;align-items:center;gap:4px;color:#768198;font-size:8px;font-style:normal}.confirm-box{display:flex;gap:12px;padding:15px;border-radius:12px;background:#fff7eb;color:#d9832d}.confirm-box>.el-icon{flex:none;font-size:20px}.confirm-box b{font-size:11px}.confirm-box p,.confirm-box li{color:#836a50;font-size:9px;line-height:1.6}@media(max-width:1050px){.plan-form{grid-template-columns:repeat(2,1fr)}.plan-form :first-child{grid-column:span 2}.summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:620px){.plan-form,.summary-grid{grid-template-columns:1fr}.plan-form :first-child{grid-column:auto}.status-card{align-items:flex-start;gap:14px;flex-direction:column}.tasks>div{grid-template-columns:auto 1fr}.tasks em{grid-column:2}}
 </style>

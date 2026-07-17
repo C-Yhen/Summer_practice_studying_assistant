@@ -59,16 +59,56 @@ class TokenResponse(BaseModel):
     user: UserRead
 
 
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def clean_optional_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("display_name cannot be blank")
+        return value
+
+
 class PreferenceUpdate(BaseModel):
-    foundation_level: str = Field(default="basic", max_length=24)
-    learning_order: str = Field(default="explain_first", max_length=24)
-    preferred_difficulty: str = Field(default="basic", max_length=24)
-    preferred_resource_types: list[str] = Field(default_factory=list)
-    session_minutes: int = Field(default=45, ge=15, le=180)
-    daily_minutes: int = Field(default=120, ge=15, le=720)
-    needs_exam_focus: bool = True
-    needs_error_points: bool = True
-    needs_derivation: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    foundation_level: Literal["basic", "intermediate", "advanced"] | None = None
+    learning_order: Literal["explain_first", "weakness_first"] | None = None
+    preferred_difficulty: Literal["basic", "adaptive", "advanced"] | None = None
+    preferred_resource_types: list[Literal["pdf", "ppt", "markdown", "text"]] | None = None
+    session_minutes: int | None = Field(default=None, ge=15, le=180)
+    daily_minutes: int | None = Field(default=None, ge=15, le=720)
+    needs_exam_focus: bool | None = None
+    needs_error_points: bool | None = None
+    needs_derivation: bool | None = None
+
+    @field_validator("preferred_resource_types")
+    @classmethod
+    def deduplicate_resource_types(
+        cls, value: list[Literal["pdf", "ppt", "markdown", "text"]] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        return list(dict.fromkeys(value))
+
+
+class PreferenceRead(APIModel):
+    foundation_level: Literal["basic", "intermediate", "advanced"]
+    learning_order: Literal["explain_first", "weakness_first"]
+    preferred_difficulty: Literal["basic", "adaptive", "advanced"]
+    preferred_resource_types: list[Literal["pdf", "ppt", "markdown", "text"]]
+    session_minutes: int
+    daily_minutes: int
+    needs_exam_focus: bool
+    needs_error_points: bool
+    needs_derivation: bool
 
 
 class CourseBase(BaseModel):
@@ -224,9 +264,9 @@ class RagSearch(BaseModel):
 class PlanGenerate(BaseModel):
     start_date: date
     end_date: date
-    daily_availability: dict[str, int] = Field(default_factory=lambda: {"default_minutes": 120})
+    daily_availability: dict[str, int] = Field(default_factory=dict)
     unavailable_dates: list[date] = Field(default_factory=list)
-    session_minutes: int = Field(default=45, ge=15, le=180)
+    session_minutes: int | None = Field(default=None, ge=15, le=180)
     goal: str = Field(default="完成课程复习", max_length=500)
 
     @model_validator(mode="after")
@@ -238,11 +278,9 @@ class PlanGenerate(BaseModel):
         self.goal = self.goal.strip()
         if not self.goal:
             raise ValueError("goal cannot be blank")
-        default_minutes = self.daily_availability.get("default_minutes", 120)
-        if not 15 <= default_minutes <= 720:
+        default_minutes = self.daily_availability.get("default_minutes")
+        if default_minutes is not None and not 15 <= default_minutes <= 720:
             raise ValueError("default_minutes must be between 15 and 720")
-        if self.session_minutes > default_minutes:
-            raise ValueError("session_minutes must not exceed default_minutes")
         for raw_date, minutes in self.daily_availability.items():
             if raw_date == "default_minutes":
                 continue
