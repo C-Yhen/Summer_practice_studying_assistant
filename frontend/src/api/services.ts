@@ -18,6 +18,8 @@ import type {
   ChatSessionListResponse,
   CourseCreateRequest,
   CourseUpdateRequest,
+  CourseRecommendationItem,
+  CourseRecommendationsResponse,
   CourseListItem,
   CourseListResult,
   CurrentStudyPlanResponse,
@@ -27,6 +29,8 @@ import type {
   LatestDocumentTaskResponse,
   KnowledgeMasteryResponse,
   LearningRecordListResponse,
+  RecommendationFeedbackAction,
+  RecommendationHistoryResponse,
   RagCitation,
   PlanConfirmRequest,
   PlanConfirmResponse,
@@ -43,6 +47,7 @@ import type {
 } from '@/types'
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
+const mockRecommendationHistory = new Map<number, RecommendationHistoryResponse>()
 
 function toCourseListItem(course: BackendCourse): CourseListItem {
   if (!Number.isInteger(course.id) || typeof course.name !== 'string' || !course.name.trim()) {
@@ -997,5 +1002,63 @@ export const learningApi = {
     return parseLearningRecords(
       unwrapApiResponse<unknown>(await apiClient.get(`/courses/${courseId}/learning-records`)),
     )
+  },
+}
+
+function parseRecommendations(value: unknown): CourseRecommendationsResponse {
+  if (!isRecord(value) || !isRecord(value.course) || !Number.isInteger(value.course.id) || typeof value.course.name !== 'string' || typeof value.target_date !== 'string' || typeof value.algorithm_version !== 'string' || typeof value.strategy_summary !== 'string' || !Array.isArray(value.items)) {
+    throw new ApiEnvelopeError('后端返回的推荐数据结构不完整')
+  }
+  const items = value.items as CourseRecommendationItem[]
+  if (items.some((item) => !item || typeof item.recommendation_key !== 'string' || !Number.isFinite(item.score) || !Array.isArray(item.signals) || !item.action)) {
+    throw new ApiEnvelopeError('后端返回的推荐条目不完整')
+  }
+  return value as unknown as CourseRecommendationsResponse
+}
+
+function parseRecommendationHistory(value: unknown): RecommendationHistoryResponse {
+  if (!isRecord(value) || !Array.isArray(value.items) || typeof value.total !== 'number' || !isRecord(value.metrics)) {
+    throw new ApiEnvelopeError('后端返回的推荐历史结构不完整')
+  }
+  return value as unknown as RecommendationHistoryResponse
+}
+
+function mockRecommendations(courseId: number): CourseRecommendationsResponse {
+  const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+  if (!course) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+  const item: CourseRecommendationItem = {
+    recommendation_key: `rule-v2:${courseId}:create_plan:${courseId}`,
+    item_type: 'create_plan', item_id: courseId, course_id: courseId,
+    title: '创建学习计划', subtitle: '演示课程尚无生效学习计划', score: 55,
+    reason: '演示模式：当前课程尚无生效学习计划，建议先生成一份学习计划。', estimated_minutes: null,
+    knowledge_point: null, signals: [{ code: 'rule_base', label: '规则基础分', value: 1, contribution: 55 }], score_breakdown: { rule_base: 55 }, action: { type: 'open_plan', label: '创建计划' },
+  }
+  return { course: { id: courseId, name: course.name }, target_date: new Date().toISOString().slice(0, 10), algorithm_version: 'rule-v2', strategy_summary: '演示模式：基于演示课程状态生成规则建议。', items: [item] }
+}
+
+export const recommendationApi = {
+  async list(courseId: number, params: { target_date?: string; limit?: number } = {}): Promise<CourseRecommendationsResponse> {
+    if (mockEnabled) { await mockDelay(); return mockRecommendations(courseId) }
+    const query = new URLSearchParams()
+    if (params.target_date) query.set('target_date', params.target_date)
+    if (params.limit) query.set('limit', String(params.limit))
+    return parseRecommendations(unwrapApiResponse<unknown>(await apiClient.get(`/courses/${encodeURIComponent(String(courseId))}/recommendations${query.size ? `?${query}` : ''}`)))
+  },
+  async feedback(courseId: number, payload: { recommendation_key: string; action: RecommendationFeedbackAction }): Promise<{ record_id: number; accepted: boolean; action: RecommendationFeedbackAction }> {
+    if (mockEnabled) {
+      await mockDelay(); const recommendation = mockRecommendations(courseId).items.find((item) => item.recommendation_key === payload.recommendation_key)
+      if (!recommendation) throw new ApiEnvelopeError('推荐不存在', 404)
+      const history = mockRecommendationHistory.get(courseId) || { items: [], total: 0, metrics: { clicked: 0, saved: 0, skipped: 0 } }
+      if (!history.items.some((item) => item.item_type === recommendation.item_type && item.item_id === recommendation.item_id && item.feedback_action === payload.action)) {
+        history.items.unshift({ record_id: Date.now(), item_type: recommendation.item_type, item_id: recommendation.item_id, title: recommendation.title, score: recommendation.score, reason: recommendation.reason, feedback_action: payload.action, created_at: new Date().toISOString() }); history.total += 1; history.metrics[payload.action] += 1
+      }
+      mockRecommendationHistory.set(courseId, history); return { record_id: history.items[0].record_id, accepted: true, action: payload.action }
+    }
+    return unwrapApiResponse(await apiClient.post(`/courses/${encodeURIComponent(String(courseId))}/recommendations/feedback`, payload)) as { record_id: number; accepted: boolean; action: RecommendationFeedbackAction }
+  },
+  async history(courseId: number, params: { limit?: number; offset?: number; action?: RecommendationFeedbackAction; item_type?: string } = {}): Promise<RecommendationHistoryResponse> {
+    if (mockEnabled) { await mockDelay(); return structuredClone(mockRecommendationHistory.get(courseId) || { items: [], total: 0, metrics: { clicked: 0, saved: 0, skipped: 0 } }) }
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))
+    return parseRecommendationHistory(unwrapApiResponse<unknown>(await apiClient.get(`/courses/${encodeURIComponent(String(courseId))}/recommendations/history?${query}`)))
   },
 }

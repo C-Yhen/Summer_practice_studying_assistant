@@ -127,6 +127,57 @@ export interface LearningRecordListResponse {
   summary: { minutes: number }
 }
 
+export type RecommendationType = 'study_task' | 'mastery_review' | 'course_chat' | 'create_plan' | 'upload_document' | 'weekly_report'
+export type RecommendationFeedbackAction = 'clicked' | 'saved' | 'skipped'
+
+export interface RecommendationSignal {
+  code: string
+  label: string
+  value: number
+  contribution: number
+}
+
+export interface CourseRecommendationItem {
+  recommendation_key: string
+  item_type: RecommendationType
+  item_id: number
+  course_id: number
+  title: string
+  subtitle: string
+  score: number
+  reason: string
+  estimated_minutes: number | null
+  knowledge_point: { id: number; name: string; score: number; attempts: number } | null
+  signals: RecommendationSignal[]
+  score_breakdown: Record<string, number>
+  action: { type: string; label: string }
+}
+
+export interface CourseRecommendationsResponse {
+  course: { id: number; name: string }
+  target_date: string
+  algorithm_version: string
+  strategy_summary: string
+  items: CourseRecommendationItem[]
+}
+
+export interface RecommendationHistoryItem {
+  record_id: number
+  item_type: RecommendationType
+  item_id: number
+  title: string
+  score: number
+  reason: string
+  feedback_action: RecommendationFeedbackAction | null
+  created_at: string
+}
+
+export interface RecommendationHistoryResponse {
+  items: RecommendationHistoryItem[]
+  total: number
+  metrics: Record<RecommendationFeedbackAction, number>
+}
+
 export interface BackendAsyncTask {
   task_id: string
   task_type: string

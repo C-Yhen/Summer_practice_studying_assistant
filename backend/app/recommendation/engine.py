@@ -2,40 +2,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class RecommendationFeatures:
-    knowledge_match: float
-    weakness: float
-    difficulty_match: float
-    preference_match: float
-    resource_quality: float
-    time_match: float
-
-
-WEIGHTS = {
-    "knowledge_match": 0.30,
-    "weakness": 0.25,
-    "difficulty_match": 0.20,
-    "preference_match": 0.10,
-    "resource_quality": 0.10,
-    "time_match": 0.05,
+ALGORITHM_VERSION = "rule-v2"
+BASE_SCORES = {
+    "study_task": 35.0,
+    "mastery_review": 30.0,
+    "course_chat": 45.0,
+    "create_plan": 55.0,
+    "upload_document": 50.0,
+    "weekly_report": 40.0,
 }
 
 
-def score_recommendation(features: RecommendationFeatures) -> tuple[float, dict[str, float]]:
-    raw = features.__dict__
-    normalized = {name: min(1.0, max(0.0, float(value))) for name, value in raw.items()}
-    weighted_score = sum(normalized[name] * weight for name, weight in WEIGHTS.items())
-    breakdown = {name: round(normalized[name], 4) for name in WEIGHTS}
-    return round(weighted_score * 100, 2), breakdown
+@dataclass(frozen=True)
+class Signal:
+    code: str
+    label: str
+    value: float
+    contribution: float
+
+    def payload(self) -> dict[str, float | str]:
+        return {
+            "code": self.code,
+            "label": self.label,
+            "value": round(min(1.0, max(0.0, self.value)), 4),
+            "contribution": round(self.contribution, 2),
+        }
 
 
-def explain_recommendation(
-    *, knowledge_name: str, mastery: float, difficulty: str, item_type: str
-) -> str:
-    return (
-        f"推荐该{item_type}，因为你在“{knowledge_name}”上的掌握度为"
-        f"{mastery * 100:.0f}%，当前仍需要巩固；内容难度为{difficulty}，"
-        "与当前基础和可用学习时间匹配。"
-    )
+def score(signals: list[Signal]) -> tuple[float, dict[str, float]]:
+    contributions = {signal.code: round(signal.contribution, 2) for signal in signals}
+    return round(min(100.0, max(0.0, sum(contributions.values()))), 2), contributions
+
+
+def base_signal(item_type: str) -> Signal:
+    return Signal("rule_base", "规则基础分", 1.0, BASE_SCORES[item_type])
+
+
+def recommendation_key(course_id: int, item_type: str, item_id: int) -> str:
+    return f"{ALGORITHM_VERSION}:{course_id}:{item_type}:{item_id}"

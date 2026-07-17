@@ -383,6 +383,11 @@ class RecommendationFeedback(BaseModel):
     rating: float | None = Field(default=None, ge=1, le=5)
 
 
+class CourseRecommendationFeedback(BaseModel):
+    recommendation_key: str = Field(min_length=1, max_length=160)
+    action: Literal["clicked", "saved", "skipped"]
+
+
 class AsyncTaskCreate(BaseModel):
     task_type: str = Field(min_length=1, max_length=64)
     input_data: dict[str, Any] = Field(default_factory=dict)
