@@ -197,7 +197,10 @@
 
 - 推荐查询约束 KnowledgePoint 必须属于当前课程，防止不一致的掌握度或任务关联泄漏到推荐中。
 - 推荐卡片反馈成功后仅更新当前卡片状态；切换课程清空状态，历史弹窗打开时同步刷新。
-- 实际测试：`frontend npm run build` 通过；完整后端测试 39 passed。
+- 新增 6 个专项测试，连同原有 2 个推荐测试覆盖 active/candidate/superseded、completed 排除、A/B 用户与课程隔离、伪造 key、掌握度 attempts、文档状态、本地日期学习记录、排序、limit、稳定性及 GET 只读。
+- 测试暴露并修复：任务推荐信号使用的掌握度字典也必须联表校验 KnowledgePoint 属于当前课程。
+- 实际测试：推荐专项 `8 passed`；完整后端 `45 passed`；`frontend npm run build` 通过。
+- 未执行浏览器联调；本次范围集中于后端专项边界测试。
 
 ### 已完成
 

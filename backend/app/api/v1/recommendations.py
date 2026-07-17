@@ -112,9 +112,15 @@ def build_course_recommendations(
     )))
     masteries = {
         item.knowledge_point_id: item
-        for item in db.scalars(select(KnowledgeMastery).where(
-            KnowledgeMastery.user_id == user_id, KnowledgeMastery.course_id == course_id
-        ))
+        for item in db.scalars(
+            select(KnowledgeMastery)
+            .join(KnowledgePoint, KnowledgePoint.id == KnowledgeMastery.knowledge_point_id)
+            .where(
+                KnowledgeMastery.user_id == user_id,
+                KnowledgeMastery.course_id == course_id,
+                KnowledgePoint.course_id == course_id,
+            )
+        )
     }
     items: list[dict] = []
     task_rows = list(db.execute(
