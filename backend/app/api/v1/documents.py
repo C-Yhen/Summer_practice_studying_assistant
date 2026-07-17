@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadF
 from sqlalchemy import select
 
 from backend.app.api.v1.courses import _owned_course
+from backend.app.api.v1.async_tasks import task_payload
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import AsyncTask, Document, DocumentVersion
 from backend.app.providers.llm import get_llm_provider
@@ -18,6 +19,7 @@ from backend.app.services.documents import process_document
 
 router = APIRouter(tags=["documents"])
 ALLOWED_TYPES = {"pdf", "txt", "md", "markdown"}
+DOCUMENT_TASK_TYPES = {"document_parse", "document_process"}
 
 
 def _owned_document(db: DBSession, document_id: int, owner_id: int) -> Document:
@@ -32,6 +34,36 @@ def _owned_document(db: DBSession, document_id: int, owner_id: int) -> Document:
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
+
+
+def _owned_document_task(
+    db: DBSession, document_id: int, task_id: str, owner_id: int
+) -> AsyncTask:
+    """Return a document processing task only when it belongs to this document.
+
+    The endpoint deliberately uses one 404 response for every failed link in the
+    document -> task chain, so a caller cannot use it to discover another
+    document's task identifiers.
+    """
+    try:
+        document = _owned_document(db, document_id, owner_id)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+        raise
+
+    task = db.scalar(
+        select(AsyncTask).where(
+            AsyncTask.public_id == task_id,
+            AsyncTask.user_id == owner_id,
+            AsyncTask.resource_type == "document",
+            AsyncTask.resource_id == str(document.id),
+            AsyncTask.task_type.in_(DOCUMENT_TASK_TYPES),
+        )
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
+    return task
 
 
 @router.post("/courses/{course_id}/documents", status_code=status.HTTP_201_CREATED)
@@ -255,3 +287,10 @@ def latest_document_task(document_id: int, db: DBSession, current_user: CurrentU
     if task is None:
         raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
     return ok({"task_id": task.public_id, "status": task.status, "progress": task.progress, "current_step": task.current_step})
+
+
+@router.get("/documents/{document_id}/tasks/{task_id}")
+def read_document_task(
+    document_id: int, task_id: str, db: DBSession, current_user: CurrentUser
+) -> dict:
+    return ok(task_payload(_owned_document_task(db, document_id, task_id, current_user.id)))

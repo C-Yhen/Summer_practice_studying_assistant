@@ -428,6 +428,7 @@ const mockDocuments: BackendDocument[] = [{
 }]
 const mockTasks = new Map<string, BackendAsyncTask>()
 const mockDocumentTaskIds = new Map<number, string>()
+const mockTaskDocumentIds = new Map<string, number>()
 const mockChatSessions: ChatSession[] = []
 const mockChatMessages = new Map<string, ChatMessage[]>()
 const mockPlans = new Map<number, CurrentStudyPlanResponse>()
@@ -552,6 +553,7 @@ export const documentApi = {
       mockDocuments.unshift(document)
       mockTasks.set(taskId, task)
       mockDocumentTaskIds.set(documentId, taskId)
+      mockTaskDocumentIds.set(taskId, documentId)
       return structuredClone({ document, async_task_id: taskId })
     }
 
@@ -610,6 +612,20 @@ export const documentApi = {
     return value as unknown as LatestDocumentTaskResponse
   },
 
+  async getTask(documentId: number, taskId: string): Promise<BackendAsyncTask> {
+    if (mockEnabled) {
+      await mockDelay()
+      const task = mockTasks.get(taskId)
+      if (!task || mockTaskDocumentIds.get(taskId) !== documentId) {
+        throw new ApiEnvelopeError('任务不存在或不属于当前文档', 404)
+      }
+      return structuredClone(task)
+    }
+    return parseTask(unwrapApiResponse<unknown>(await apiClient.get(
+      `/documents/${documentId}/tasks/${encodeURIComponent(taskId)}`,
+    )))
+  },
+
   async reparse(documentId: number): Promise<DocumentReparseResponse> {
     if (mockEnabled) {
       await mockDelay()
@@ -632,6 +648,7 @@ export const documentApi = {
         created_at: document.updated_at,
       })
       mockDocumentTaskIds.set(documentId, taskId)
+      mockTaskDocumentIds.set(taskId, documentId)
       return { document_id: documentId, version: document.current_version, async_task_id: taskId }
     }
     const value = unwrapApiResponse<unknown>(await apiClient.post(`/documents/${documentId}/reparse`))

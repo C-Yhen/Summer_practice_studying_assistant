@@ -4,8 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { Document, RefreshRight, Upload } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
-import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { asyncTaskApi, courseApi, documentApi } from '@/api/services'
+import { getApiErrorMessage, isApiError, isUnauthorizedError } from '@/api/client'
+import { courseApi, documentApi } from '@/api/services'
 import type { BackendAsyncTask, BackendDocument, CourseListItem } from '@/types'
 
 const POLL_INTERVAL_MS = 1500
@@ -90,11 +90,15 @@ function stopPolling() {
   polling.value = false
 }
 
-function schedulePoll(taskId: string) {
+function isCurrentTask(documentId: number, taskId: string) {
+  return activeDocument.value?.id === documentId && activeTaskId.value === taskId
+}
+
+function schedulePoll(documentId: number, taskId: string) {
   stopPolling()
-  if (!task.value || TERMINAL_STATUSES.has(task.value.status) || activeTaskId.value !== taskId) return
+  if (!task.value || TERMINAL_STATUSES.has(task.value.status) || !isCurrentTask(documentId, taskId)) return
   polling.value = true
-  pollTimer = window.setTimeout(() => void readTask(taskId, true), POLL_INTERVAL_MS)
+  pollTimer = window.setTimeout(() => void readTask(documentId, taskId, true), POLL_INTERVAL_MS)
 }
 
 async function loadCourses() {
@@ -137,28 +141,30 @@ async function refreshActiveDocument(documentId: number) {
   }
 }
 
-async function readTask(taskId: string, isPoll = false) {
+async function readTask(documentId: number, taskId: string, isPoll = false) {
   try {
-    const result = await asyncTaskApi.get(taskId)
-    if (activeTaskId.value !== taskId) return
+    const result = await documentApi.getTask(documentId, taskId)
+    if (!isCurrentTask(documentId, taskId)) return
     task.value = result
     taskError.value = ''
     pollFailures = 0
     if (TERMINAL_STATUSES.has(result.status)) {
       stopPolling()
-      if (activeDocument.value) void refreshActiveDocument(activeDocument.value.id)
+      if (activeDocument.value?.id === documentId) void refreshActiveDocument(documentId)
       if (selectedCourseId.value) void loadDocuments(selectedCourseId.value)
     } else {
-      schedulePoll(taskId)
+      schedulePoll(documentId, taskId)
     }
   } catch (error) {
-    if (activeTaskId.value !== taskId) return
+    if (!isCurrentTask(documentId, taskId)) return
     pollFailures += 1
-    taskError.value = documentErrorMessage(error, '任务状态读取失败')
+    taskError.value = isApiError(error, 404, 'TASK_NOT_FOUND')
+      ? '任务不存在或不属于当前文档'
+      : documentErrorMessage(error, '任务状态读取失败')
     if (pollFailures >= MAX_POLL_FAILURES || !isPoll) {
       stopPolling()
     } else {
-      schedulePoll(taskId)
+      schedulePoll(documentId, taskId)
     }
   }
 }
@@ -174,7 +180,14 @@ async function resolveTask(documentId: number, requestedTaskId: string) {
     }
   }
   activeTaskId.value = taskId
-  await readTask(taskId)
+  await readTask(documentId, taskId)
+
+  if (!requestedTaskId && isCurrentTask(documentId, taskId) && !taskError.value) {
+    void router.replace({
+      name: 'document-tasks',
+      query: { courseId: String(selectedCourseId.value), documentId: String(documentId), taskId },
+    })
+  }
 }
 
 async function initialize() {
@@ -255,7 +268,7 @@ async function refreshAll() {
   if (activeTaskId.value) {
     stopPolling()
     pollFailures = 0
-    await readTask(activeTaskId.value)
+    if (activeDocument.value) await readTask(activeDocument.value.id, activeTaskId.value)
   }
 }
 
@@ -264,7 +277,7 @@ function retryTaskStatus() {
   pollFailures = 0
   taskError.value = ''
   if (activeTaskId.value) {
-    void readTask(activeTaskId.value)
+    if (activeDocument.value) void readTask(activeDocument.value.id, activeTaskId.value)
   } else if (activeDocument.value) {
     void resolveTask(activeDocument.value.id, '')
   }

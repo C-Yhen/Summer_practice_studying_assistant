@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from backend.app.models import AsyncTask, Document, DocumentChunk, DocumentVersion
+from backend.app.models import AsyncTask, Course, Document, DocumentChunk, DocumentVersion
 
 
 def _course(client: TestClient, headers: dict[str, str], name: str = "Round 03") -> int:
@@ -194,3 +194,109 @@ def test_failed_document_parse_records_consistent_error_state(
         assert version is not None
         assert version.status == "failed"
         assert version.error_message == "DOCUMENT_TEXT_EMPTY"
+
+
+def test_document_task_detail_requires_the_matching_document_resource_chain(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_a = _course(client, auth_headers, "Document task course A")
+    course_b = _course(client, auth_headers, "Document task course B")
+
+    def upload(course_id: int, filename: str) -> dict:
+        response = client.post(
+            f"/api/v1/courses/{course_id}/documents",
+            headers=auth_headers,
+            files={"file": (filename, f"content for {filename}".encode(), "text/plain")},
+        )
+        assert response.status_code == 201
+        return response.json()["data"]
+
+    uploaded_a = upload(course_a, "a.txt")
+    uploaded_a_second = upload(course_a, "a-second.txt")
+    uploaded_b = upload(course_b, "b.txt")
+    document_a = uploaded_a["document"]["id"]
+    document_a_second = uploaded_a_second["document"]["id"]
+    document_b = uploaded_b["document"]["id"]
+    task_a = uploaded_a["async_task_id"]
+    task_a_second = uploaded_a_second["async_task_id"]
+    task_b = uploaded_b["async_task_id"]
+
+    # The valid, document-scoped response retains the general task endpoint's shape.
+    scoped = client.get(
+        f"/api/v1/documents/{document_a}/tasks/{task_a}", headers=auth_headers
+    )
+    general = client.get(f"/api/v1/async-tasks/{task_a}", headers=auth_headers)
+    assert scoped.status_code == 200
+    assert general.status_code == 200
+    expected_fields = {
+        "task_id", "task_type", "status", "progress", "current_step", "result_data",
+        "error_message", "retry_count", "cancel_requested", "created_at",
+    }
+    assert expected_fields <= scoped.json()["data"].keys()
+    assert {
+        key: scoped.json()["data"][key] for key in expected_fields
+    } == {
+        key: general.json()["data"][key] for key in expected_fields
+    }
+
+    # The existing latest-task endpoint remains available for a valid document.
+    latest = client.get(
+        f"/api/v1/documents/{document_a}/tasks/latest", headers=auth_headers
+    )
+    assert latest.status_code == 200
+    assert latest.json()["data"]["task_id"] == task_a
+
+    # A task from another document is not readable, even under the same course/user.
+    same_course_mismatch = client.get(
+        f"/api/v1/documents/{document_a}/tasks/{task_a_second}", headers=auth_headers
+    )
+    assert same_course_mismatch.status_code == 404
+    assert same_course_mismatch.json()["detail"] == "TASK_NOT_FOUND"
+
+    # A task from a document in another course is likewise hidden.
+    cross_course_mismatch = client.get(
+        f"/api/v1/documents/{document_a}/tasks/{task_b}", headers=auth_headers
+    )
+    assert cross_course_mismatch.status_code == 404
+    assert cross_course_mismatch.json()["detail"] == "TASK_NOT_FOUND"
+
+    # A document-shaped but non-processing task cannot be exposed by this endpoint.
+    with client.app.state.database.session_factory() as db:
+        owner_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == task_a))
+        assert owner_task is not None
+        non_document_task = AsyncTask(
+            user_id=owner_task.user_id,
+            public_id="non-document-task",
+            task_type="weekly_report",
+            resource_type="document",
+            resource_id=str(document_a),
+        )
+        db.add(non_document_task)
+        db.commit()
+    assert client.get(
+        f"/api/v1/documents/{document_a}/tasks/non-document-task", headers=auth_headers
+    ).status_code == 404
+
+    # Other users cannot use either document or task identifiers to discover the task.
+    second_headers = _second_user(client)
+    other_user = client.get(
+        f"/api/v1/documents/{document_a}/tasks/{task_a}", headers=second_headers
+    )
+    assert other_user.status_code == 404
+    assert other_user.json()["detail"] == "TASK_NOT_FOUND"
+
+    # Archived courses and soft-deleted documents invalidate their document-task chain.
+    with client.app.state.database.session_factory() as db:
+        course = db.get(Course, course_b)
+        document = db.get(Document, document_a_second)
+        assert course is not None and document is not None
+        course.archived = True
+        document.is_deleted = True
+        document.status = "deleted"
+        db.commit()
+    assert client.get(
+        f"/api/v1/documents/{document_b}/tasks/{task_b}", headers=auth_headers
+    ).status_code == 404
+    assert client.get(
+        f"/api/v1/documents/{document_a_second}/tasks/{task_a_second}", headers=auth_headers
+    ).status_code == 404
