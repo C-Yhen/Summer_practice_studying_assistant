@@ -2,6 +2,8 @@ import { ApiEnvelopeError, apiClient, isApiError, mockEnabled, unwrapApiResponse
 import { asyncTasks, courses, todayTasks } from '@/data/mock'
 import type {
   AsyncTask,
+  AsyncTaskListParams,
+  AsyncTaskListResponse,
   BackendAsyncTask,
   BackendCourse,
   BackendCourseListResponse,
@@ -35,6 +37,7 @@ import type {
   StudyTask,
   TaskCompleteRequest,
   TaskCompleteResponse,
+  WeeklyReportRequest,
   TodayTask,
   TodayTaskListResponse,
 } from '@/types'
@@ -170,14 +173,22 @@ function parseTask(value: unknown): BackendAsyncTask {
     !isRecord(value)
     || typeof value.task_id !== 'string'
     || typeof value.task_type !== 'string'
+    || (value.resource_type !== null && typeof value.resource_type !== 'string')
+    || (value.resource_id !== null && typeof value.resource_id !== 'string')
     || typeof value.status !== 'string'
     || typeof value.progress !== 'number'
     || (value.current_step !== null && typeof value.current_step !== 'string')
+    || !isRecord(value.input_data)
     || (value.result_data !== null && !isRecord(value.result_data))
     || (value.error_message !== null && typeof value.error_message !== 'string')
     || typeof value.retry_count !== 'number'
     || typeof value.cancel_requested !== 'boolean'
     || typeof value.created_at !== 'string'
+    || typeof value.updated_at !== 'string'
+    || (value.started_at !== null && typeof value.started_at !== 'string')
+    || (value.finished_at !== null && typeof value.finished_at !== 'string')
+    || typeof value.can_cancel !== 'boolean'
+    || typeof value.can_retry !== 'boolean'
   ) {
     throw new ApiEnvelopeError('后端返回的任务信息不完整')
   }
@@ -541,14 +552,22 @@ export const documentApi = {
       const task: BackendAsyncTask = {
         task_id: taskId,
         task_type: 'document_parse',
+        resource_type: 'document',
+        resource_id: String(documentId),
         status: 'success',
         progress: 100,
         current_step: 'completed',
-        result_data: { document_id: documentId, version: 1, chunk_count: file.size ? 1 : 0 },
+        input_data: { document_id: documentId, version: 1 },
+        result_data: { document_id: documentId, version: 1, page_count: 1, chunk_count: file.size ? 1 : 0 },
         error_message: null,
         retry_count: 0,
         cancel_requested: false,
         created_at: timestamp,
+        updated_at: timestamp,
+        started_at: timestamp,
+        finished_at: timestamp,
+        can_cancel: false,
+        can_retry: false,
       }
       mockDocuments.unshift(document)
       mockTasks.set(taskId, task)
@@ -638,14 +657,22 @@ export const documentApi = {
       mockTasks.set(taskId, {
         task_id: taskId,
         task_type: 'document_parse',
+        resource_type: 'document',
+        resource_id: String(documentId),
         status: 'success',
         progress: 100,
         current_step: 'completed',
-        result_data: { document_id: documentId, version: document.current_version },
+        input_data: { document_id: documentId, version: document.current_version },
+        result_data: { document_id: documentId, version: document.current_version, page_count: 1 },
         error_message: null,
         retry_count: 0,
         cancel_requested: false,
         created_at: document.updated_at,
+        updated_at: document.updated_at,
+        started_at: document.updated_at,
+        finished_at: document.updated_at,
+        can_cancel: false,
+        can_retry: false,
       })
       mockDocumentTaskIds.set(documentId, taskId)
       mockTaskDocumentIds.set(taskId, documentId)
@@ -663,6 +690,23 @@ export const documentApi = {
 }
 
 export const asyncTaskApi = {
+  async list(params: AsyncTaskListParams = {}): Promise<AsyncTaskListResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const all = [...mockTasks.values()]
+        .filter((task) => (!params.status || task.status === params.status) && (!params.task_type || task.task_type === params.task_type))
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      const offset = params.offset || 0
+      const limit = params.limit || 50
+      return structuredClone({ items: all.slice(offset, offset + limit), total: all.length })
+    }
+    const value = unwrapApiResponse<unknown>(await apiClient.get('/async-tasks', { params }))
+    if (!isRecord(value) || !Array.isArray(value.items) || typeof value.total !== 'number') {
+      throw new ApiEnvelopeError('后端返回了无法识别的任务列表结构')
+    }
+    return { items: value.items.map(parseTask), total: value.total }
+  },
+
   async get(taskId: string): Promise<BackendAsyncTask> {
     if (mockEnabled) {
       await mockDelay()
@@ -671,6 +715,61 @@ export const asyncTaskApi = {
       return structuredClone(task)
     }
     return parseTask(unwrapApiResponse<unknown>(await apiClient.get(`/async-tasks/${encodeURIComponent(taskId)}`)))
+  },
+
+  async createWeeklyReport(payload: WeeklyReportRequest): Promise<BackendAsyncTask> {
+    if (mockEnabled) {
+      await mockDelay()
+      const timestamp = new Date().toISOString()
+      const taskId = `demo-weekly-report-${Date.now()}`
+      const task: BackendAsyncTask = {
+        task_id: taskId, task_type: 'weekly_report', resource_type: payload.course_id ? 'course' : 'user', resource_id: payload.course_id ? String(payload.course_id) : '1',
+        status: 'queued', progress: 0, current_step: 'queued', input_data: { ...payload }, result_data: null,
+        error_message: null, retry_count: 0, cancel_requested: false, created_at: timestamp, updated_at: timestamp, started_at: null, finished_at: null, can_cancel: true, can_retry: false,
+      }
+      mockTasks.set(taskId, task)
+      return structuredClone(task)
+    }
+    return parseTask(unwrapApiResponse<unknown>(await apiClient.post('/async-tasks', { task_type: 'weekly_report', input_data: payload })))
+  },
+
+  async cancel(taskId: string): Promise<BackendAsyncTask> {
+    if (mockEnabled) {
+      await mockDelay()
+      const task = mockTasks.get(taskId)
+      if (!task || !task.can_cancel) throw new ApiEnvelopeError('任务不可取消', 409)
+      task.cancel_requested = true
+      task.status = task.status === 'queued' ? 'cancelled' : 'cancelling'
+      task.current_step = task.status === 'cancelled' ? 'cancelled_before_start' : 'cancellation_requested'
+      task.finished_at = task.status === 'cancelled' ? new Date().toISOString() : null
+      task.updated_at = new Date().toISOString()
+      task.can_cancel = false
+      task.can_retry = task.status === 'cancelled'
+      return structuredClone(task)
+    }
+    return parseTask(unwrapApiResponse<unknown>(await apiClient.post(`/async-tasks/${encodeURIComponent(taskId)}/cancel`)))
+  },
+
+  async retry(taskId: string): Promise<BackendAsyncTask> {
+    if (mockEnabled) {
+      await mockDelay()
+      const task = mockTasks.get(taskId)
+      if (!task || !task.can_retry) throw new ApiEnvelopeError('任务不可重试', 409)
+      task.retry_count += 1
+      task.status = 'queued'
+      task.progress = 0
+      task.current_step = 'queued_for_retry'
+      task.error_message = null
+      task.result_data = null
+      task.cancel_requested = false
+      task.started_at = null
+      task.finished_at = null
+      task.updated_at = new Date().toISOString()
+      task.can_cancel = true
+      task.can_retry = false
+      return structuredClone(task)
+    }
+    return parseTask(unwrapApiResponse<unknown>(await apiClient.post(`/async-tasks/${encodeURIComponent(taskId)}/retry`)))
   },
 }
 

@@ -385,9 +385,21 @@ class RecommendationFeedback(BaseModel):
 
 class AsyncTaskCreate(BaseModel):
     task_type: str = Field(min_length=1, max_length=64)
-    resource_type: str | None = Field(default=None, max_length=32)
-    resource_id: str | None = Field(default=None, max_length=64)
     input_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class WeeklyReportInput(BaseModel):
+    start_date: date
+    end_date: date
+    course_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> WeeklyReportInput:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 30:
+            raise ValueError("date range must not exceed 31 days")
+        return self
 
 
 class MCPToolCallCreate(BaseModel):

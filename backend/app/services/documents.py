@@ -9,6 +9,31 @@ from sqlalchemy.orm import Session
 
 from backend.app.models import AsyncTask, Document, DocumentChunk, DocumentVersion, utcnow
 from backend.app.providers.llm import LLMProvider
+from backend.app.services.async_tasks import mark_task_cancelled
+
+
+class DocumentProcessingCancelled(Exception):
+    pass
+
+
+def _raise_if_cancelled(db: Session, document: Document, version: DocumentVersion, task: AsyncTask) -> None:
+    db.refresh(task)
+    if not task.cancel_requested:
+        return
+    has_ready_version = db.scalar(
+        select(DocumentVersion.id).where(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.version_no != version.version_no,
+            DocumentVersion.status == "ready",
+        )
+    )
+    version.status = "cancelled"
+    version.error_message = "CANCELLED_BY_USER"
+    if not has_ready_version:
+        document.status = "uploaded"
+        document.error_message = "CANCELLED_BY_USER"
+    mark_task_cancelled(db, task, "cancelled_by_user")
+    raise DocumentProcessingCancelled()
 
 
 def extract_pages(path: Path, file_type: str) -> list[tuple[int, str]]:
@@ -74,6 +99,7 @@ async def process_document(
         db.add(version)
         db.flush()
     try:
+        _raise_if_cancelled(db, document, version, task)
         task.status = "processing"
         task.progress = 10
         task.current_step = "extracting"
@@ -84,6 +110,7 @@ async def process_document(
         db.commit()
 
         pages = extract_pages(Path(document.file_path), document.file_type)
+        _raise_if_cancelled(db, document, version, task)
         task.progress = 35
         task.current_step = "chunking"
         version.page_count = len(pages)
@@ -94,6 +121,7 @@ async def process_document(
                 pending.append((page_number, chunk, chapter_for(chunk)))
         if not pending:
             raise ValueError("DOCUMENT_TEXT_EMPTY")
+        _raise_if_cancelled(db, document, version, task)
 
         version.status = "embedding"
         if target_version == document.current_version:
@@ -102,6 +130,7 @@ async def process_document(
         task.current_step = "embedding"
         db.commit()
         embeddings = await provider.embed([item[1] for item in pending]) if pending else []
+        _raise_if_cancelled(db, document, version, task)
 
         for index, ((page_number, content, chapter), embedding) in enumerate(
             zip(pending, embeddings, strict=True)
@@ -128,6 +157,7 @@ async def process_document(
             )
             .values(is_active=False)
         )
+        _raise_if_cancelled(db, document, version, task)
         document.current_version = target_version
         document.page_count = len(pages)
         document.status = "ready"
@@ -141,10 +171,13 @@ async def process_document(
         task.result_data = {
             "document_id": document.id,
             "version": target_version,
+            "page_count": len(pages),
             "chunk_count": len(pending),
         }
         task.finished_at = utcnow()
         db.commit()
+    except DocumentProcessingCancelled:
+        return
     except Exception as exc:
         db.rollback()
         managed_document = db.get(Document, document.id)

@@ -70,7 +70,7 @@ function examSummary() {
 }
 function taskTypeLabel(type: string) { return ({ review: '复习', practice: '练习', reading: '阅读', quiz: '测试', study: '学习' } as Record<string, string>)[type] || type }
 function priorityLabel(task: DashboardTodayTask) { return task.priority >= 0.8 ? '高' : task.priority >= 0.5 ? '中' : '低' }
-function asyncTaskName(task: DashboardAsyncTask) { return ({ document_parse: '文档解析', document_process: '文档处理', study_plan_generate: '学习计划生成', rag_answer: '问答处理' } as Record<string, string>)[task.task_type] || task.task_type }
+function asyncTaskName(task: DashboardAsyncTask) { return ({ document_parse: '文档解析', document_process: '文档处理', weekly_report: '学习周报', study_plan_generate: '学习计划生成', rag_answer: '问答处理' } as Record<string, string>)[task.task_type] || task.task_type }
 onMounted(loadOverview)
 </script>
 
@@ -113,7 +113,7 @@ onMounted(loadOverview)
         <article class="content-card card-pad shortcut-card"><div class="card-header"><div><h2>快捷入口</h2><p>继续当前课程的真实流程</p></div></div><div class="shortcut-grid"><button @click="router.push(withCourse('/upload'))"><el-icon><UploadFilled /></el-icon><span>上传资料</span></button><button @click="router.push(withCourse('/chat'))"><el-icon><ChatDotRound /></el-icon><span>课程问答</span></button><button @click="router.push(withCourse('/plan'))"><el-icon><Clock /></el-icon><span>学习计划</span></button><button @click="router.push(withCourse('/today'))"><el-icon><Reading /></el-icon><span>今日任务</span></button></div></article>
         <article class="content-card card-pad jobs-card">
           <div class="card-header"><div><h2>最近处理任务</h2><p>仅展示当前账号最近 3 项真实异步任务</p></div><button class="card-link" @click="router.push('/tasks')">任务中心 →</button></div>
-          <div v-if="overview.recent_async_tasks.length" class="job-list"><div v-for="job in overview.recent_async_tasks" :key="job.task_id" class="job-row"><span class="job-icon"><el-icon><Clock /></el-icon></span><div class="job-main"><b>{{ asyncTaskName(job) }}</b><small>{{ job.current_step || job.task_type }}</small><el-progress v-if="!['success', 'succeeded', 'failed', 'cancelled'].includes(job.status)" :percentage="job.progress" :show-text="false" :stroke-width="5" /></div><StatusPill :status="job.status" /></div></div><el-empty v-else description="暂无异步处理任务" :image-size="62" />
+          <div v-if="overview.recent_async_tasks.length" class="job-list"><button v-for="job in overview.recent_async_tasks" :key="job.task_id" class="job-row" @click="router.push({ name: 'tasks', query: { taskId: job.task_id } })"><span class="job-icon"><el-icon><Clock /></el-icon></span><div class="job-main"><b>{{ asyncTaskName(job) }}</b><small>{{ job.current_step || job.task_type }}</small><el-progress v-if="!['success', 'succeeded', 'failed', 'cancelled'].includes(job.status)" :percentage="job.progress" :show-text="false" :stroke-width="5" /></div><StatusPill :status="job.status" /></button></div><el-empty v-else description="暂无异步处理任务" :image-size="62" />
         </article>
       </section>
     </template>

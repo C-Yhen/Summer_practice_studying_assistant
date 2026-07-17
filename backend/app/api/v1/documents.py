@@ -8,14 +8,12 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadF
 from sqlalchemy import select
 
 from backend.app.api.v1.courses import _owned_course
-from backend.app.api.v1.async_tasks import task_payload
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import AsyncTask, Document, DocumentVersion
-from backend.app.providers.llm import get_llm_provider
 from backend.app.responses import ok
 from backend.app.schemas import DocumentRead
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
-from backend.app.services.documents import process_document
+from backend.app.services.async_tasks import dispatch_async_task, task_payload
 
 router = APIRouter(tags=["documents"])
 ALLOWED_TYPES = {"pdf", "txt", "md", "markdown"}
@@ -124,29 +122,16 @@ async def upload_document(
         raise
     db.refresh(document)
     db.refresh(task)
-    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
-        try:
-            await process_document(db, document, task, get_llm_provider(settings))
-        except Exception:
-            # process_document persists a consistent failed document/version/task state.
-            db.refresh(document)
-            db.refresh(task)
-    else:
-        from backend.app.tasks.jobs import process_document_job
-
-        try:
-            process_document_job.delay(document.id, task.public_id)
-        except Exception as exc:
-            document.status = "failed"
-            document.error_message = f"TASK_DISPATCH_FAILED: {exc}"
-            version.status = "failed"
-            version.error_message = document.error_message
-            task.status = "failed"
-            task.current_step = "dispatch_failed"
-            task.error_message = document.error_message
-            db.commit()
-            db.refresh(document)
-            db.refresh(task)
+    await dispatch_async_task(db, task, settings)
+    db.refresh(task)
+    db.refresh(document)
+    if task.status == "failed" and task.current_step == "dispatch_failed":
+        document.status = "failed"
+        document.error_message = task.error_message
+        version.status = "failed"
+        version.error_message = task.error_message
+        db.commit()
+        db.refresh(document)
     return ok({
         "document": DocumentRead.model_validate(document).model_dump(mode="json"),
         "async_task_id": task.public_id,
@@ -200,12 +185,8 @@ async def reparse_document(
     db.add(task)
     db.commit()
     db.refresh(task)
-    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
-        await process_document(db, document, task, get_llm_provider(settings))
-    else:
-        from backend.app.tasks.jobs import process_document_job
-
-        process_document_job.delay(document.id, task.public_id)
+    await dispatch_async_task(db, task, settings)
+    db.refresh(task)
     return ok({"document_id": document.id, "version": target_version, "async_task_id": task.public_id})
 
 

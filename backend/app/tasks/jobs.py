@@ -8,9 +8,11 @@ from sqlalchemy import select
 from backend.app.cache import set_task_progress
 from backend.app.config import get_settings
 from backend.app.database import Database
-from backend.app.models import AsyncTask, Document, utcnow
+from backend.app.models import AsyncTask, Document
 from backend.app.providers.llm import get_llm_provider
+from backend.app.services.async_tasks import mark_dispatch_failed, mark_task_cancelled
 from backend.app.services.documents import process_document
+from backend.app.services.reports import generate_weekly_report
 
 
 @shared_task(bind=True, autoretry_for=(ConnectionError, TimeoutError), retry_backoff=True, max_retries=3)
@@ -23,14 +25,13 @@ def process_document_job(self, document_id: int, task_public_id: str) -> dict:
             task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == task_public_id))
             if document is None or task is None:
                 raise ValueError("document or task no longer exists")
-            if task.status == "success":
+            if task.status in {"success", "failed", "cancelled"}:
                 return task.result_data
             if task.cancel_requested:
-                task.status = "cancelled"
-                db.commit()
+                mark_task_cancelled(db, task, "cancelled_before_start")
                 return {"cancelled": True}
-            set_task_progress(task.public_id, {"status": "processing", "progress": 5, "current_step": "worker_started"})
             asyncio.run(process_document(db, document, task, get_llm_provider(settings)))
+            db.refresh(task)
             set_task_progress(task.public_id, {"status": task.status, "progress": task.progress, "current_step": task.current_step})
             return task.result_data
     finally:
@@ -46,19 +47,18 @@ def generate_weekly_report_job(self, task_public_id: str) -> dict:
             task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == task_public_id))
             if task is None:
                 raise ValueError("task no longer exists")
-            task.status = "processing"
-            task.progress = 30
-            task.current_step = "aggregating_learning_data"
-            task.started_at = utcnow()
-            db.commit()
-            result = {"summary": "本周学习报告已生成。", "task_type": task.task_type}
-            task.status = "success"
-            task.progress = 100
-            task.current_step = "completed"
-            task.result_data = result
-            task.finished_at = utcnow()
-            db.commit()
-            set_task_progress(task.public_id, {"status": "success", "progress": 100, "current_step": "completed"})
+            if task.status in {"success", "failed", "cancelled"}:
+                return task.result_data
+            if task.cancel_requested:
+                mark_task_cancelled(db, task, "cancelled_before_start")
+                return {"cancelled": True}
+            try:
+                result = generate_weekly_report(db, task)
+            except Exception:
+                mark_dispatch_failed(db, task, "WEEKLY_REPORT_FAILED")
+                return {"failed": True}
+            db.refresh(task)
+            set_task_progress(task.public_id, {"status": task.status, "progress": task.progress, "current_step": task.current_step})
             return result
     finally:
         database.engine.dispose()

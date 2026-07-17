@@ -130,14 +130,40 @@ export interface LearningRecordListResponse {
 export interface BackendAsyncTask {
   task_id: string
   task_type: string
+  resource_type: string | null
+  resource_id: string | null
   status: string
   progress: number
   current_step: string | null
+  input_data: Record<string, unknown>
   result_data: Record<string, unknown> | null
   error_message: string | null
   retry_count: number
   cancel_requested: boolean
   created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  can_cancel: boolean
+  can_retry: boolean
+}
+
+export interface AsyncTaskListParams {
+  status?: string
+  task_type?: string
+  limit?: number
+  offset?: number
+}
+
+export interface AsyncTaskListResponse {
+  items: BackendAsyncTask[]
+  total: number
+}
+
+export interface WeeklyReportRequest {
+  start_date: string
+  end_date: string
+  course_id?: number | null
 }
 
 export interface LatestDocumentTaskResponse {
