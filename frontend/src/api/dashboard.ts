@@ -1,5 +1,6 @@
 import { ApiEnvelopeError, apiClient, mockEnabled, unwrapApiResponse } from './client'
-import type { DashboardOverview } from '@/types'
+import { courseApi } from './services'
+import type { CourseListItem, DashboardOverview } from '@/types'
 
 export interface DashboardOverviewParams {
   target_date: string
@@ -135,7 +136,10 @@ function shiftDate(source: string, offset: number): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-function mockOverview(params: DashboardOverviewParams): DashboardOverview {
+function mockOverview(
+  params: DashboardOverviewParams,
+  selectedCourse?: CourseListItem,
+): DashboardOverview {
   const days = params.days ?? 7
   const rangeStart = shiftDate(params.target_date, -(days - 1))
   return {
@@ -146,15 +150,20 @@ function mockOverview(params: DashboardOverviewParams): DashboardOverview {
     course_count: 1,
     ready_document_count: 1,
     focus_course: {
-      id: params.course_id ?? 1,
-      name: '演示课程',
-      code: 'DEMO-101',
-      exam_date: shiftDate(params.target_date, 7),
-      days_until_exam: 7,
+      id: selectedCourse?.id ?? 1,
+      name: selectedCourse?.name ?? '演示课程',
+      code: selectedCourse?.code ?? 'DEMO-101',
+      exam_date: selectedCourse?.examDate ?? shiftDate(params.target_date, 7),
+      days_until_exam: selectedCourse?.examDate
+        ? Math.ceil(
+          (new Date(`${selectedCourse.examDate}T00:00:00`).getTime()
+            - new Date(`${params.target_date}T00:00:00`).getTime()) / 86400000,
+        )
+        : 7,
       has_active_plan: true,
     },
     today: {
-      items: [{ id: 1, course_id: params.course_id ?? 1, title: '完成演示复习任务', task_type: 'review', estimated_minutes: 30, actual_minutes: null, priority: 0.9, difficulty: 'basic', status: 'todo', scheduled_date: params.target_date }],
+      items: [{ id: 1, course_id: selectedCourse?.id ?? 1, title: '完成演示复习任务', task_type: 'review', estimated_minutes: 30, actual_minutes: null, priority: 0.9, difficulty: 'basic', status: 'todo', scheduled_date: params.target_date }],
       total_count: 1,
       completed_count: 0,
       pending_count: 1,
@@ -164,8 +173,8 @@ function mockOverview(params: DashboardOverviewParams): DashboardOverview {
     },
     metrics: { today_focus_minutes: 0, today_completion_rate: 0, average_mastery: 0.42, active_course_count: 1, ready_document_count: 1, study_days_in_range: 0 },
     trend: Array.from({ length: days }, (_, index) => ({ date: shiftDate(rangeStart, index), label: `第${index + 1}天`, learning_minutes: 0, scheduled_tasks: index === days - 1 ? 1 : 0, completed_tasks: 0, completion_rate: 0 })),
-    weak_points: [{ knowledge_point_id: 1, knowledge_point: '演示知识点', course_id: params.course_id ?? 1, course_name: '演示课程', score: 0.42, attempts: 1, confidence: 0.5 }],
-    next_action: { type: 'today_task', title: '继续完成：完成演示复习任务', reason: '这是今天优先级最高的未完成任务', route: `/today?courseId=${params.course_id ?? 1}` },
+    weak_points: [{ knowledge_point_id: 1, knowledge_point: '演示知识点', course_id: selectedCourse?.id ?? 1, course_name: selectedCourse?.name ?? '演示课程', score: 0.42, attempts: 1, confidence: 0.5 }],
+    next_action: { type: 'today_task', title: '继续完成：完成演示复习任务', reason: '这是今天优先级最高的未完成任务', route: `/today?courseId=${selectedCourse?.id ?? 1}` },
     recent_async_tasks: [],
   }
 }
@@ -174,7 +183,10 @@ export const dashboardApi = {
   async getOverview(params: DashboardOverviewParams): Promise<DashboardOverview> {
     if (mockEnabled) {
       await new Promise((resolve) => window.setTimeout(resolve, 220))
-      return mockOverview(params)
+      const selectedCourse = params.course_id === undefined
+        ? undefined
+        : await courseApi.get(params.course_id)
+      return mockOverview(params, selectedCourse)
     }
     return parseDashboardOverview(
       unwrapApiResponse<unknown>(await apiClient.get('/dashboard/overview', { params })),

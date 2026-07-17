@@ -15,12 +15,16 @@ import type {
   ChatSessionCreateResponse,
   ChatSessionListResponse,
   CourseCreateRequest,
+  CourseUpdateRequest,
   CourseListItem,
   CourseListResult,
   CurrentStudyPlanResponse,
   DocumentListResponse,
+  DocumentReparseResponse,
   DocumentUploadResponse,
   LatestDocumentTaskResponse,
+  KnowledgeMasteryResponse,
+  LearningRecordListResponse,
   RagCitation,
   PlanConfirmRequest,
   PlanConfirmResponse,
@@ -109,6 +113,56 @@ function parseDocumentList(value: unknown): DocumentListResponse {
     throw new ApiEnvelopeError('后端返回了无法识别的文档列表结构')
   }
   return { items: value.items.map(parseDocument), total: value.total }
+}
+
+function parseMastery(value: unknown): KnowledgeMasteryResponse {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new ApiEnvelopeError('后端返回了无法识别的掌握度结构')
+  }
+  const items = value.items.map((item) => {
+    if (
+      !isRecord(item)
+      || !Number.isInteger(item.knowledge_point_id)
+      || typeof item.knowledge_point !== 'string'
+      || (item.score !== null && typeof item.score !== 'number')
+      || (item.confidence !== null && typeof item.confidence !== 'number')
+      || !Number.isInteger(item.attempts)
+      || (item.trend !== null && typeof item.trend !== 'string')
+      || typeof item.has_record !== 'boolean'
+    ) throw new ApiEnvelopeError('后端返回的掌握度信息不完整')
+    return item
+  })
+  return { items } as unknown as KnowledgeMasteryResponse
+}
+
+function parseLearningRecords(value: unknown): LearningRecordListResponse {
+  if (
+    !isRecord(value)
+    || !Array.isArray(value.items)
+    || typeof value.total !== 'number'
+    || !isRecord(value.summary)
+    || typeof value.summary.minutes !== 'number'
+  ) throw new ApiEnvelopeError('后端返回了无法识别的学习记录结构')
+  const items = value.items.map((item) => {
+    if (
+      !isRecord(item)
+      || !Number.isInteger(item.id)
+      || (item.task_id !== null && !Number.isInteger(item.task_id))
+      || (item.task_title !== null && typeof item.task_title !== 'string')
+      || (item.knowledge_point_id !== null && !Number.isInteger(item.knowledge_point_id))
+      || (item.knowledge_point !== null && typeof item.knowledge_point !== 'string')
+      || typeof item.record_type !== 'string'
+      || !Number.isInteger(item.duration_seconds)
+      || typeof item.completed !== 'boolean'
+      || typeof item.occurred_at !== 'string'
+    ) throw new ApiEnvelopeError('后端返回的学习记录信息不完整')
+    return item
+  })
+  return {
+    items,
+    total: value.total,
+    summary: { minutes: value.summary.minutes },
+  } as unknown as LearningRecordListResponse
 }
 
 function parseTask(value: unknown): BackendAsyncTask {
@@ -385,7 +439,8 @@ export const courseApi = {
   async list(): Promise<CourseListResult> {
     if (mockEnabled) {
       await mockDelay()
-      return parseCourseList({ items: structuredClone(mockCourseRecords), total: mockCourseRecords.length })
+      const items = mockCourseRecords.filter((course) => !course.archived)
+      return parseCourseList({ items: structuredClone(items), total: items.length })
     }
     const data = unwrapApiResponse<BackendCourseListResponse>(await apiClient.get('/courses'))
     return parseCourseList(data)
@@ -413,6 +468,49 @@ export const courseApi = {
     }
     const data = unwrapApiResponse<BackendCourse>(await apiClient.post('/courses', payload))
     return toCourseListItem(data)
+  },
+
+  async get(courseId: number): Promise<CourseListItem> {
+    if (mockEnabled) {
+      await mockDelay()
+      const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+      if (!course) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+      return toCourseListItem(structuredClone(course))
+    }
+    return toCourseListItem(
+      unwrapApiResponse<BackendCourse>(await apiClient.get(`/courses/${courseId}`)),
+    )
+  },
+
+  async update(courseId: number, payload: CourseUpdateRequest): Promise<CourseListItem> {
+    if (mockEnabled) {
+      await mockDelay()
+      const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+      if (!course) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+      if (payload.name !== undefined) course.name = payload.name.trim()
+      if (payload.code !== undefined) course.code = payload.code
+      if (payload.description !== undefined) course.description = payload.description
+      if (payload.exam_date !== undefined) course.exam_date = payload.exam_date
+      if (payload.target_score !== undefined) course.target_score = payload.target_score
+      if (payload.color !== undefined) course.color = payload.color
+      course.updated_at = new Date().toISOString()
+      return toCourseListItem(structuredClone(course))
+    }
+    return toCourseListItem(
+      unwrapApiResponse<BackendCourse>(await apiClient.patch(`/courses/${courseId}`, payload)),
+    )
+  },
+
+  async archive(courseId: number): Promise<void> {
+    if (mockEnabled) {
+      await mockDelay()
+      const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+      if (!course) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+      course.archived = true
+      course.updated_at = new Date().toISOString()
+      return
+    }
+    unwrapApiResponse<unknown>(await apiClient.delete(`/courses/${courseId}`))
   },
 }
 
@@ -510,6 +608,40 @@ export const documentApi = {
       throw new ApiEnvelopeError('后端返回了无法识别的文档任务')
     }
     return value as unknown as LatestDocumentTaskResponse
+  },
+
+  async reparse(documentId: number): Promise<DocumentReparseResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      const document = mockDocuments.find((item) => item.id === documentId)
+      if (!document) throw new ApiEnvelopeError('演示文档不存在')
+      document.current_version += 1
+      document.status = 'ready'
+      document.updated_at = new Date().toISOString()
+      const taskId = `demo-document-task-${documentId}-${document.current_version}`
+      mockTasks.set(taskId, {
+        task_id: taskId,
+        task_type: 'document_parse',
+        status: 'success',
+        progress: 100,
+        current_step: 'completed',
+        result_data: { document_id: documentId, version: document.current_version },
+        error_message: null,
+        retry_count: 0,
+        cancel_requested: false,
+        created_at: document.updated_at,
+      })
+      mockDocumentTaskIds.set(documentId, taskId)
+      return { document_id: documentId, version: document.current_version, async_task_id: taskId }
+    }
+    const value = unwrapApiResponse<unknown>(await apiClient.post(`/documents/${documentId}/reparse`))
+    if (
+      !isRecord(value)
+      || !Number.isInteger(value.document_id)
+      || !Number.isInteger(value.version)
+      || typeof value.async_task_id !== 'string'
+    ) throw new ApiEnvelopeError('后端返回了无法识别的重新解析结果')
+    return value as unknown as DocumentReparseResponse
   },
 }
 
@@ -726,4 +858,28 @@ export const learningApi = {
   getCourses: () => courseApi.list(),
   getTodayTasks: () => withMockFallback<StudyTask[]>(apiClient.get('/study-tasks/today'), todayTasks),
   getAsyncTasks: () => withMockFallback<AsyncTask[]>(apiClient.get('/async-tasks'), asyncTasks),
+  async getMastery(courseId: number): Promise<KnowledgeMasteryResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      if (!mockCourseRecords.some((course) => course.id === courseId && !course.archived)) {
+        throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+      }
+      return { items: [] }
+    }
+    return parseMastery(
+      unwrapApiResponse<unknown>(await apiClient.get(`/courses/${courseId}/knowledge-mastery`)),
+    )
+  },
+  async getRecords(courseId: number): Promise<LearningRecordListResponse> {
+    if (mockEnabled) {
+      await mockDelay()
+      if (!mockCourseRecords.some((course) => course.id === courseId && !course.archived)) {
+        throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+      }
+      return { items: [], total: 0, summary: { minutes: 0 } }
+    }
+    return parseLearningRecords(
+      unwrapApiResponse<unknown>(await apiClient.get(`/courses/${courseId}/learning-records`)),
+    )
+  },
 }

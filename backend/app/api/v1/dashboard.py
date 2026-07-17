@@ -105,7 +105,12 @@ def dashboard_overview(
             .group_by(Document.course_id)
         )
     }
-    ready_document_count = sum(ready_counts.values())
+    ready_document_count = (
+        ready_counts.get(focus.id, 0)
+        if course_id is not None and focus is not None
+        else sum(ready_counts.values())
+    )
+    scoped_course_count = 1 if course_id is not None and focus is not None else len(courses)
 
     task_scope = [
         StudyTask.user_id == current_user.id,
@@ -263,7 +268,7 @@ def dashboard_overview(
         range_start=range_start,
         range_end=target_date,
         timezone=timezone_name,
-        course_count=len(courses),
+        course_count=scoped_course_count,
         ready_document_count=ready_document_count,
         focus_course={
             "id": focus.id,
@@ -304,7 +309,7 @@ def dashboard_overview(
             "today_focus_minutes": round(learning_seconds_by_day[target_date] / 60),
             "today_completion_rate": round(today_completion_rate, 4),
             "average_mastery": average_mastery,
-            "active_course_count": len(courses),
+            "active_course_count": scoped_course_count,
             "ready_document_count": ready_document_count,
             "study_days_in_range": sum(seconds > 0 for seconds in learning_seconds_by_day.values()),
         },

@@ -39,6 +39,15 @@ export interface CourseCreateRequest {
   color?: string | null
 }
 
+export interface CourseUpdateRequest {
+  name?: string
+  code?: string | null
+  description?: string | null
+  exam_date?: string | null
+  target_score?: number
+  color?: string | null
+}
+
 export interface CourseListItem {
   id: number
   name: string
@@ -78,6 +87,44 @@ export interface DocumentListResponse {
 export interface DocumentUploadResponse {
   document: BackendDocument
   async_task_id: string
+}
+
+export interface DocumentReparseResponse {
+  document_id: number
+  version: number
+  async_task_id: string
+}
+
+export interface KnowledgeMasteryItem {
+  knowledge_point_id: number
+  knowledge_point: string
+  score: number | null
+  confidence: number | null
+  attempts: number
+  trend: string | null
+  has_record: boolean
+}
+
+export interface KnowledgeMasteryResponse {
+  items: KnowledgeMasteryItem[]
+}
+
+export interface LearningRecordItem {
+  id: number
+  task_id: number | null
+  task_title: string | null
+  knowledge_point_id: number | null
+  knowledge_point: string | null
+  record_type: string
+  duration_seconds: number
+  completed: boolean
+  occurred_at: string
+}
+
+export interface LearningRecordListResponse {
+  items: LearningRecordItem[]
+  total: number
+  summary: { minutes: number }
 }
 
 export interface BackendAsyncTask {

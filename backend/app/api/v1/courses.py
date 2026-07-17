@@ -13,7 +13,11 @@ router = APIRouter(prefix="/courses", tags=["courses"])
 
 def _owned_course(db: DBSession, course_id: int, owner_id: int) -> Course:
     course = db.scalar(
-        select(Course).where(Course.id == course_id, Course.owner_id == owner_id)
+        select(Course).where(
+            Course.id == course_id,
+            Course.owner_id == owner_id,
+            Course.archived.is_(False),
+        )
     )
     if course is None:
         # Returning 404 avoids disclosing another user's course identifiers.

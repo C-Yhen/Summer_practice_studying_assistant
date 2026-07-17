@@ -1,64 +1,422 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type { EChartsOption } from 'echarts'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Calendar, ChatDotRound, Document, UploadFilled } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowLeft, ChatDotRound, Delete, Edit, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import EChart from '@/components/EChart.vue'
 import StatusPill from '@/components/StatusPill.vue'
-import { courses } from '@/data/mock'
+import { ApiEnvelopeError, getApiErrorMessage, isApiError, isUnauthorizedError } from '@/api/client'
+import { dashboardApi } from '@/api/dashboard'
+import { courseApi, documentApi, learningApi } from '@/api/services'
+import type {
+  BackendDocument,
+  CourseListItem,
+  DashboardOverview,
+  KnowledgeMasteryItem,
+  LearningRecordItem,
+} from '@/types'
+
+type ViewState = 'loading' | 'ready' | 'invalid-id' | 'not-found' | 'error'
 
 const route = useRoute()
 const router = useRouter()
 const tab = ref('overview')
-const course = computed(() => courses.find((item) => item.id === Number(route.params.id)) || courses[0])
-const chartOption: EChartsOption = {
-  color: ['#5b6cf0'], grid: { top: 15, right: 10, bottom: 10, left: 10, containLabel: true },
-  xAxis: { type: 'category', data: ['关系模型', 'SQL', '函数依赖', '范式', '事务', '索引'], axisLine: { lineStyle: { color: '#e7eaf1' } }, axisTick: { show: false }, axisLabel: { color: '#8993a8', fontSize: 9 } },
-  yAxis: { type: 'value', max: 100, axisLabel: { color: '#a0a8ba', fontSize: 9 }, splitLine: { lineStyle: { color: '#edf0f5', type: 'dashed' } } },
-  series: [{ type: 'bar', data: [84, 78, 52, 46, 58, 71], barWidth: 18, itemStyle: { borderRadius: [6, 6, 0, 0], color: { type: 'linear', x: 0, y: 1, x2: 0, y2: 0, colorStops: [{ offset: 0, color: '#aab2ff' }, { offset: 1, color: '#5969ea' }] } } }],
+const state = ref<ViewState>('loading')
+const pageError = ref('')
+const course = ref<CourseListItem | null>(null)
+const overview = ref<DashboardOverview | null>(null)
+const overviewLoading = ref(false)
+const overviewError = ref('')
+const documents = ref<BackendDocument[]>([])
+const documentsLoading = ref(false)
+const documentsError = ref('')
+const mastery = ref<KnowledgeMasteryItem[]>([])
+const masteryLoading = ref(false)
+const masteryError = ref('')
+const records = ref<LearningRecordItem[]>([])
+const recordsLoading = ref(false)
+const recordsError = ref('')
+const editVisible = ref(false)
+const saving = ref(false)
+const archiving = ref(false)
+const reparsingId = ref<number | null>(null)
+const resolvingTaskId = ref<number | null>(null)
+let loadVersion = 0
+
+const editForm = reactive({
+  name: '',
+  code: '',
+  description: '',
+  examDate: '',
+  targetScore: 85,
+  color: '#5b6cf9',
+})
+
+function localDate() {
+  const date = new Date()
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
-const documents = [
-  { name: '数据库系统概论（第6版）.pdf', type: 'PDF', version: 'v2', chunks: 1204, status: 'success', date: '07-14 09:42' },
-  { name: '数据库课程讲义-范式.pptx', type: 'PPT', version: 'v1', chunks: 186, status: 'success', date: '07-13 21:16' },
-  { name: '期末复习重点.md', type: 'MD', version: 'v3', chunks: 48, status: 'success', date: '07-13 19:08' },
-]
+
+function routeCourseId(): number | null {
+  const raw = Array.isArray(route.params.id) ? route.params.id[0] : route.params.id
+  if (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw)) return null
+  const id = Number(raw)
+  return Number.isSafeInteger(id) ? id : null
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
+}
+
+function isNotFound(error: unknown) {
+  return isApiError(error, 404)
+    || (error instanceof ApiEnvelopeError && error.code === 404)
+}
+
+async function loadOverview(courseId: number, version = loadVersion) {
+  overviewLoading.value = true
+  overviewError.value = ''
+  try {
+    const result = await dashboardApi.getOverview({ target_date: localDate(), days: 7, course_id: courseId })
+    if (version === loadVersion && course.value?.id === courseId) overview.value = result
+  } catch (error) {
+    if (version === loadVersion && course.value?.id === courseId) {
+      overview.value = null
+      overviewError.value = errorMessage(error, '课程概览加载失败')
+    }
+  } finally {
+    if (version === loadVersion && course.value?.id === courseId) overviewLoading.value = false
+  }
+}
+
+async function loadDocuments(courseId: number, version = loadVersion) {
+  documentsLoading.value = true
+  documentsError.value = ''
+  try {
+    const result = await documentApi.list(courseId)
+    if (version === loadVersion && course.value?.id === courseId) documents.value = result.items
+  } catch (error) {
+    if (version === loadVersion && course.value?.id === courseId) {
+      documents.value = []
+      documentsError.value = errorMessage(error, '课程资料加载失败')
+    }
+  } finally {
+    if (version === loadVersion && course.value?.id === courseId) documentsLoading.value = false
+  }
+}
+
+async function loadMastery(courseId: number, version = loadVersion) {
+  masteryLoading.value = true
+  masteryError.value = ''
+  try {
+    const result = await learningApi.getMastery(courseId)
+    if (version === loadVersion && course.value?.id === courseId) mastery.value = result.items
+  } catch (error) {
+    if (version === loadVersion && course.value?.id === courseId) {
+      mastery.value = []
+      masteryError.value = errorMessage(error, '掌握度加载失败')
+    }
+  } finally {
+    if (version === loadVersion && course.value?.id === courseId) masteryLoading.value = false
+  }
+}
+
+async function loadRecords(courseId: number, version = loadVersion) {
+  recordsLoading.value = true
+  recordsError.value = ''
+  try {
+    const result = await learningApi.getRecords(courseId)
+    if (version === loadVersion && course.value?.id === courseId) records.value = result.items
+  } catch (error) {
+    if (version === loadVersion && course.value?.id === courseId) {
+      records.value = []
+      recordsError.value = errorMessage(error, '学习记录加载失败')
+    }
+  } finally {
+    if (version === loadVersion && course.value?.id === courseId) recordsLoading.value = false
+  }
+}
+
+async function loadCourse() {
+  const version = ++loadVersion
+  state.value = 'loading'
+  pageError.value = ''
+  course.value = null
+  overview.value = null
+  documents.value = []
+  mastery.value = []
+  records.value = []
+  overviewError.value = documentsError.value = masteryError.value = recordsError.value = ''
+  const courseId = routeCourseId()
+  if (courseId === null) {
+    state.value = 'invalid-id'
+    return
+  }
+  try {
+    const result = await courseApi.get(courseId)
+    if (version !== loadVersion) return
+    course.value = result
+    state.value = 'ready'
+    await Promise.all([
+      loadOverview(courseId, version),
+      loadDocuments(courseId, version),
+      loadMastery(courseId, version),
+      loadRecords(courseId, version),
+    ])
+  } catch (error) {
+    if (version !== loadVersion) return
+    state.value = isNotFound(error) ? 'not-found' : 'error'
+    pageError.value = isNotFound(error)
+      ? '课程不存在或无权访问'
+      : errorMessage(error, '课程详情加载失败')
+  }
+}
+
+const sortedMastery = computed(() => [...mastery.value].sort((left, right) => {
+  if (!left.has_record && right.has_record) return 1
+  if (left.has_record && !right.has_record) return -1
+  return (left.score ?? 1) - (right.score ?? 1)
+}))
+const completionPercent = computed(() => Math.round((overview.value?.today.completion_rate ?? 0) * 100))
+const trendOption = computed<EChartsOption>(() => ({
+  color: ['#6675ed', '#17a78c'],
+  tooltip: { trigger: 'axis' },
+  grid: { top: 24, right: 18, bottom: 8, left: 10, containLabel: true },
+  xAxis: { type: 'category', data: overview.value?.trend.map((item) => item.label) ?? [] },
+  yAxis: [
+    { type: 'value', min: 0, axisLabel: { formatter: '{value}m' } },
+    { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+  ],
+  series: [
+    { name: '学习时长', type: 'bar', data: overview.value?.trend.map((item) => item.learning_minutes) ?? [] },
+    { name: '任务完成率', type: 'line', yAxisIndex: 1, smooth: true, data: overview.value?.trend.map((item) => Math.round(item.completion_rate * 100)) ?? [] },
+  ],
+}))
+
+function examSummary() {
+  if (!course.value?.examDate) return '尚未设置考试日期'
+  const exam = new Date(`${course.value.examDate}T00:00:00`)
+  const today = new Date(`${localDate()}T00:00:00`)
+  const days = Math.round((exam.getTime() - today.getTime()) / 86400000)
+  if (days > 0) return `距离考试还有 ${days} 天`
+  if (days === 0) return '考试日期为今天'
+  return '考试日期已过'
+}
+
+function contextRoute(path: string) {
+  return course.value ? { path, query: { courseId: String(course.value.id) } } : path
+}
+
+function formatDate(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+
+function openEdit() {
+  if (!course.value) return
+  editForm.name = course.value.name
+  editForm.code = course.value.code || ''
+  editForm.description = course.value.description || ''
+  editForm.examDate = course.value.examDate || ''
+  editForm.targetScore = course.value.targetScore
+  editForm.color = course.value.color
+  editVisible.value = true
+}
+
+async function saveCourse() {
+  if (!course.value || saving.value) return
+  const name = editForm.name.trim()
+  if (!name) return ElMessage.warning('课程名称不能为空')
+  saving.value = true
+  try {
+    course.value = await courseApi.update(course.value.id, {
+      name,
+      code: editForm.code.trim() || null,
+      description: editForm.description.trim() || null,
+      exam_date: editForm.examDate || null,
+      target_score: editForm.targetScore,
+      color: editForm.color || null,
+    })
+    editVisible.value = false
+    ElMessage.success('课程信息已保存')
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '课程修改失败'))
+  } finally {
+    saving.value = false
+  }
+}
+
+async function archiveCourse() {
+  if (!course.value || archiving.value) return
+  try {
+    await ElMessageBox.confirm(
+      '归档后，该课程不会出现在默认课程列表中。本轮不提供归档恢复页面。',
+      '归档课程',
+      { confirmButtonText: '确认归档', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    await courseApi.archive(course.value.id)
+    ElMessage.success('课程已归档')
+    await router.replace('/courses')
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '课程归档失败'))
+  } finally {
+    archiving.value = false
+  }
+}
+
+async function viewDocumentStatus(document: BackendDocument) {
+  if (!course.value || resolvingTaskId.value !== null) return
+  resolvingTaskId.value = document.id
+  try {
+    const task = await documentApi.getLatestTask(document.id)
+    await router.push({
+      name: 'document-tasks',
+      query: { courseId: String(course.value.id), documentId: String(document.id), taskId: task.task_id },
+    })
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '找不到该文档的处理任务'))
+  } finally {
+    resolvingTaskId.value = null
+  }
+}
+
+async function reparseDocument(document: BackendDocument) {
+  if (!course.value || reparsingId.value !== null) return
+  try {
+    await ElMessageBox.confirm(
+      `将为“${document.title}”创建新版本并重新解析，是否继续？`,
+      '重新解析资料',
+      { confirmButtonText: '重新解析', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  reparsingId.value = document.id
+  try {
+    const result = await documentApi.reparse(document.id)
+    await router.push({
+      name: 'document-tasks',
+      query: {
+        courseId: String(course.value.id),
+        documentId: String(document.id),
+        taskId: result.async_task_id,
+      },
+    })
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '重新解析失败'))
+  } finally {
+    reparsingId.value = null
+  }
+}
+
+watch(() => route.params.id, () => void loadCourse(), { immediate: true })
 </script>
 
 <template>
   <div>
-    <PageHeader :title="course.name" eyebrow="COURSE DETAIL" :description="`${course.code} · ${course.teacher} · 目标 ${course.targetScore} 分`">
-      <el-button plain @click="router.push('/courses')"><el-icon><ArrowLeft /></el-icon>返回</el-button>
-      <el-button @click="router.push('/upload')"><el-icon><UploadFilled /></el-icon>上传资料</el-button>
-      <el-button type="primary" @click="router.push('/chat')"><el-icon><ChatDotRound /></el-icon>进入问答</el-button>
+    <PageHeader :title="course?.name || '课程详情'" eyebrow="COURSE DETAIL" description="所有资料、计划、掌握度和学习记录均限定在当前 URL 对应的课程。">
+      <el-button plain @click="router.push('/courses')"><el-icon><ArrowLeft /></el-icon>返回课程</el-button>
     </PageHeader>
 
-    <section class="course-hero">
-      <div class="course-identity"><span>{{ course.name.slice(0,1) }}</span><div><small>当前主课程</small><h2>{{ course.name }}</h2><p>距离考试还有 7 天 · 今日建议学习 120 分钟</p></div></div>
-      <div class="hero-stat"><strong>{{ course.progress }}%</strong><span>学习进度</span></div>
-      <div class="hero-stat"><strong>{{ course.documentCount }}</strong><span>已入库资料</span></div>
-      <div class="hero-stat"><strong>64%</strong><span>平均掌握度</span></div>
-      <div class="exam-date"><el-icon><Calendar /></el-icon><div><small>考试日期</small><strong>{{ course.examDate }}</strong></div></div>
-    </section>
+    <div v-if="state === 'loading'" v-loading="true" class="page-loading"></div>
+    <el-result v-else-if="state === 'invalid-id'" icon="warning" title="无效的课程地址" sub-title="课程 ID 必须是正整数。"><template #extra><el-button type="primary" @click="router.push('/courses')">返回课程列表</el-button></template></el-result>
+    <el-result v-else-if="state === 'not-found'" icon="error" title="课程不存在或无权访问" sub-title="该课程可能不存在、已归档，或不属于当前账号。"><template #extra><el-button type="primary" @click="router.push('/courses')">返回课程列表</el-button></template></el-result>
+    <el-result v-else-if="state === 'error'" icon="error" title="课程详情加载失败" :sub-title="pageError"><template #extra><el-button type="primary" @click="loadCourse">重新加载</el-button></template></el-result>
 
-    <section class="content-card course-content">
-      <el-tabs v-model="tab">
-        <el-tab-pane label="课程概览" name="overview">
-          <div class="overview-grid">
-            <article><div class="card-header"><div><h2>知识点掌握概览</h2><p>最近一次更新：今天 10:20</p></div><button class="card-link" @click="router.push('/mastery')">查看详情 →</button></div><EChart :option="chartOption" height="270px" /></article>
-            <article class="next-card"><span class="soft-tag brand">下一步建议</span><h2>补齐函数依赖前置概念</h2><p>最近 5 道范式题中有 3 道因候选码判断错误而失分。完成下面两个任务后再进入第三范式练习，预计正确率可提升 12%。</p><div class="next-task"><i>1</i><span><b>阅读：函数依赖与属性闭包</b><small>35 分钟 · 讲义第 32–39 页</small></span></div><div class="next-task"><i>2</i><span><b>候选码判断基础练习</b><small>10 题 · 约 20 分钟</small></span></div><el-button type="primary" @click="router.push('/today')">加入今日任务</el-button></article>
-          </div>
-        </el-tab-pane>
-        <el-tab-pane label="课程资料 12" name="documents">
-          <el-table :data="documents" style="width:100%"><el-table-column label="资料名称" min-width="260"><template #default="scope"><div class="doc-name"><span><el-icon><Document /></el-icon></span><div><b>{{ scope.row.name }}</b><small>{{ scope.row.type }} · {{ scope.row.version }}</small></div></div></template></el-table-column><el-table-column prop="chunks" label="文本块" width="110" /><el-table-column label="状态" width="110"><template #default="scope"><StatusPill :status="scope.row.status" /></template></el-table-column><el-table-column prop="date" label="更新时间" width="140" /><el-table-column label="操作" width="130"><template #default><el-button link type="primary">查看</el-button><el-button link>重建</el-button></template></el-table-column></el-table>
-        </el-tab-pane>
-        <el-tab-pane label="知识点 36" name="knowledge"><div class="knowledge-cloud"><button v-for="item in ['关系模型','关系代数','SQL 查询','连接查询','函数依赖','属性闭包','候选码','第二范式','第三范式','BCNF','事务 ACID','并发控制','封锁协议','B+ 树索引']" :key="item">{{ item }}<small>{{ ['函数依赖','第三范式'].includes(item) ? '待加强' : '学习中' }}</small></button></div></el-tab-pane>
-        <el-tab-pane label="学习记录" name="records"><div class="record-list"><div v-for="(item,index) in ['完成范式判断练习，正确率 70%','阅读《函数依赖：从定义到闭包》35 分钟','向 AI 提问「什么是第三范式」','完成 SQL 连接查询练习，正确率 90%']" :key="item"><span>{{ index + 1 }}</span><p><b>{{ item }}</b><small>{{ index === 0 ? '今天 10:20' : `${index} 天前` }}</small></p></div></div></el-tab-pane>
-      </el-tabs>
-    </section>
+    <template v-else-if="course">
+      <section class="course-hero" :style="{ '--course-color': course.color }">
+        <div class="course-identity"><span>{{ course.name.slice(0, 1) }}</span><div><small>{{ course.code || '未设置课程编号' }}</small><h1>{{ course.name }}</h1><p>{{ course.description || '暂无课程说明' }}</p></div></div>
+        <div class="hero-stat"><strong>{{ course.targetScore }}</strong><span>目标成绩</span></div>
+        <div class="hero-stat"><strong>{{ overview?.ready_document_count ?? '--' }}</strong><span>就绪资料</span></div>
+        <div class="hero-stat"><strong>{{ overview?.metrics.average_mastery === null || !overview ? '--' : `${Math.round(overview.metrics.average_mastery * 100)}%` }}</strong><span>平均掌握度</span></div>
+        <div class="exam-date"><small>考试日期</small><strong>{{ course.examDate || '未设置' }}</strong><span>{{ examSummary() }}</span></div>
+      </section>
+
+      <div class="action-row">
+        <span>更新于 {{ formatDate(course.updatedAt) }}</span>
+        <el-button @click="openEdit"><el-icon><Edit /></el-icon>编辑课程</el-button>
+        <el-button @click="router.push(contextRoute('/upload'))"><el-icon><UploadFilled /></el-icon>上传资料</el-button>
+        <el-button type="primary" @click="router.push(contextRoute('/chat'))"><el-icon><ChatDotRound /></el-icon>智能问答</el-button>
+        <el-button type="danger" plain :loading="archiving" @click="archiveCourse"><el-icon><Delete /></el-icon>归档课程</el-button>
+      </div>
+
+      <section class="content-card course-content">
+        <el-tabs v-model="tab">
+          <el-tab-pane label="课程概览" name="overview">
+            <el-alert v-if="overviewError" :title="overviewError" type="error" :closable="false" show-icon><template #default><el-button size="small" @click="loadOverview(course.id)">重试概览</el-button></template></el-alert>
+            <div v-if="overviewLoading" v-loading="true" class="module-loading"></div>
+            <div v-else-if="overview" class="overview-grid">
+              <article class="overview-stats">
+                <div><span>今日任务</span><strong>{{ overview.today.completed_count }}/{{ overview.today.total_count }}</strong><small>完成率 {{ completionPercent }}%</small></div>
+                <div><span>今日计划</span><strong>{{ overview.today.planned_minutes }} 分钟</strong><small>实际 {{ overview.today.actual_minutes }} 分钟</small></div>
+                <div><span>活动计划</span><strong>{{ overview.focus_course?.has_active_plan ? '已生效' : '暂无' }}</strong><small>{{ overview.metrics.study_days_in_range }} 个学习日</small></div>
+              </article>
+              <article class="trend-card"><div class="card-header"><div><h2>近 7 天学习趋势</h2><p>无数据日期按 0 展示</p></div></div><EChart :option="trendOption" height="260px" /></article>
+              <article class="next-card"><span>规则生成的下一步</span><h2>{{ overview.next_action.title }}</h2><p>{{ overview.next_action.reason }}</p><el-button type="primary" @click="router.push(overview.next_action.route)">立即前往</el-button></article>
+              <article class="context-card"><div class="card-header"><div><h2>当前课程入口</h2><p>跳转时保留课程 #{{ course.id }}</p></div></div><div><el-button @click="router.push(contextRoute('/plan'))">学习计划</el-button><el-button @click="router.push(contextRoute('/today'))">今日任务</el-button><el-button @click="router.push(contextRoute('/mastery'))">掌握度</el-button><el-button @click="router.push(contextRoute('/upload'))">上传资料</el-button></div></article>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane :label="`课程资料 ${documents.length}`" name="documents">
+            <div class="tab-toolbar"><span>只展示当前课程的真实资料</span><el-button :loading="documentsLoading" @click="loadDocuments(course.id)"><el-icon><Refresh /></el-icon>刷新</el-button></div>
+            <el-alert v-if="documentsError" :title="documentsError" type="error" :closable="false" show-icon><template #default><el-button size="small" @click="loadDocuments(course.id)">重新加载</el-button></template></el-alert>
+            <el-table v-else v-loading="documentsLoading" :data="documents" empty-text="尚未上传课程资料">
+              <el-table-column label="资料名称" min-width="220"><template #default="scope"><b>{{ scope.row.title }}</b><small class="cell-sub">{{ scope.row.file_type.toUpperCase() }} · v{{ scope.row.current_version }}</small></template></el-table-column>
+              <el-table-column label="状态" width="110"><template #default="scope"><StatusPill :status="scope.row.status" /></template></el-table-column>
+              <el-table-column label="页数" width="80"><template #default="scope">{{ scope.row.page_count ?? '—' }}</template></el-table-column>
+              <el-table-column label="更新时间" min-width="160"><template #default="scope">{{ formatDate(scope.row.updated_at) }}</template></el-table-column>
+              <el-table-column label="错误信息" min-width="170"><template #default="scope">{{ scope.row.error_message || '—' }}</template></el-table-column>
+              <el-table-column label="操作" width="190"><template #default="scope"><el-button link type="primary" :loading="resolvingTaskId === scope.row.id" @click="viewDocumentStatus(scope.row)">处理状态</el-button><el-button link :loading="reparsingId === scope.row.id" :disabled="reparsingId !== null" @click="reparseDocument(scope.row)">重新解析</el-button></template></el-table-column>
+            </el-table>
+            <el-empty v-if="!documentsLoading && !documentsError && !documents.length" description="尚未上传课程资料"><el-button type="primary" @click="router.push(contextRoute('/upload'))">上传资料</el-button></el-empty>
+          </el-tab-pane>
+
+          <el-tab-pane :label="`掌握度 ${mastery.length}`" name="mastery">
+            <div class="tab-toolbar"><span>未产生学习记录的知识点不显示默认分数</span><el-button :loading="masteryLoading" @click="loadMastery(course.id)"><el-icon><Refresh /></el-icon>刷新</el-button></div>
+            <el-alert v-if="masteryError" :title="masteryError" type="error" :closable="false" show-icon><template #default><el-button size="small" @click="loadMastery(course.id)">重新加载</el-button></template></el-alert>
+            <el-table v-else v-loading="masteryLoading" :data="sortedMastery" empty-text="当前课程暂无知识点">
+              <el-table-column prop="knowledge_point" label="知识点" min-width="180" />
+              <el-table-column label="掌握度" min-width="180"><template #default="scope"><template v-if="scope.row.has_record"><el-progress :percentage="Math.round(scope.row.score * 100)" :stroke-width="7" /><small class="cell-sub">置信度 {{ Math.round(scope.row.confidence * 100) }}%</small></template><span v-else>--</span></template></el-table-column>
+              <el-table-column label="练习次数" width="120"><template #default="scope">{{ scope.row.attempts || '尚无学习记录' }}</template></el-table-column>
+              <el-table-column label="趋势" width="120"><template #default="scope">{{ scope.row.trend || '暂无趋势' }}</template></el-table-column>
+            </el-table>
+          </el-tab-pane>
+
+          <el-tab-pane :label="`学习记录 ${records.length}`" name="records">
+            <div class="tab-toolbar"><span>真实学习时长与关联任务</span><el-button :loading="recordsLoading" @click="loadRecords(course.id)"><el-icon><Refresh /></el-icon>刷新</el-button></div>
+            <el-alert v-if="recordsError" :title="recordsError" type="error" :closable="false" show-icon><template #default><el-button size="small" @click="loadRecords(course.id)">重新加载</el-button></template></el-alert>
+            <el-table v-else v-loading="recordsLoading" :data="records" empty-text="当前课程暂无学习记录">
+              <el-table-column prop="record_type" label="类型" width="120" />
+              <el-table-column label="实际时长" width="120"><template #default="scope">{{ Math.round(scope.row.duration_seconds / 60) }} 分钟</template></el-table-column>
+              <el-table-column label="关联任务" min-width="190"><template #default="scope">{{ scope.row.task_title || (scope.row.task_id ? `任务 #${scope.row.task_id}` : '—') }}</template></el-table-column>
+              <el-table-column label="知识点" min-width="150"><template #default="scope">{{ scope.row.knowledge_point || '—' }}</template></el-table-column>
+              <el-table-column label="状态" width="100"><template #default="scope">{{ scope.row.completed ? '已完成' : '未完成' }}</template></el-table-column>
+              <el-table-column label="发生时间" min-width="170"><template #default="scope">{{ formatDate(scope.row.occurred_at) }}</template></el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
+      </section>
+
+      <el-dialog v-model="editVisible" title="编辑课程" width="min(560px, 92vw)" :close-on-click-modal="!saving">
+        <el-form label-position="top">
+          <el-form-item label="课程名称（必填）"><el-input v-model="editForm.name" maxlength="160" /></el-form-item>
+          <div class="form-grid"><el-form-item label="课程编号"><el-input v-model="editForm.code" maxlength="50" /></el-form-item><el-form-item label="目标成绩"><el-input-number v-model="editForm.targetScore" :min="0" :max="100" style="width:100%" /></el-form-item></div>
+          <el-form-item label="课程说明"><el-input v-model="editForm.description" type="textarea" :rows="3" maxlength="5000" /></el-form-item>
+          <div class="form-grid"><el-form-item label="考试日期"><el-date-picker v-model="editForm.examDate" type="date" value-format="YYYY-MM-DD" clearable style="width:100%" /></el-form-item><el-form-item label="课程颜色"><el-color-picker v-model="editForm.color" /></el-form-item></div>
+        </el-form>
+        <template #footer><el-button :disabled="saving" @click="editVisible = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveCourse">保存修改</el-button></template>
+      </el-dialog>
+    </template>
   </div>
 </template>
 
 <style scoped>
-.course-hero{display:flex;align-items:center;gap:30px;padding:24px 28px;margin-bottom:18px;border-radius:19px;background:linear-gradient(115deg,#111f45,#1b2d5d);color:white;box-shadow:0 15px 38px rgba(17,31,69,.16)}.course-identity{display:flex;align-items:center;gap:16px;min-width:290px;margin-right:auto}.course-identity>span{width:57px;height:57px;display:grid;place-items:center;border-radius:17px;background:linear-gradient(145deg,#6474f0,#9b6be7);font-size:24px;font-weight:750}.course-identity small,.exam-date small{color:#8f9bb9;font-size:9px}.course-identity h2{margin:5px 0 4px;font-size:19px}.course-identity p{margin:0;color:#a6b1cb;font-size:9px}.hero-stat{display:flex;flex-direction:column;padding-left:24px;border-left:1px solid rgba(255,255,255,.1)}.hero-stat strong{font-size:20px}.hero-stat span{margin-top:5px;color:#8996b5;font-size:9px}.exam-date{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(255,255,255,.045)}.exam-date div{display:flex;flex-direction:column}.exam-date strong{margin-top:4px;font-size:11px}.course-content{padding:4px 22px 22px}.overview-grid{display:grid;grid-template-columns:1.35fr .65fr;gap:18px}.overview-grid>article{padding:10px}.next-card{padding:19px!important;border-radius:15px;background:#f7f8ff}.next-card h2{margin:14px 0 9px;font-size:16px}.next-card>p{margin:0 0 16px;color:#78829a;font-size:10px;line-height:1.7}.next-task{display:flex;gap:10px;padding:11px 0;border-top:1px solid #e5e8f3}.next-task i{width:22px;height:22px;display:grid;place-items:center;flex:none;border-radius:7px;background:#e7eaff;color:#5d6beb;font-style:normal;font-size:9px;font-weight:800}.next-task span{display:flex;flex-direction:column}.next-task b{font-size:10px;color:#48536d}.next-task small{margin-top:5px;color:#929baf;font-size:8px}.next-card .el-button{width:100%;margin-top:13px}.doc-name{display:flex;align-items:center;gap:11px}.doc-name>span{width:31px;height:35px;display:grid;place-items:center;border-radius:8px;background:#fff0ed;color:#dc6b5a}.doc-name>div{display:flex;flex-direction:column}.doc-name b{color:#3f4a65;font-size:11px}.doc-name small{margin-top:4px;color:#98a1b3;font-size:8px}.knowledge-cloud{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:12px 0}.knowledge-cloud button{display:flex;justify-content:space-between;padding:16px;border:1px solid #e5e9f1;border-radius:12px;background:#fafbfc;color:#4b5670;cursor:pointer}.knowledge-cloud button:hover{border-color:#aeb6f3;background:#f8f8ff}.knowledge-cloud small{color:#919bad;font-size:8px}.record-list{padding:10px}.record-list>div{display:flex;gap:12px;padding:13px 0;border-bottom:1px solid #edf0f4}.record-list>div>span{width:24px;height:24px;display:grid;place-items:center;border-radius:50%;background:#eef0ff;color:#5b6ae8;font-size:9px}.record-list p{display:flex;flex-direction:column;margin:0}.record-list b{font-size:11px}.record-list small{margin-top:5px;color:#969fb1;font-size:9px}@media(max-width:1100px){.course-hero{flex-wrap:wrap}.course-identity{width:100%}.hero-stat{padding:0;border:0}.overview-grid{grid-template-columns:1fr}}@media(max-width:700px){.course-hero{gap:18px}.course-identity{min-width:0}.hero-stat{width:25%}.exam-date{width:100%}.knowledge-cloud{grid-template-columns:1fr 1fr}}
+.page-loading{min-height:440px}.course-hero{--course-color:#5b6cf9;display:flex;align-items:center;gap:26px;padding:25px 28px;border-radius:19px;background:linear-gradient(115deg,#111f45,color-mix(in srgb,var(--course-color),#111f45 62%));color:white}.course-identity{display:flex;align-items:center;gap:16px;min-width:300px;margin-right:auto}.course-identity>span{width:58px;height:58px;display:grid;place-items:center;flex:none;border-radius:17px;background:var(--course-color);font-size:24px;font-weight:750}.course-identity small,.exam-date small{color:#aab4cb;font-size:9px}.course-identity h1{margin:5px 0;font-size:20px}.course-identity p{max-width:420px;margin:0;color:#aeb8cf;font-size:9px;line-height:1.6}.hero-stat{display:flex;flex-direction:column;padding-left:20px;border-left:1px solid rgba(255,255,255,.12)}.hero-stat strong{font-size:20px}.hero-stat span{margin-top:5px;color:#a2adc5;font-size:9px}.exam-date{display:flex;flex-direction:column;padding:11px 14px;border:1px solid rgba(255,255,255,.12);border-radius:12px}.exam-date strong{margin:4px 0;font-size:11px}.exam-date span{color:#8edccb;font-size:8px}.action-row{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:14px 0 18px}.action-row>span{margin-right:auto;color:#8993a7;font-size:9px}.course-content{padding:4px 22px 22px}.module-loading{min-height:300px}.overview-grid{display:grid;grid-template-columns:1.3fr .7fr;gap:16px}.overview-grid>article{padding:18px;border:1px solid #edf0f5;border-radius:14px}.overview-stats{grid-column:span 2;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.overview-stats div{display:flex;flex-direction:column;padding:14px;border-radius:12px;background:#f7f8fc}.overview-stats span{color:#8993a7;font-size:9px}.overview-stats strong{margin:7px 0;color:#34405c;font-size:18px}.overview-stats small{color:#8b95aa;font-size:8px}.trend-card{min-width:0}.next-card{background:#f7f8ff}.next-card>span{color:#6574e8;font-size:9px;font-weight:750}.next-card h2{margin:16px 0 9px;color:#3e4964;font-size:17px}.next-card p{color:#7e889e;font-size:10px;line-height:1.7}.next-card .el-button{width:100%;margin-top:15px}.context-card{grid-column:span 2}.context-card>div:last-child{display:flex;flex-wrap:wrap;gap:8px}.tab-toolbar{display:flex;align-items:center;justify-content:space-between;margin:8px 0 14px;color:#8791a5;font-size:9px}.cell-sub{display:block;margin-top:5px;color:#929bad;font-size:8px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:1100px){.course-hero{flex-wrap:wrap}.course-identity{width:100%}.hero-stat{padding:0;border:0}.overview-grid{grid-template-columns:1fr}.overview-stats,.context-card{grid-column:auto}}@media(max-width:700px){.course-identity{min-width:0}.action-row{align-items:stretch;flex-direction:column}.action-row>span{margin:0}.overview-stats{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
 </style>

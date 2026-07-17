@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type UploadFile, type UploadFiles, type UploadUserFile } from 'element-plus'
 import { Check, DocumentAdd, Lock, UploadFilled } from '@element-plus/icons-vue'
@@ -26,10 +26,11 @@ const canSubmit = computed(() => (
   && !uploading.value
 ))
 
-function queryId(value: unknown): number | null {
+function queryId(value: unknown): { present: boolean; id: number | null } {
+  if (value === undefined) return { present: false, id: null }
   const raw = Array.isArray(value) ? value[0] : value
   const parsed = typeof raw === 'string' ? Number(raw) : NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+  return { present: true, id: Number.isInteger(parsed) && parsed > 0 ? parsed : null }
 }
 
 function uploadErrorMessage(error: unknown, fallback: string) {
@@ -42,14 +43,18 @@ async function loadCourses() {
   try {
     const result = await courseApi.list()
     courses.value = result.items.filter((course) => !course.archived)
-    const requestedCourseId = queryId(route.query.courseId)
-    if (requestedCourseId && courses.value.some((course) => course.id === requestedCourseId)) {
-      courseId.value = requestedCourseId
+    const requested = queryId(route.query.courseId)
+    if (requested.present && (requested.id === null || !courses.value.some((course) => course.id === requested.id))) {
+      courseId.value = null
+      coursesError.value = 'URL 中的课程不存在、不属于当前账号或已归档'
+      return
+    }
+    if (requested.id) {
+      courseId.value = requested.id
+    } else if (!requested.present) {
+      courseId.value = null
     } else if (courseId.value && !courses.value.some((course) => course.id === courseId.value)) {
       courseId.value = null
-    }
-    if (requestedCourseId && courseId.value !== requestedCourseId) {
-      ElMessage.warning('预选课程不在当前账号的可用课程中，请重新选择')
     }
   } catch (error) {
     courses.value = []
@@ -124,7 +129,11 @@ function openProgress() {
   })
 }
 
-onMounted(loadCourses)
+async function selectCourse(value: number) {
+  await router.replace({ name: 'upload', query: { courseId: String(value) } })
+}
+
+watch(() => route.query.courseId, () => void loadCourses(), { immediate: true })
 </script>
 
 <template>
@@ -147,7 +156,7 @@ onMounted(loadCourses)
 
         <el-form v-else v-loading="coursesLoading" label-position="top">
           <el-form-item label="归属课程（必选）">
-            <el-select v-model="courseId" placeholder="请选择当前账号的课程" :disabled="uploading" style="width:100%">
+            <el-select :model-value="courseId" placeholder="请选择当前账号的课程" :disabled="uploading" style="width:100%" @change="selectCourse">
               <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
             </el-select>
           </el-form-item>

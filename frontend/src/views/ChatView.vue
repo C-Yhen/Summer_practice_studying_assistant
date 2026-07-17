@@ -177,8 +177,12 @@ async function initialize() {
   await loadCourses()
   if (version !== initializationVersion || coursesError.value) return
 
-  const courseId = parseCourseId(route.query.courseId)
-  if (!courseId) return
+  const rawCourseId = route.query.courseId
+  const courseId = parseCourseId(rawCourseId)
+  if (!courseId) {
+    if (rawCourseId !== undefined) coursesError.value = 'URL 中的课程地址无效'
+    return
+  }
   if (!courses.value.some((course) => course.id === courseId)) {
     coursesError.value = 'URL 中的课程不属于当前账号或已归档'
     return

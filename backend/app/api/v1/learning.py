@@ -7,7 +7,12 @@ from sqlalchemy import select
 
 from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import CurrentUser, DBSession
-from backend.app.models import KnowledgeMastery, KnowledgePoint, LearningRecord
+from backend.app.models import (
+    KnowledgeMastery,
+    KnowledgePoint,
+    LearningRecord,
+    StudyTask,
+)
 from backend.app.responses import ok
 from backend.app.schemas import LearningRecordCreate
 
@@ -40,8 +45,42 @@ def create_learning_record(payload: LearningRecordCreate, db: DBSession, current
 @router.get("/courses/{course_id}/learning-records")
 def list_learning_records(course_id: int, db: DBSession, current_user: CurrentUser, limit: int = 50) -> dict:
     _owned_course(db, course_id, current_user.id)
-    records = list(db.scalars(select(LearningRecord).where(LearningRecord.user_id == current_user.id, LearningRecord.course_id == course_id).order_by(LearningRecord.occurred_at.desc()).limit(min(max(limit, 1), 100))))
-    return ok({"items": [{"id": item.id, "task_id": item.task_id, "knowledge_point_id": item.knowledge_point_id, "record_type": item.record_type, "duration_seconds": item.duration_seconds, "completed": item.completed, "occurred_at": item.occurred_at.isoformat()} for item in records], "total": len(records), "summary": {"minutes": round(sum(item.duration_seconds for item in records) / 60)}})
+    rows = list(
+        db.execute(
+            select(LearningRecord, StudyTask.title, KnowledgePoint.name)
+            .outerjoin(StudyTask, StudyTask.id == LearningRecord.task_id)
+            .outerjoin(
+                KnowledgePoint,
+                KnowledgePoint.id == LearningRecord.knowledge_point_id,
+            )
+            .where(
+                LearningRecord.user_id == current_user.id,
+                LearningRecord.course_id == course_id,
+            )
+            .order_by(LearningRecord.occurred_at.desc())
+            .limit(min(max(limit, 1), 100))
+        )
+    )
+    return ok({
+        "items": [
+            {
+                "id": record.id,
+                "task_id": record.task_id,
+                "task_title": task_title,
+                "knowledge_point_id": record.knowledge_point_id,
+                "knowledge_point": knowledge_point,
+                "record_type": record.record_type,
+                "duration_seconds": record.duration_seconds,
+                "completed": record.completed,
+                "occurred_at": record.occurred_at.isoformat(),
+            }
+            for record, task_title, knowledge_point in rows
+        ],
+        "total": len(rows),
+        "summary": {
+            "minutes": round(sum(record.duration_seconds for record, _, _ in rows) / 60)
+        },
+    })
 
 
 @router.get("/courses/{course_id}/knowledge-mastery")
@@ -52,5 +91,13 @@ def knowledge_mastery(course_id: int, db: DBSession, current_user: CurrentUser) 
     items = []
     for point in points:
         mastery = mastery_by_point.get(point.id)
-        items.append({"knowledge_point_id": point.id, "knowledge_point": point.name, "score": mastery.score if mastery else 0.3, "confidence": mastery.confidence if mastery else 0.2, "attempts": mastery.attempts if mastery else 0, "trend": "up" if mastery and mastery.score >= 0.5 else "stable"})
+        items.append({
+            "knowledge_point_id": point.id,
+            "knowledge_point": point.name,
+            "score": mastery.score if mastery else None,
+            "confidence": mastery.confidence if mastery else None,
+            "attempts": mastery.attempts if mastery else 0,
+            "trend": None,
+            "has_record": mastery is not None,
+        })
     return ok({"items": items})

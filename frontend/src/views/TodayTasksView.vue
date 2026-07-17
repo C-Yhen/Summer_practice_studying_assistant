@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, Clock, Refresh } from '@element-plus/icons-vue'
@@ -88,12 +88,13 @@ async function loadTasks() {
 }
 
 async function changeCourse(value: number | '') {
-  selectedCourseId.value = value
   await router.replace({ name: 'today', query: typeof value === 'number' ? { courseId: String(value) } : {} })
-  await loadTasks()
 }
 
 async function initialize() {
+  selectedCourseId.value = ''
+  tasks.value = []
+  tasksError.value = ''
   await loadCourses()
   if (coursesError.value) return
   const requested = queryCourseId()
@@ -130,7 +131,7 @@ async function completeTask() {
   }
 }
 
-onMounted(initialize)
+watch(() => route.query.courseId, () => void initialize(), { immediate: true })
 </script>
 
 <template>

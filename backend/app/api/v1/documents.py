@@ -24,7 +24,10 @@ def _owned_document(db: DBSession, document_id: int, owner_id: int) -> Document:
     document = db.scalar(
         select(Document)
         .join(Document.course)
-        .where(Document.id == document_id, Document.course.has(owner_id=owner_id))
+        .where(
+            Document.id == document_id,
+            Document.course.has(owner_id=owner_id, archived=False),
+        )
     )
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="Document not found")

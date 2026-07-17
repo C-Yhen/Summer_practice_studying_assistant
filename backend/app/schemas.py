@@ -102,6 +102,16 @@ class CourseUpdate(BaseModel):
     color: str | None = Field(default=None, max_length=20)
     archived: bool | None = None
 
+    @field_validator("name")
+    @classmethod
+    def clean_optional_course_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("name cannot be blank")
+        return value
+
 
 class ExamDateUpdate(BaseModel):
     exam_date: date | None = None

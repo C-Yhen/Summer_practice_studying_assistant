@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Calendar, Check, Clock, Refresh, Warning } from '@element-plus/icons-vue'
@@ -20,6 +20,8 @@ const planError = ref('')
 const generating = ref(false)
 const confirming = ref(false)
 const confirmVisible = ref(false)
+let initializationVersion = 0
+let internalRouteUpdate = false
 
 function localDate(offset = 0) {
   const date = new Date()
@@ -58,8 +60,9 @@ function pageError(error: unknown, fallback: string) {
 
 function queryCourseId(): number | null {
   const raw = Array.isArray(route.query.courseId) ? route.query.courseId[0] : route.query.courseId
+  if (raw === undefined) return null
   const parsed = typeof raw === 'string' ? Number(raw) : NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : -1
 }
 
 async function syncCourseQuery() {
@@ -99,24 +102,31 @@ async function loadCurrentPlan() {
 }
 
 async function selectCourse(courseId: number) {
-  selectedCourseId.value = courseId
   plan.value = null
   planError.value = ''
   confirmVisible.value = false
-  await syncCourseQuery()
-  await loadCurrentPlan()
+  await router.replace({ name: 'plan', query: { courseId: String(courseId) } })
 }
 
 async function initialize() {
+  const version = ++initializationVersion
+  selectedCourseId.value = null
+  plan.value = null
+  planError.value = ''
   await loadCourses()
-  if (coursesError.value || !courses.value.length) return
+  if (version !== initializationVersion || coursesError.value || !courses.value.length) return
   const requested = queryCourseId()
-  if (requested && !courses.value.some((course) => course.id === requested)) {
+  if (requested === -1 || (requested && !courses.value.some((course) => course.id === requested))) {
     coursesError.value = 'URL 中的课程不属于当前账号或已归档'
     return
   }
   selectedCourseId.value = requested || courses.value[0].id
-  if (!requested) await syncCourseQuery()
+  if (!requested) {
+    internalRouteUpdate = true
+    await syncCourseQuery()
+    internalRouteUpdate = false
+  }
+  if (version !== initializationVersion) return
   await loadCurrentPlan()
 }
 
@@ -195,7 +205,9 @@ function formatDay(value: string) {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', weekday: 'short' }).format(date)
 }
 
-onMounted(initialize)
+watch(() => route.query.courseId, () => {
+  if (!internalRouteUpdate) void initialize()
+}, { immediate: true })
 </script>
 
 <template>

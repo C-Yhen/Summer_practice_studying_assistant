@@ -196,6 +196,14 @@ async function initialize() {
   const requestedCourseId = parsePositiveId(route.query.courseId)
   const requestedDocumentId = parsePositiveId(route.query.documentId)
   const requestedTaskId = parseTaskId(route.query.taskId)
+  if (route.query.courseId !== undefined && requestedCourseId === null) {
+    coursesError.value = 'URL 中的课程地址无效'
+    return
+  }
+  if (route.query.documentId !== undefined && requestedDocumentId === null) {
+    documentError.value = 'URL 中的文档地址无效'
+    return
+  }
 
   if (requestedCourseId) {
     if (!courses.value.some((course) => course.id === requestedCourseId)) {

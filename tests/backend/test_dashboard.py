@@ -372,6 +372,9 @@ def test_dashboard_aggregates_real_data_is_isolated_and_read_only(
     explicit = _overview(client, auth_headers, target, course_id=later_id)
     assert explicit.status_code == 200
     assert explicit.json()["data"]["focus_course"]["id"] == later_id
+    assert explicit.json()["data"]["course_count"] == 1
+    assert explicit.json()["data"]["ready_document_count"] == 1
+    assert explicit.json()["data"]["metrics"]["active_course_count"] == 1
     assert explicit.json()["data"]["today"]["total_count"] == 0
     assert explicit.json()["data"]["next_action"]["type"] == "study_plan"
 

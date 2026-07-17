@@ -82,6 +82,7 @@ async function createCourse() {
     dialogVisible.value = false
     resetForm()
     ElMessage.success('课程已创建')
+    await router.push(`/courses/${created.id}`)
   } catch (error) {
     ElMessage.error(getCourseErrorMessage(error, '课程创建失败'))
   } finally {

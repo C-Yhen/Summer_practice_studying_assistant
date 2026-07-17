@@ -1,33 +1,156 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { EChartsOption } from 'echarts'
+import { useRoute, useRouter } from 'vue-router'
+import { Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import EChart from '@/components/EChart.vue'
-import { knowledgeMastery } from '@/data/mock'
+import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
+import { courseApi, learningApi } from '@/api/services'
+import type { CourseListItem, KnowledgeMasteryItem } from '@/types'
 
-const course = ref('数据库系统')
-const radarOption = computed<EChartsOption>(() => ({
-  color: ['#6070e8', '#b8bfef'],
-  tooltip: {}, legend: { bottom: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 9, color: '#7d879b' }, data: ['当前掌握度', '目标掌握度'] },
-  radar: { center: ['50%', '47%'], radius: '66%', indicator: knowledgeMastery.map((item) => ({ name: item.name, max: 100 })), axisName: { color: '#69748b', fontSize: 9 }, splitArea: { areaStyle: { color: ['#fafbfe', '#f5f7fc'] } }, splitLine: { lineStyle: { color: '#e3e7ef' } }, axisLine: { lineStyle: { color: '#e1e5ed' } } },
-  series: [{ type: 'radar', data: [{ name: '当前掌握度', value: knowledgeMastery.map((item) => item.value), areaStyle: { color: 'rgba(96,112,232,.2)' }, lineStyle: { width: 2 } }, { name: '目标掌握度', value: [90,90,82,85,80,85], symbol: 'none', lineStyle: { type: 'dashed', width: 1.5 }, areaStyle: { opacity: 0 } }] }],
+const route = useRoute()
+const router = useRouter()
+const courses = ref<CourseListItem[]>([])
+const selectedCourseId = ref<number | null>(null)
+const coursesLoading = ref(false)
+const coursesError = ref('')
+const items = ref<KnowledgeMasteryItem[]>([])
+const loading = ref(false)
+const loadError = ref('')
+let loadVersion = 0
+let internalRouteUpdate = false
+
+const selectedCourse = computed(() => courses.value.find((course) => course.id === selectedCourseId.value) || null)
+const recorded = computed(() => items.value.filter((item) => item.has_record && item.score !== null))
+const sorted = computed(() => [...items.value].sort((left, right) => {
+  if (!left.has_record && right.has_record) return 1
+  if (left.has_record && !right.has_record) return -1
+  return (left.score ?? 1) - (right.score ?? 1)
 }))
-const sorted = [...knowledgeMastery].sort((a,b)=>a.value-b.value)
+const average = computed(() => recorded.value.length
+  ? Math.round(recorded.value.reduce((sum, item) => sum + (item.score || 0), 0) / recorded.value.length * 100)
+  : null)
+const chartOption = computed<EChartsOption>(() => ({
+  grid: { top: 16, right: 18, bottom: 10, left: 12, containLabel: true },
+  xAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+  yAxis: { type: 'category', data: recorded.value.map((item) => item.knowledge_point), axisLabel: { width: 120, overflow: 'truncate' } },
+  series: [{ type: 'bar', data: recorded.value.map((item) => Math.round((item.score || 0) * 100)), itemStyle: { color: '#6372e8', borderRadius: [0, 5, 5, 0] } }],
+}))
+
+function queryCourse(): { present: boolean; id: number | null } {
+  const rawValue = route.query.courseId
+  if (rawValue === undefined) return { present: false, id: null }
+  const raw = Array.isArray(rawValue) ? rawValue[0] : rawValue
+  const parsed = typeof raw === 'string' ? Number(raw) : NaN
+  return { present: true, id: Number.isInteger(parsed) && parsed > 0 ? parsed : null }
+}
+
+function pageError(error: unknown, fallback: string) {
+  return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
+}
+
+async function loadCourses() {
+  coursesLoading.value = true
+  coursesError.value = ''
+  try {
+    const result = await courseApi.list()
+    courses.value = result.items.filter((course) => !course.archived)
+  } catch (error) {
+    courses.value = []
+    coursesError.value = pageError(error, '课程列表加载失败')
+  } finally {
+    coursesLoading.value = false
+  }
+}
+
+async function loadMastery(courseId: number, version = loadVersion) {
+  loading.value = true
+  loadError.value = ''
+  try {
+    const result = await learningApi.getMastery(courseId)
+    if (version === loadVersion && selectedCourseId.value === courseId) items.value = result.items
+  } catch (error) {
+    if (version === loadVersion && selectedCourseId.value === courseId) {
+      items.value = []
+      loadError.value = pageError(error, '掌握度加载失败')
+    }
+  } finally {
+    if (version === loadVersion && selectedCourseId.value === courseId) loading.value = false
+  }
+}
+
+async function initialize() {
+  const version = ++loadVersion
+  selectedCourseId.value = null
+  items.value = []
+  loadError.value = ''
+  await loadCourses()
+  if (version !== loadVersion || coursesError.value || !courses.value.length) return
+  const requested = queryCourse()
+  if (requested.present && (requested.id === null || !courses.value.some((course) => course.id === requested.id))) {
+    coursesError.value = 'URL 中的课程不存在、不属于当前账号或已归档'
+    return
+  }
+  const courseId = requested.id || courses.value[0].id
+  selectedCourseId.value = courseId
+  if (!requested.present) {
+    internalRouteUpdate = true
+    await router.replace({ name: 'mastery', query: { courseId: String(courseId) } })
+    internalRouteUpdate = false
+  }
+  await loadMastery(courseId, version)
+}
+
+async function selectCourse(courseId: number) {
+  items.value = []
+  loadError.value = ''
+  await router.replace({ name: 'mastery', query: { courseId: String(courseId) } })
+}
+
+watch(() => route.fullPath, () => {
+  if (!internalRouteUpdate) void initialize()
+}, { immediate: true })
 </script>
 
 <template>
   <div>
-    <PageHeader title="知识点掌握度" eyebrow="MASTERY MAP" description="综合答题正确率、难度、学习时间与遗忘曲线估算，并持续更新。"><el-select v-model="course" style="width:160px"><el-option label="数据库系统" value="数据库系统" /></el-select><el-button type="primary">生成补弱计划</el-button></PageHeader>
-    <section class="mastery-summary"><div><span>平均掌握度</span><strong>64%</strong><small>近 7 天 +6%</small></div><div><span>已掌握</span><strong class="green">14</strong><small>≥ 80% 的知识点</small></div><div><span>学习中</span><strong class="blue">16</strong><small>50%–79%</small></div><div><span>待加强</span><strong class="orange">6</strong><small>&lt; 50%</small></div><div class="update"><span>下次估算</span><strong>完成今日练习后</strong><small>模型：BKT + 时间衰减</small></div></section>
-    <section class="mastery-grid">
-      <article class="content-card card-pad radar-card"><div class="card-header"><div><h2>能力雷达</h2><p>当前水平与考试目标对比</p></div></div><EChart :option="radarOption" height="330px" /></article>
-      <article class="content-card card-pad weak-rank"><div class="card-header"><div><h2>薄弱点优先级</h2><p>综合掌握度、分值与知识依赖</p></div></div><div class="rank-list"><div v-for="(item,index) in sorted.slice(0,5)" :key="item.name"><span>{{ index+1 }}</span><div><b>{{ item.name }}</b><small>{{ index === 0 ? '前置：函数依赖' : `近 7 天 ${item.trend >= 0 ? '+' : ''}${item.trend}%` }}</small><el-progress :percentage="item.value" :show-text="false" :stroke-width="6" :color="item.value<50?'#e88945':'#6372e8'" /></div><strong>{{ item.value }}%</strong></div></div><div class="priority-note"><b>推荐路径</b><p>函数依赖 → 候选码 → 第三范式 → BCNF</p></div></article>
-      <article class="content-card card-pad knowledge-map"><div class="card-header"><div><h2>知识依赖路径</h2><p>先修关系决定推荐学习顺序</p></div><span class="soft-tag brand">36 个节点</span></div><div class="dependency-flow"><div class="node mastered"><span>已掌握</span><b>关系模型</b><small>84%</small></div><i>→</i><div class="node learning"><span>学习中</span><b>函数依赖</b><small>52%</small></div><i>→</i><div class="node weak"><span>待加强</span><b>第三范式</b><small>46%</small></div><i>→</i><div class="node locked"><span>未解锁</span><b>BCNF</b><small>完成前置后</small></div></div><p class="map-tip">完成「函数依赖与属性闭包」后，系统将重新评估第三范式的学习准备度。</p></article>
-      <article class="content-card card-pad detail-table"><div class="card-header"><div><h2>知识点明细</h2><p>点击知识点查看学习与答题证据</p></div><el-input placeholder="搜索知识点" style="width:180px" /></div><el-table :data="knowledgeMastery"><el-table-column prop="name" label="知识点" min-width="130" /><el-table-column label="掌握度" min-width="220"><template #default="scope"><div class="table-progress"><el-progress :percentage="scope.row.value" :show-text="false" :stroke-width="7" :color="scope.row.value<50?'#e98b47':scope.row.value<80?'#6170e7':'#18a489'" /><span>{{ scope.row.value }}%</span></div></template></el-table-column><el-table-column label="7 日变化" width="100"><template #default="scope"><span :class="scope.row.trend>=0?'up':'down'">{{ scope.row.trend>=0?'↑':'↓' }} {{ Math.abs(scope.row.trend) }}%</span></template></el-table-column><el-table-column label="答题证据" width="120"><template #default="scope">{{ 8+scope.$index*3 }} 道 · {{ Math.max(40,scope.row.value-4) }}% 正确</template></el-table-column><el-table-column label="建议" min-width="140"><template #default="scope"><span class="soft-tag" :class="scope.row.value<60?'orange':'green'">{{ scope.row.value<60?'优先补弱':'间隔复习' }}</span></template></el-table-column></el-table></article>
-    </section>
+    <PageHeader title="知识点掌握度" eyebrow="MASTERY MAP" :description="selectedCourse ? `只展示「${selectedCourse.name}」的真实掌握记录` : '按课程查看真实掌握记录'">
+      <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" style="width:240px" @change="selectCourse">
+        <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
+      </el-select>
+      <el-button v-if="selectedCourseId" :loading="loading" @click="loadMastery(selectedCourseId)"><el-icon><Refresh /></el-icon>刷新</el-button>
+    </PageHeader>
+
+    <el-alert v-if="coursesError" :title="coursesError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="initialize">重试</el-button></template></el-alert>
+    <el-empty v-else-if="!coursesLoading && !courses.length" description="当前账号还没有课程"><el-button type="primary" @click="router.push('/courses')">创建课程</el-button></el-empty>
+    <template v-else-if="selectedCourseId">
+      <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadMastery(selectedCourseId)">重新加载</el-button></template></el-alert>
+      <div v-if="loading" v-loading="true" class="page-loading"></div>
+      <template v-else>
+        <section class="mastery-summary">
+          <div><span>平均掌握度</span><strong>{{ average === null ? '--' : `${average}%` }}</strong><small>仅统计已有真实记录的知识点</small></div>
+          <div><span>已有记录</span><strong>{{ recorded.length }}</strong><small>当前课程共 {{ items.length }} 个知识点</small></div>
+          <div><span>尚无记录</span><strong>{{ items.length - recorded.length }}</strong><small>不会显示默认初始分数</small></div>
+        </section>
+        <section class="mastery-grid">
+          <article class="content-card card-pad chart-card"><div class="card-header"><div><h2>真实掌握度</h2><p>只绘制已有学习记录的知识点</p></div></div><EChart v-if="recorded.length" :option="chartOption" height="320px" /><el-empty v-else description="当前课程尚无真实掌握记录" /></article>
+          <article class="content-card card-pad detail-table">
+            <div class="card-header"><div><h2>知识点明细</h2><p>按真实 score 从低到高；无记录项排在末尾</p></div></div>
+            <el-table :data="sorted" empty-text="当前课程暂无知识点">
+              <el-table-column prop="knowledge_point" label="知识点" min-width="180" />
+              <el-table-column label="掌握度" min-width="220"><template #default="scope"><div v-if="scope.row.has_record" class="table-progress"><el-progress :percentage="Math.round(scope.row.score * 100)" :show-text="false" :stroke-width="7" /><span>{{ Math.round(scope.row.score * 100) }}%</span></div><span v-else>--</span></template></el-table-column>
+              <el-table-column label="置信度" width="120"><template #default="scope">{{ scope.row.has_record ? `${Math.round(scope.row.confidence * 100)}%` : '--' }}</template></el-table-column>
+              <el-table-column label="学习证据" min-width="160"><template #default="scope">{{ scope.row.attempts > 0 ? `${scope.row.attempts} 次尝试` : '尚无学习记录' }}</template></el-table-column>
+              <el-table-column label="趋势" width="120"><template #default="scope">{{ scope.row.trend || '暂无趋势' }}</template></el-table-column>
+            </el-table>
+          </article>
+        </section>
+      </template>
+    </template>
   </div>
 </template>
 
 <style scoped>
-.mastery-summary{display:grid;grid-template-columns:repeat(4,1fr) 1.35fr;margin-bottom:17px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:var(--shadow-soft);overflow:hidden}.mastery-summary>div{display:flex;flex-direction:column;padding:17px 20px;border-right:1px solid #e9ecf2}.mastery-summary span{color:#8d96a8;font-size:8px}.mastery-summary strong{margin-top:7px;color:#3c4761;font-size:20px}.mastery-summary small{margin-top:5px;color:#9da5b5;font-size:7px}.mastery-summary .green{color:#16a087}.mastery-summary .blue{color:#5c6be1}.mastery-summary .orange{color:#e28a3e}.mastery-summary .update{border:0;background:#f7f8ff}.mastery-summary .update strong{font-size:12px;color:#5362da}.mastery-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:17px}.radar-card,.weak-rank{min-width:0}.rank-list{display:grid;gap:13px}.rank-list>div{display:flex;align-items:center;gap:10px}.rank-list>div>span{width:24px;height:24px;display:grid;place-items:center;flex:none;border-radius:8px;background:#eff1ff;color:#5d6be0;font-size:8px;font-weight:700}.rank-list>div>div{display:flex;min-width:0;flex:1;flex-direction:column}.rank-list b{font-size:9px;color:#47526c}.rank-list small{margin:4px 0 6px;color:#949daf;font-size:7px}.rank-list strong{color:#6170df;font-size:10px}.priority-note{margin-top:16px;padding:11px;border-radius:10px;background:#fff6eb}.priority-note b{color:#d68131;font-size:8px}.priority-note p{margin:6px 0 0;color:#8b6f50;font-size:8px}.knowledge-map,.detail-table{grid-column:span 2}.dependency-flow{display:flex;align-items:center;justify-content:center;gap:14px;padding:23px;border-radius:13px;background:#f8f9fc}.dependency-flow>i{color:#abb2c0;font-style:normal}.node{width:135px;padding:13px;border:1px solid #e2e6ee;border-radius:11px;background:white;display:flex;flex-direction:column}.node span{font-size:7px}.node b{margin-top:6px;color:#43506a;font-size:10px}.node small{margin-top:5px;font-size:8px}.node.mastered{border-color:#a9dfd3}.node.mastered span,.node.mastered small{color:#168f78}.node.learning{border-color:#9fa9ef;box-shadow:0 6px 18px rgba(91,105,221,.1)}.node.learning span,.node.learning small{color:#5d6be0}.node.weak{border-color:#edbd91}.node.weak span,.node.weak small{color:#d98232}.node.locked{opacity:.55}.map-tip{margin:11px 0 0;text-align:center;color:#8d96a8;font-size:8px}.table-progress{display:flex;align-items:center;gap:9px}.table-progress .el-progress{width:150px}.table-progress span{font-size:9px}.up{color:#16917a}.down{color:#db666b}@media(max-width:950px){.mastery-summary{grid-template-columns:repeat(2,1fr)}.mastery-summary .update{grid-column:span 2}.mastery-grid{grid-template-columns:1fr}.knowledge-map,.detail-table{grid-column:auto}.dependency-flow{align-items:stretch;flex-direction:column}.dependency-flow>i{transform:rotate(90deg);text-align:center}.node{width:100%}}@media(max-width:550px){.mastery-summary{grid-template-columns:1fr 1fr}}
+.page-alert{margin-bottom:16px}.page-loading{min-height:360px}.mastery-summary{display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:17px;border:1px solid var(--line);border-radius:16px;background:#fff;box-shadow:var(--shadow-soft);overflow:hidden}.mastery-summary>div{display:flex;flex-direction:column;padding:18px 22px;border-right:1px solid #e9ecf2}.mastery-summary>div:last-child{border:0}.mastery-summary span{color:#8d96a8;font-size:9px}.mastery-summary strong{margin-top:8px;color:#3c4761;font-size:22px}.mastery-summary small{margin-top:6px;color:#9da5b5;font-size:8px}.mastery-grid{display:grid;gap:17px}.chart-card,.detail-table{min-width:0}.table-progress{display:flex;align-items:center;gap:9px}.table-progress .el-progress{width:150px}.table-progress span{font-size:9px}@media(max-width:700px){.mastery-summary{grid-template-columns:1fr}.mastery-summary>div{border-right:0;border-bottom:1px solid #e9ecf2}}
 </style>
