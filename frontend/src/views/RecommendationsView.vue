@@ -18,6 +18,7 @@ const coursesLoading = ref(false)
 const error = ref('')
 const filter = ref<'all' | RecommendationType>('all')
 const feedbackBusy = ref<string | null>(null)
+const feedbackState = ref<Record<string, 'saved' | 'skipped'>>({})
 const historyVisible = ref(false)
 const history = ref<RecommendationHistoryResponse | null>(null)
 let requestVersion = 0
@@ -74,7 +75,7 @@ async function act(item: CourseRecommendationItem) {
 }
 async function feedback(item: CourseRecommendationItem, action: RecommendationFeedbackAction) {
   feedbackBusy.value = item.recommendation_key
-  try { await recommendationApi.feedback(item.course_id, { recommendation_key: item.recommendation_key, action }); ElMessage.success(action === 'saved' ? '已记录：这个推荐有帮助' : '已记录：不感兴趣') }
+  try { await recommendationApi.feedback(item.course_id, { recommendation_key: item.recommendation_key, action }); if (action !== 'clicked') feedbackState.value = { ...feedbackState.value, [item.recommendation_key]: action }; if (historyVisible.value) await openHistory(); ElMessage.success(action === 'saved' ? '已记录：这个推荐有帮助' : '已记录：不感兴趣') }
   catch (value) { ElMessage.error(pageError(value, '反馈保存失败')) }
   finally { feedbackBusy.value = null }
 }
@@ -85,6 +86,7 @@ async function openHistory() {
   catch (value) { ElMessage.error(pageError(value, '推荐历史加载失败')) }
 }
 async function initialize() {
+  feedbackState.value = {}; history.value = null; historyVisible.value = false
   await loadCourses()
   if (error.value) return
   const requested = requestedCourseId()
@@ -114,7 +116,7 @@ onMounted(initialize)
       <section v-if="result" class="recommend-hero"><div><span>{{ result.algorithm_version }}</span><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>{{ result.items.length }}<small>条推荐</small></strong></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
       <el-empty v-else-if="result && !items.length" description="当前筛选下没有推荐" />
-      <section v-else-if="result" class="recommend-grid"><article v-for="item in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ item.item_type }}</span><b>{{ item.score.toFixed(1) }} 分</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><div class="reason"><b>推荐依据</b><p>{{ item.reason }}</p><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} +{{ signal.contribution.toFixed(1) }}</el-tag></div></div><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" @click="act(item)">{{ item.action.label }}</el-button><el-button :loading="feedbackBusy === item.recommendation_key" @click="feedback(item, 'saved')">有帮助</el-button><el-button :loading="feedbackBusy === item.recommendation_key" @click="feedback(item, 'skipped')">不感兴趣</el-button></div></article></section>
+      <section v-else-if="result" class="recommend-grid"><article v-for="item in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ item.item_type }}</span><b>{{ item.score.toFixed(1) }} 分</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><div class="reason"><b>推荐依据</b><p>{{ item.reason }}</p><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} +{{ signal.contribution.toFixed(1) }}</el-tag></div></div><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusy === item.recommendation_key" :disabled="feedbackBusy === item.recommendation_key" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusy === item.recommendation_key" :disabled="feedbackBusy === item.recommendation_key" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
     </template>
     <el-dialog v-model="historyVisible" title="推荐历史" width="620px"><div v-if="history" class="history-metrics"><el-tag>点击 {{ history.metrics.clicked }}</el-tag><el-tag>有帮助 {{ history.metrics.saved }}</el-tag><el-tag>不感兴趣 {{ history.metrics.skipped }}</el-tag></div><el-empty v-if="history && !history.items.length" description="暂无真实反馈历史" /><el-timeline v-else><el-timeline-item v-for="item in history?.items || []" :key="item.record_id" :timestamp="item.created_at"><b>{{ item.title }}</b> · {{ item.feedback_action }}<p>{{ item.reason }}</p></el-timeline-item></el-timeline></el-dialog>
   </div>

@@ -119,7 +119,7 @@ def build_course_recommendations(
     items: list[dict] = []
     task_rows = list(db.execute(
         select(StudyTask, KnowledgePoint)
-        .outerjoin(KnowledgePoint, KnowledgePoint.id == StudyTask.knowledge_point_id)
+        .outerjoin(KnowledgePoint, (KnowledgePoint.id == StudyTask.knowledge_point_id) & (KnowledgePoint.course_id == course_id))
         .where(
             StudyTask.user_id == user_id,
             StudyTask.course_id == course_id,
@@ -147,7 +147,7 @@ def build_course_recommendations(
     for mastery, point in db.execute(
         select(KnowledgeMastery, KnowledgePoint)
         .join(KnowledgePoint, KnowledgePoint.id == KnowledgeMastery.knowledge_point_id)
-        .where(KnowledgeMastery.user_id == user_id, KnowledgeMastery.course_id == course_id, KnowledgeMastery.attempts > 0)
+        .where(KnowledgeMastery.user_id == user_id, KnowledgeMastery.course_id == course_id, KnowledgeMastery.attempts > 0, KnowledgePoint.course_id == course_id)
         .order_by(KnowledgeMastery.score, KnowledgeMastery.knowledge_point_id)
         .limit(3)
     ):
