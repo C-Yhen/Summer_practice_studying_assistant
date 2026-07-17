@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
@@ -21,21 +20,10 @@ from backend.app.models import (
 )
 from backend.app.responses import ok
 from backend.app.schemas import DashboardOverview
+from backend.app.services.timezones import as_utc, local_date_range_utc, resolve_user_timezone
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-
-
-def _user_timezone(name: str) -> tuple[ZoneInfo | timezone, str]:
-    try:
-        return ZoneInfo(name), name
-    except (ZoneInfoNotFoundError, ValueError):
-        # Records are stored in UTC. UTC is the explicit fallback for an invalid saved timezone.
-        return timezone.utc, "UTC"
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _focus_course(
@@ -140,11 +128,8 @@ def dashboard_overview(
     today_total = len(today_tasks)
     today_completion_rate = len(completed_today) / today_total if today_total else 0.0
 
-    user_zone, timezone_name = _user_timezone(current_user.timezone)
-    range_start_utc = datetime.combine(range_start, time.min, user_zone).astimezone(timezone.utc)
-    range_end_utc = datetime.combine(
-        target_date + timedelta(days=1), time.min, user_zone
-    ).astimezone(timezone.utc)
+    user_zone, timezone_name = resolve_user_timezone(current_user.timezone)
+    range_start_utc, range_end_utc = local_date_range_utc(range_start, target_date, user_zone)
     record_scope = [
         LearningRecord.user_id == current_user.id,
         LearningRecord.completed.is_(True),
@@ -156,7 +141,7 @@ def dashboard_overview(
     records = list(db.scalars(select(LearningRecord).where(*record_scope)))
     learning_seconds_by_day: dict[date, int] = defaultdict(int)
     for record in records:
-        local_day = _as_utc(record.occurred_at).astimezone(user_zone).date()
+        local_day = as_utc(record.occurred_at).astimezone(user_zone).date()
         learning_seconds_by_day[local_day] += record.duration_seconds
 
     mastery_scope = [KnowledgeMastery.user_id == current_user.id]

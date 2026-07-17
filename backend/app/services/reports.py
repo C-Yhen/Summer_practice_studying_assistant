@@ -1,12 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import AsyncTask, Course, KnowledgeMastery, KnowledgePoint, LearningRecord, StudyTask, utcnow
+from backend.app.models import (
+    AsyncTask,
+    Course,
+    KnowledgeMastery,
+    KnowledgePoint,
+    LearningRecord,
+    StudyPlan,
+    StudyPlanVersion,
+    StudyTask,
+    User,
+    utcnow,
+)
 from backend.app.services.async_tasks import mark_task_cancelled
+from backend.app.services.timezones import as_utc, local_date_range_utc, resolve_user_timezone
 
 
 def _cancel_if_requested(db: Session, task: AsyncTask) -> bool:
@@ -38,17 +50,28 @@ def generate_weekly_report(db: Session, task: AsyncTask) -> dict:
     if not _update_progress(db, task, 10, "loading_learning_data"):
         return {"cancelled": True}
 
-    range_start = datetime.combine(start, time.min, tzinfo=timezone.utc)
-    range_end = datetime.combine(end, time.max, tzinfo=timezone.utc)
+    user = db.get(User, user_id)
+    user_zone, _ = resolve_user_timezone(user.timezone if user is not None else None)
+    range_start, range_end = local_date_range_utc(start, end, user_zone)
     records_query = select(LearningRecord).where(
+        LearningRecord.user_id == user_id,
         LearningRecord.course_id.in_(select(Course.id).where(Course.owner_id == user_id)),
         LearningRecord.occurred_at >= range_start,
-        LearningRecord.occurred_at <= range_end,
+        LearningRecord.occurred_at < range_end,
     )
-    tasks_query = select(StudyTask).where(
-        StudyTask.user_id == user_id,
-        StudyTask.scheduled_date >= start,
-        StudyTask.scheduled_date <= end,
+    tasks_query = (
+        select(StudyTask)
+        .join(StudyPlanVersion, StudyPlanVersion.id == StudyTask.plan_version_id)
+        .join(StudyPlan, StudyPlan.id == StudyPlanVersion.plan_id)
+        .where(
+            StudyTask.user_id == user_id,
+            StudyTask.scheduled_date >= start,
+            StudyTask.scheduled_date <= end,
+            StudyPlan.user_id == user_id,
+            StudyPlan.status == "active",
+            StudyPlanVersion.status == "active",
+            StudyPlan.active_version == StudyPlanVersion.version,
+        )
     )
     courses_query = select(Course).where(Course.owner_id == user_id, Course.archived.is_(False))
     if course_id is not None:
@@ -76,7 +99,7 @@ def generate_weekly_report(db: Session, task: AsyncTask) -> dict:
         return {"cancelled": True}
 
     total_minutes = round(sum(record.duration_seconds for record in records) / 60)
-    study_days = len({record.occurred_at.date() for record in records})
+    study_days = len({as_utc(record.occurred_at).astimezone(user_zone).date() for record in records})
     scheduled = len(study_tasks)
     completed = sum(item.status == "completed" for item in study_tasks)
     rate = round(completed / scheduled, 4) if scheduled else 0.0
@@ -99,6 +122,8 @@ def generate_weekly_report(db: Session, task: AsyncTask) -> dict:
         "weak_points": weak_points,
         "summary": summary,
     }
+    if _cancel_if_requested(db, task):
+        return {"cancelled": True}
     task.status = "success"
     task.progress = 100
     task.current_step = "completed"

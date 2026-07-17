@@ -35,8 +35,12 @@ def _retryable_resource_exists(db: DBSession, task: AsyncTask, user_id: int) -> 
         if task.resource_type == "user":
             return task.resource_id == str(user_id)
         if task.resource_type == "course":
+            try:
+                course_id = int(task.resource_id or "")
+            except ValueError:
+                return False
             return db.scalar(select(Course.id).where(
-                Course.id == task.resource_id,
+                Course.id == course_id,
                 Course.owner_id == user_id,
                 Course.archived.is_(False),
             )) is not None

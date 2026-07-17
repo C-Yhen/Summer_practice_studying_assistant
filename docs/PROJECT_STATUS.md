@@ -179,6 +179,13 @@
 
 ## Round 08：真实长时任务中心与 Celery 执行闭环
 
+### Round 08 补修：周报范围、时区与取消一致性
+
+- 周报任务仅统计当前用户、当前 active 计划及 active 版本的任务；candidate 和 superseded 版本均排除。
+- 周报与 Dashboard 共用用户时区工具，以本地日期转换的 UTC 左闭右开范围统计学习记录和学习天数；无效时区回退 UTC。
+- 写入周报成功结果前再次检查取消请求；周报重试安全转换课程资源 ID，并继续校验归属和归档状态。
+- 实际测试：定向异步任务测试 7 passed；完整后端测试 37 passed；`frontend npm run build` 通过。
+
 ### 已完成
 
 - 真实任务中心支持 `document_parse` 与 `weekly_report`：列表/详情、筛选分页、REST 自动刷新、URL 任务恢复、真实取消和重试。

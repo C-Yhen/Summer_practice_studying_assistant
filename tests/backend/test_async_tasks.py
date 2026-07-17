@@ -6,7 +6,17 @@ from datetime import date, datetime, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.app.models import AsyncTask, Course, KnowledgeMastery, KnowledgePoint, LearningRecord, StudyPlan, StudyPlanVersion, StudyTask
+from backend.app.models import (
+    AsyncTask,
+    Course,
+    KnowledgeMastery,
+    KnowledgePoint,
+    LearningRecord,
+    StudyPlan,
+    StudyPlanVersion,
+    StudyTask,
+    User,
+)
 from backend.app.services.async_tasks import dispatch_async_task
 
 
@@ -29,7 +39,7 @@ def test_weekly_report_aggregates_owner_data_without_mutating_it(
         point = KnowledgePoint(course_id=course_id, name="事务隔离")
         db.add(point)
         db.flush()
-        plan = StudyPlan(user_id=user_id, course_id=course_id, goal="report", start_date=date(2026, 7, 10), end_date=date(2026, 7, 16))
+        plan = StudyPlan(user_id=user_id, course_id=course_id, goal="report", start_date=date(2026, 7, 10), end_date=date(2026, 7, 16), active_version=1, status="active")
         db.add(plan); db.flush()
         version = StudyPlanVersion(plan_id=plan.id, version=1, status="active")
         db.add(version); db.flush()
@@ -58,6 +68,146 @@ def test_weekly_report_aggregates_owner_data_without_mutating_it(
     with client.app.state.database.session_factory() as db:
         assert len(list(db.scalars(select(LearningRecord)))) == record_total
         assert len(list(db.scalars(select(KnowledgeMastery)))) == mastery_total
+
+
+def test_weekly_report_only_counts_active_plan_version_tasks(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Active report scope")
+    other_course_id = _course(client, auth_headers, "Other active report scope")
+    with client.app.state.database.session_factory() as db:
+        user_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        plan = StudyPlan(
+            user_id=user_id,
+            course_id=course_id,
+            goal="version scope",
+            start_date=date(2026, 7, 10),
+            end_date=date(2026, 7, 16),
+            active_version=2,
+            status="active",
+        )
+        other_plan = StudyPlan(
+            user_id=user_id,
+            course_id=other_course_id,
+            goal="other course",
+            start_date=date(2026, 7, 10),
+            end_date=date(2026, 7, 16),
+            active_version=1,
+            status="active",
+        )
+        db.add_all([plan, other_plan]); db.flush()
+        superseded = StudyPlanVersion(plan_id=plan.id, version=1, status="superseded")
+        active = StudyPlanVersion(plan_id=plan.id, version=2, status="active")
+        candidate = StudyPlanVersion(plan_id=plan.id, version=3, status="candidate")
+        other_active = StudyPlanVersion(plan_id=other_plan.id, version=1, status="active")
+        db.add_all([superseded, active, candidate, other_active]); db.flush()
+        task_date = date(2026, 7, 12)
+        db.add_all([
+            StudyTask(plan_version_id=active.id, user_id=user_id, course_id=course_id, scheduled_date=task_date, title="active complete", task_type="review", estimated_minutes=20, status="completed"),
+            StudyTask(plan_version_id=active.id, user_id=user_id, course_id=course_id, scheduled_date=task_date, title="active todo", task_type="practice", estimated_minutes=20),
+            StudyTask(plan_version_id=superseded.id, user_id=user_id, course_id=course_id, scheduled_date=task_date, title="old version", task_type="review", estimated_minutes=999, status="completed"),
+            StudyTask(plan_version_id=candidate.id, user_id=user_id, course_id=course_id, scheduled_date=task_date, title="candidate version", task_type="review", estimated_minutes=999, status="completed"),
+            StudyTask(plan_version_id=other_active.id, user_id=user_id, course_id=other_course_id, scheduled_date=task_date, title="other active", task_type="review", estimated_minutes=999, status="completed"),
+        ])
+        db.commit()
+
+    response = _weekly(client, auth_headers, start_date="2026-07-10", end_date="2026-07-16", course_id=course_id)
+    assert response.status_code == 201
+    report = response.json()["data"]["result_data"]
+    assert report["scheduled_tasks"] == 2
+    assert report["completed_tasks"] == 1
+    assert report["completion_rate"] == 0.5
+
+
+def test_weekly_report_uses_user_timezone_for_boundaries_and_study_days(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Timezone report")
+    with client.app.state.database.session_factory() as db:
+        user_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        user = db.get(User, user_id)
+        assert user is not None
+        user.timezone = "Asia/Shanghai"
+        db.add_all([
+            LearningRecord(user_id=user_id, course_id=course_id, duration_seconds=20 * 60, completed=True, occurred_at=datetime(2026, 7, 11, 16, 30, tzinfo=timezone.utc)),
+            LearningRecord(user_id=user_id, course_id=course_id, duration_seconds=10 * 60, completed=True, occurred_at=datetime(2026, 7, 12, 15, 59, tzinfo=timezone.utc)),
+            LearningRecord(user_id=user_id, course_id=course_id, duration_seconds=99 * 60, completed=True, occurred_at=datetime(2026, 7, 12, 16, 0, tzinfo=timezone.utc)),
+        ])
+        db.commit()
+
+    response = _weekly(client, auth_headers, start_date="2026-07-12", end_date="2026-07-12", course_id=course_id)
+    assert response.status_code == 201
+    report = response.json()["data"]["result_data"]
+    assert report["total_learning_minutes"] == 30
+    assert report["study_days"] == 1
+
+    with client.app.state.database.session_factory() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        user.timezone = "Invalid/Timezone"
+        db.add(LearningRecord(user_id=user_id, course_id=course_id, duration_seconds=5 * 60, completed=True, occurred_at=datetime(2026, 7, 12, 0, tzinfo=timezone.utc)))
+        db.commit()
+    fallback = _weekly(client, auth_headers, start_date="2026-07-12", end_date="2026-07-12", course_id=course_id)
+    assert fallback.status_code == 201
+    assert fallback.json()["data"]["result_data"]["total_learning_minutes"] == 114
+
+
+def test_weekly_report_final_cancel_check_prevents_success(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch
+) -> None:
+    from backend.app.services import reports
+
+    course_id = _course(client, auth_headers, "Cancelable report")
+    with client.app.state.database.session_factory() as db:
+        user_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        task = AsyncTask(
+            user_id=user_id,
+            task_type="weekly_report",
+            resource_type="course",
+            resource_id=str(course_id),
+            input_data={"start_date": "2026-07-10", "end_date": "2026-07-16", "course_id": course_id},
+        )
+        db.add(task); db.commit()
+        original_update_progress = reports._update_progress
+
+        def request_cancel_after_building(db_session, report_task, progress, step):
+            updated = original_update_progress(db_session, report_task, progress, step)
+            if updated and step == "building_report":
+                report_task.cancel_requested = True
+                db_session.commit()
+            return updated
+
+        monkeypatch.setattr(reports, "_update_progress", request_cancel_after_building)
+        assert reports.generate_weekly_report(db, task) == {"cancelled": True}
+        db.refresh(task)
+        assert task.status == "cancelled"
+        assert task.current_step == "cancelled_by_user"
+        assert not task.result_data
+
+
+def test_weekly_report_retry_rejects_invalid_foreign_and_archived_courses(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Retry owner course")
+    with client.app.state.database.session_factory() as db:
+        user_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        foreign_user = User(email="retry-foreign@example.com", display_name="Foreign", password_hash="unused")
+        db.add(foreign_user); db.flush()
+        foreign_course = Course(owner_id=foreign_user.id, name="Foreign retry course")
+        archived_course = Course(owner_id=user_id, name="Archived retry course", archived=True)
+        db.add_all([foreign_course, archived_course]); db.flush()
+        shared_input = {"start_date": "2026-07-10", "end_date": "2026-07-16"}
+        user_report = AsyncTask(user_id=user_id, task_type="weekly_report", resource_type="user", resource_id=str(user_id), status="failed", input_data=shared_input)
+        invalid = AsyncTask(user_id=user_id, task_type="weekly_report", resource_type="course", resource_id="not-a-number", status="failed", input_data=shared_input)
+        foreign = AsyncTask(user_id=user_id, task_type="weekly_report", resource_type="course", resource_id=str(foreign_course.id), status="failed", input_data=shared_input)
+        archived = AsyncTask(user_id=user_id, task_type="weekly_report", resource_type="course", resource_id=str(archived_course.id), status="failed", input_data=shared_input)
+        db.add_all([user_report, invalid, foreign, archived]); db.commit()
+        ids = (user_report.public_id, invalid.public_id, foreign.public_id, archived.public_id)
+
+    assert client.post(f"/api/v1/async-tasks/{ids[0]}/retry", headers=auth_headers).status_code == 200
+    for task_id in ids[1:]:
+        response = client.post(f"/api/v1/async-tasks/{task_id}/retry", headers=auth_headers)
+        assert response.status_code == 404
 
 
 def test_task_list_filters_paginates_and_hides_other_users(
