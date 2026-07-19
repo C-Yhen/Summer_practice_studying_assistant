@@ -26,7 +26,7 @@ const router = createRouter({
         { path: 'mastery', name: 'mastery', component: () => import('@/views/MasteryView.vue'), meta: { title: '知识点掌握度', eyebrow: 'MASTERY MAP' } },
         { path: 'statistics', name: 'statistics', component: () => import('@/views/StatisticsView.vue'), meta: { title: '学习统计', eyebrow: 'LEARNING ANALYTICS' } },
         { path: 'tasks', name: 'tasks', component: () => import('@/views/AsyncTasksView.vue'), meta: { title: '长时任务中心', eyebrow: 'ASYNC JOBS' } },
-        { path: 'calendar', name: 'calendar', component: () => import('@/views/CalendarView.vue'), meta: { title: '日历同步', eyebrow: 'MCP CALENDAR' } },
+        { path: 'calendar', name: 'calendar', component: () => import('@/views/CalendarView.vue'), meta: { title: '学习日历', eyebrow: 'LEARNING CALENDAR' } },
         { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: '个人设置', eyebrow: 'PREFERENCES' } },
       ],
     },
