@@ -584,3 +584,10 @@ export interface AuthTokenResponse {
   expires_in: number
   user: BackendUser
 }
+
+export interface StatisticsDailyPoint { date:string; actual_learning_seconds:number; planned_minutes:number; task_total:number; task_completed:number; practice_attempts:number; practice_correct:number; practice_accuracy:number|null }
+export interface StatisticsCourseDistribution { course_id:number; course_name:string; learning_seconds:number; percentage:number }
+export interface StatisticsHeatmapDay { date:string; learning_seconds:number }
+export interface StatisticsEfficientPeriod { label:string; start_hour:number; end_hour:number; attempts:number; correct:number; accuracy:number }
+export interface StatisticsInsight { code:string; title:string; detail:string; evidence:Record<string, unknown>|string }
+export interface StatisticsOverview { range:{start_date:string;end_date:string;days:number;timezone:string}; scope:{course_id:number|null;course_name:string|null}; summary:{total_learning_seconds:number;previous_total_learning_seconds:number|null;learning_seconds_change:number|null;learning_days:number;longest_streak_days:number;task_total:number;task_completed:number;task_completion_rate:number|null;previous_task_completion_rate:number|null;task_completion_rate_change:number|null;practice_attempts:number;practice_correct:number;practice_wrong:number;practice_accuracy:number|null;previous_practice_accuracy:number|null;practice_accuracy_change:number|null;efficient_period:StatisticsEfficientPeriod|null}; daily:StatisticsDailyPoint[]; course_distribution:StatisticsCourseDistribution[]; heatmap:StatisticsHeatmapDay[]; insights:StatisticsInsight[] }

@@ -250,3 +250,13 @@
 - PostgreSQL/API 并发测试：`1 passed, 18 deselected`；两个同步请求只产生一条 Attempt、一条 LearningRecord、一次 mastery attempt 和一次 wrong_count，并验证 409 错配、重复错题及分页汇总。
 - 前端 `npm run build` 通过；浏览器联调未执行。
 - 局限：规则题仍是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析不在本轮范围。
+
+## Round 12：真实学习统计与 CSV 导出（完成，等待独立审查）
+
+- 新增 `/statistics/overview` 与 `/statistics/export.csv`；按用户时区用本地日期转 UTC 左闭右开区间，支持 7/30 天、课程筛选与 URL 恢复。
+- 学习时长只聚合已完成 LearningRecord；计划任务只统计当前 active 计划与 active 版本；练习正确率只聚合当前用户真实 PracticeAttempt。
+- 返回当前/上一周期比较、完整每日零值趋势、49 天热力图、最长连续学习天数、稳定排序的课程分布和最低 3 次样本的高效练习时段。
+- 洞察改为可复现的规则洞察，不调用模型、不写数据库、不使用预测文案；CSV 使用 UTF-8 BOM、用户范围数据、公式注入前缀保护。
+- Statistics 页面移除固定趋势、课程、热力图和 AI 文案；显式 Mock 模式返回同构演示数据，真实请求失败不回退 Mock。
+- 实际测试：统计专项 `6 passed`；完整后端 `81 passed, 1 skipped`；前端 `npm run build` 通过；PostgreSQL/API 与 CSV 联调通过。浏览器联调未执行。
+- 未解决：尚无浏览器 E2E 套件；规则洞察只描述现有数据，未提供预测或外部模型分析。

@@ -13,6 +13,7 @@ from backend.app.api.v1 import (
     practice,
     rag,
     recommendations,
+    statistics,
 )
 from backend.app.schemas import HealthResponse
 
@@ -26,6 +27,7 @@ api_router.include_router(plans.router)
 api_router.include_router(practice.router)
 api_router.include_router(learning.router)
 api_router.include_router(recommendations.router)
+api_router.include_router(statistics.router)
 api_router.include_router(async_tasks.router)
 api_router.include_router(mcp.router)
 api_router.include_router(calendar.router)

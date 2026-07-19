@@ -53,6 +53,7 @@ import type {
   PracticeAttemptRequest,
   PracticeAttemptResult,
   WrongBookEntry,
+  StatisticsOverview,
 } from '@/types'
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
@@ -66,6 +67,18 @@ const mockPracticeSubmissions = new Map<string, {
   result: PracticeAttemptResult
 }>()
 const mockWrongBookEntries = new Map<number, WrongBookEntry[]>()
+
+function mockStatistics(days: number, courseId?: number): StatisticsOverview {
+  const selected = courseId === undefined ? mockCourseRecords : mockCourseRecords.filter((course) => course.id === courseId)
+  if (courseId !== undefined && !selected.length) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
+  const end = new Date(); const dates = Array.from({ length: days }, (_, index) => { const value = new Date(end); value.setDate(end.getDate() - days + index + 1); return value.toISOString().slice(0, 10) })
+  const daily = dates.map((date, index) => ({ date, actual_learning_seconds: (index % 3) * 1800, planned_minutes: 60, task_total: index % 2, task_completed: index % 2, practice_attempts: index % 3, practice_correct: index % 3 ? Math.max(0, index % 3 - 1) : 0, practice_accuracy: index % 3 ? 0.5 : null }))
+  const total = daily.reduce((sum, item) => sum + item.actual_learning_seconds, 0)
+  const attempts = daily.reduce((sum, item) => sum + item.practice_attempts, 0); const correct = daily.reduce((sum, item) => sum + item.practice_correct, 0)
+  const distribution = selected.slice(0, 3).map((course, index) => ({ course_id: course.id, course_name: course.name, learning_seconds: Math.max(0, total - index * 600), percentage: selected.length ? 1 / selected.length : 0 }))
+  const heatmap = Array.from({ length: 49 }, (_, index) => { const value = new Date(end); value.setDate(end.getDate() - 48 + index); return { date: value.toISOString().slice(0, 10), learning_seconds: daily[Math.max(0, daily.length - 49 + index)]?.actual_learning_seconds || 0 } })
+  return { range: { start_date: dates[0], end_date: dates[dates.length - 1], days, timezone: 'Asia/Shanghai' }, scope: { course_id: courseId ?? null, course_name: selected.length === 1 ? selected[0].name : null }, summary: { total_learning_seconds: total, previous_total_learning_seconds: null, learning_seconds_change: null, learning_days: daily.filter((item) => item.actual_learning_seconds > 0).length, longest_streak_days: 2, task_total: daily.reduce((sum, item) => sum + item.task_total, 0), task_completed: daily.reduce((sum, item) => sum + item.task_completed, 0), task_completion_rate: 1, previous_task_completion_rate: null, task_completion_rate_change: null, practice_attempts: attempts, practice_correct: correct, practice_wrong: attempts - correct, practice_accuracy: attempts ? correct / attempts : null, previous_practice_accuracy: null, practice_accuracy_change: null, efficient_period: null }, daily, course_distribution: distribution, heatmap, insights: total ? [{ code: 'demo', title: '规则洞察', detail: `演示模式：本周期共学习 ${Math.round(total / 60)} 分钟。`, evidence: { total } }] : [] }
+}
 
 function toCourseListItem(course: BackendCourse): CourseListItem {
   if (!Number.isInteger(course.id) || typeof course.name !== 'string' || !course.name.trim()) {
@@ -1202,5 +1215,23 @@ export const practiceApi = {
       if (!entry) throw new ApiEnvelopeError('错题不存在'); entry.status = status; return { id: entry.id, status: entry.status }
     }
     return unwrapApiResponse<{id:number;status:string}>(await apiClient.patch(`/courses/${courseId}/wrong-book/${entryId}`,{status}))
+  },
+}
+
+export const statisticsApi = {
+  async getOverview(params: { days: number; course_id?: number; end_date?: string }): Promise<StatisticsOverview> {
+    if (mockEnabled) { await mockDelay(); return mockStatistics(params.days, params.course_id) }
+    return unwrapApiResponse<StatisticsOverview>(await apiClient.get('/statistics/overview', { params }))
+  },
+  async exportCsv(params: { days: number; course_id?: number; end_date?: string }): Promise<{ blob: Blob; filename: string }> {
+    if (mockEnabled) {
+      await mockDelay(); const overview = mockStatistics(params.days, params.course_id)
+      const text = `日期,课程范围,实际学习分钟\n${overview.daily.map((item) => `${item.date},演示课程,${item.actual_learning_seconds / 60}`).join('\n')}`
+      return { blob: new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' }), filename: 'study-statistics-demo.csv' }
+    }
+    const response = await apiClient.get('/statistics/export.csv', { params, responseType: 'blob' })
+    const disposition = String(response.headers['content-disposition'] || '')
+    const match = disposition.match(/filename="?([^";]+)"?/i)
+    return { blob: response.data as Blob, filename: match?.[1] || 'study-statistics.csv' }
   },
 }
