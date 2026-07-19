@@ -866,6 +866,19 @@ export const asyncTaskApi = {
     }
     return parseTask(unwrapApiResponse<unknown>(await apiClient.post(`/async-tasks/${encodeURIComponent(taskId)}/retry`)))
   },
+
+  async downloadWeeklyReport(taskId: string): Promise<{ blob: Blob; filename: string }> {
+    if (mockEnabled) {
+      await mockDelay()
+      const task = mockTasks.get(taskId)
+      if (!task || task.task_type !== 'weekly_report' || task.status !== 'success') throw new ApiEnvelopeError('周报尚未生成', 409)
+      return { blob: new Blob([`# StudyPilot Weekly Report\n\n${String(task.result_data?.summary || '')}\n`], { type: 'text/markdown;charset=utf-8' }), filename: 'studypilot-weekly-report.md' }
+    }
+    const response = await apiClient.get(`/async-tasks/${encodeURIComponent(taskId)}/report.md`, { responseType: 'blob' })
+    const header = response.headers['content-disposition']
+    const filename = typeof header === 'string' ? /filename="?([^";]+)"?/i.exec(header)?.[1] : undefined
+    return { blob: response.data as Blob, filename: filename || 'studypilot-weekly-report.md' }
+  },
 }
 
 export const chatApi = {

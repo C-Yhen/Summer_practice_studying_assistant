@@ -305,3 +305,10 @@
 - 非法课程 URL 保留可用课程选择器以恢复；非法分类仍规范化为 `all`。
 - 分类标签统一展示后端 `category_counts`，不再在具体分类页错误复用当前分类的 `selection.returned`。
 - 实际验证：`cd frontend && npm run build` 通过。浏览器联调未执行。
+
+## Round 16：真实学习周报展示与 Markdown 导出
+
+- 周报聚合仅统计当前用户、未归档课程、已完成学习记录和 active 计划的 active 版本任务；按用户时区生成连续每日数据、课程分布与真实尝试的薄弱点。
+- 新增成功周报的 Markdown 下载接口，导出仅使用持久化 `result_data`，并进行表格字符串转义；任务中心支持结构化周报、旧报告兼容、导出错误状态和移动端详情展示。
+- 实际验证：前端 `npm run build` 通过；SQLite 容器专项测试 `8 passed`，完整后端测试 `100 passed, 3 skipped`。未启动 PostgreSQL、Redis、Celery、MCP 或浏览器；浏览器联调未执行。
+- 未解决问题：尚无仓库内可维护的前端 E2E 套件；构建仍有既有大 chunk 警告。

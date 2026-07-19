@@ -64,7 +64,10 @@ def test_weekly_report_aggregates_owner_data_without_mutating_it(
     assert report["scheduled_tasks"] == 2
     assert report["completed_tasks"] == 1
     assert report["completion_rate"] == 0.5
-    assert report["weak_points"] == [{"knowledge_point": "事务隔离", "score": 0.42}]
+    assert report["report_schema_version"] == 2
+    assert report["weak_points"] == [{"knowledge_point_id": point.id, "knowledge_point": "事务隔离", "course_id": course_id, "course_name": "Async report", "score": 0.42, "attempts": 1, "confidence": 0.5}]
+    assert report["daily"][2] == {"date": "2026-07-12", "learning_minutes": 25, "scheduled_tasks": 1, "completed_tasks": 1}
+    assert report["course_breakdown"] == [{"course_id": course_id, "course_name": "Async report", "learning_minutes": 25, "scheduled_tasks": 2, "completed_tasks": 1, "completion_rate": 0.5}]
     with client.app.state.database.session_factory() as db:
         assert len(list(db.scalars(select(LearningRecord)))) == record_total
         assert len(list(db.scalars(select(KnowledgeMastery)))) == mastery_total
@@ -263,3 +266,22 @@ def test_task_validation_cancel_retry_and_dispatch_contract(
         client.app.state.settings.sync_document_processing = False
         asyncio.run(dispatch_async_task(db, task, client.app.state.settings))
     assert called == [("weekly_report", task.public_id)]
+
+
+def test_weekly_report_markdown_export_is_owned_read_only_and_escaped(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Markdown | course")
+    created = _weekly(client, auth_headers, start_date="2026-07-10", end_date="2026-07-10", course_id=course_id)
+    assert created.status_code == 201
+    task_id = created.json()["data"]["task_id"]
+    response = client.get(f"/api/v1/async-tasks/{task_id}/report.md", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert "studypilot-weekly-report-2026-07-10-to-2026-07-10.md" in response.headers["content-disposition"]
+    assert "# StudyPilot Weekly Report" in response.text
+    assert "Markdown \\| course" in response.text
+    assert client.get(f"/api/v1/async-tasks/{task_id}/report.md").status_code == 401
+    with client.app.state.database.session_factory() as db:
+        task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == task_id))
+        assert task is not None and task.status == "success"

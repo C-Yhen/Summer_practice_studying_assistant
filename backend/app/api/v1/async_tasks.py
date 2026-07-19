@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
@@ -17,6 +17,7 @@ from backend.app.services.async_tasks import (
     mark_task_cancelled,
     task_payload,
 )
+from backend.app.services.reports import render_weekly_report_markdown
 
 router = APIRouter(tags=["async-tasks"])
 TASK_STATUSES = {"queued", "processing", "cancelling", "success", "failed", "cancelled"}
@@ -121,6 +122,24 @@ def list_async_tasks(
 @router.get("/async-tasks/{task_id}")
 def read_async_task(task_id: str, db: DBSession, current_user: CurrentUser) -> dict:
     return ok(task_payload(_owned_task(db, task_id, current_user.id)))
+
+
+@router.get("/async-tasks/{task_id}/report.md")
+def export_weekly_report_markdown(task_id: str, db: DBSession, current_user: CurrentUser) -> Response:
+    task = _owned_task(db, task_id, current_user.id)
+    if task.task_type != "weekly_report":
+        raise HTTPException(status_code=400, detail="TASK_TYPE_NOT_WEEKLY_REPORT")
+    if task.status != "success" or not isinstance(task.result_data, dict):
+        raise HTTPException(status_code=409, detail="WEEKLY_REPORT_NOT_READY")
+    result = task.result_data
+    start = str(result.get("range_start") or "report")
+    end = str(result.get("range_end") or "report")
+    filename = f"studypilot-weekly-report-{start}-to-{end}.md"
+    return Response(
+        content=render_weekly_report_markdown(result),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/async-tasks/{task_id}/progress")

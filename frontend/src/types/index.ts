@@ -224,6 +224,58 @@ export interface WeeklyReportRequest {
   course_id?: number | null
 }
 
+export interface WeeklyReportDailyItem {
+  date: string
+  learning_minutes: number
+  scheduled_tasks: number
+  completed_tasks: number
+}
+
+export interface WeeklyReportCourseBreakdown {
+  course_id: number
+  course_name: string
+  learning_minutes: number
+  scheduled_tasks: number
+  completed_tasks: number
+  completion_rate: number
+}
+
+export interface WeeklyReportWeakPoint {
+  knowledge_point: string
+  score: number
+  knowledge_point_id?: number
+  course_id?: number
+  course_name?: string
+  attempts?: number
+  confidence?: number
+}
+
+export interface WeeklyReportResult {
+  range_start: string
+  range_end: string
+  total_learning_minutes: number
+  study_days: number
+  scheduled_tasks: number
+  completed_tasks: number
+  completion_rate: number
+  weak_points: WeeklyReportWeakPoint[]
+  summary: string
+  report_schema_version?: number
+  timezone?: string
+  scope_label?: string
+  daily?: WeeklyReportDailyItem[]
+  course_breakdown?: WeeklyReportCourseBreakdown[]
+}
+
+export function normalizeWeeklyReport(value: Record<string, unknown> | null): WeeklyReportResult | null {
+  if (!value || typeof value.range_start !== 'string' || typeof value.range_end !== 'string' || typeof value.summary !== 'string') return null
+  const number = (key: string) => typeof value[key] === 'number' ? value[key] : 0
+  const weakPoints = Array.isArray(value.weak_points) ? value.weak_points.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object').filter(item => typeof item.knowledge_point === 'string').map(item => ({ knowledge_point: String(item.knowledge_point), score: typeof item.score === 'number' ? item.score : 0, ...(typeof item.knowledge_point_id === 'number' ? { knowledge_point_id: item.knowledge_point_id } : {}), ...(typeof item.course_id === 'number' ? { course_id: item.course_id } : {}), ...(typeof item.course_name === 'string' ? { course_name: item.course_name } : {}), ...(typeof item.attempts === 'number' ? { attempts: item.attempts } : {}), ...(typeof item.confidence === 'number' ? { confidence: item.confidence } : {}) })) : []
+  const daily = Array.isArray(value.daily) ? value.daily.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && typeof item.date === 'string').map(item => ({ date: String(item.date), learning_minutes: typeof item.learning_minutes === 'number' ? item.learning_minutes : 0, scheduled_tasks: typeof item.scheduled_tasks === 'number' ? item.scheduled_tasks : 0, completed_tasks: typeof item.completed_tasks === 'number' ? item.completed_tasks : 0 })) : undefined
+  const breakdown = Array.isArray(value.course_breakdown) ? value.course_breakdown.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && typeof item.course_id === 'number' && typeof item.course_name === 'string').map(item => ({ course_id: Number(item.course_id), course_name: String(item.course_name), learning_minutes: typeof item.learning_minutes === 'number' ? item.learning_minutes : 0, scheduled_tasks: typeof item.scheduled_tasks === 'number' ? item.scheduled_tasks : 0, completed_tasks: typeof item.completed_tasks === 'number' ? item.completed_tasks : 0, completion_rate: typeof item.completion_rate === 'number' ? item.completion_rate : 0 })) : undefined
+  return { range_start: value.range_start, range_end: value.range_end, total_learning_minutes: number('total_learning_minutes'), study_days: number('study_days'), scheduled_tasks: number('scheduled_tasks'), completed_tasks: number('completed_tasks'), completion_rate: number('completion_rate'), weak_points: weakPoints, summary: value.summary, ...(typeof value.report_schema_version === 'number' ? { report_schema_version: value.report_schema_version } : {}), ...(typeof value.timezone === 'string' ? { timezone: value.timezone } : {}), ...(typeof value.scope_label === 'string' ? { scope_label: value.scope_label } : {}), ...(daily ? { daily } : {}), ...(breakdown ? { course_breakdown: breakdown } : {}) }
+}
+
 export interface LatestDocumentTaskResponse {
   task_id: string
   status: string
