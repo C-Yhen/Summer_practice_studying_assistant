@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import re
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.dependencies import CurrentUser, DBSession
 from backend.app.models import MCPToolCall
@@ -23,6 +27,40 @@ WRITE_TOOLS = {
 }
 ALLOWED_STATUSES = {"waiting_for_user", "success", "failed"}
 MAX_AUDIT_BYTES = 16_000
+SENSITIVE_KEYS = {
+    "confirmation_token",
+    "access_token",
+    "authorization",
+    "jwt",
+    "refresh_token",
+    "api_key",
+}
+
+
+def sanitize_audit_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): sanitize_audit_value(item)
+            for key, item in value.items()
+            if str(key).lower() not in SENSITIVE_KEYS
+        }
+    if isinstance(value, list):
+        return [sanitize_audit_value(item) for item in value]
+    return value
+
+
+def _safe_error(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return re.sub(
+        r"(?i)(authorization|confirmation_token|access_token|refresh_token|api_key|jwt)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+        r"\1=[REDACTED]",
+        value,
+    )
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
 
 
 @router.get("/tools")
@@ -45,19 +83,18 @@ def create_tool_call(payload: MCPToolCallCreate, db: DBSession, current_user: Cu
         raise HTTPException(status_code=422, detail="UNKNOWN_MCP_TOOL")
     if payload.status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=422, detail="INVALID_MCP_TOOL_STATUS")
-    raw_input = dict(payload.input_data)
-    raw_input.pop("confirmation_token", None)
-    raw_input.pop("access_token", None)
-    if len(str(raw_input).encode()) > MAX_AUDIT_BYTES or len(str(payload.output_data or {}).encode()) > MAX_AUDIT_BYTES:
+    raw_input = sanitize_audit_value(payload.input_data)
+    raw_output = sanitize_audit_value(payload.output_data)
+    if _json_size(raw_input) > MAX_AUDIT_BYTES or _json_size(raw_output or {}) > MAX_AUDIT_BYTES:
         raise HTTPException(status_code=422, detail="MCP_AUDIT_PAYLOAD_TOO_LARGE")
     call = MCPToolCall(
         user_id=current_user.id,
         agent_run_id=payload.agent_run_id,
         tool_name=payload.tool_name,
         input_data=raw_input,
-        output_data=payload.output_data,
+        output_data=raw_output,
         status=payload.status,
-        error_message=payload.error_message,
+        error_message=_safe_error(payload.error_message),
         duration_ms=payload.duration_ms,
     )
     db.add(call)
@@ -73,6 +110,6 @@ def list_tool_calls(db: DBSession, current_user: CurrentUser, tool_name: str | N
         statement = statement.where(MCPToolCall.tool_name == tool_name)
     if calendar_only:
         statement = statement.where(MCPToolCall.tool_name.in_({"get_available_time", "create_calendar_event", "update_calendar_event", "delete_calendar_event"}))
-    total = db.scalar(select(__import__("sqlalchemy").func.count()).select_from(statement.subquery())) or 0
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     calls = list(db.scalars(statement.order_by(MCPToolCall.created_at.desc(), MCPToolCall.id.desc()).offset(offset).limit(limit)))
     return ok({"items": [{"id": item.id, "agent_run_id": item.agent_run_id, "tool_name": item.tool_name, "status": item.status, "duration_ms": item.duration_ms, "error_message": item.error_message, "created_at": item.created_at.isoformat()} for item in calls], "total": total})

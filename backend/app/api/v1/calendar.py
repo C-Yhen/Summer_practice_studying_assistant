@@ -6,14 +6,14 @@ from io import StringIO
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import CalendarEvent, Course, StudyPlan, StudyPlanVersion, StudyTask
 from backend.app.responses import ok
 from backend.app.schemas import CalendarEventCreate, CalendarEventUpdate, CalendarPlanSyncConfirm, CalendarPlanSyncRequest
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
-from backend.app.services.timezones import as_utc, resolve_user_timezone
+from backend.app.services.timezones import as_utc, local_date_range_utc, resolve_user_timezone
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -27,6 +27,28 @@ def _range(start_at: datetime, end_at: datetime) -> tuple[datetime, datetime]:
     if end <= start:
         _fail(422, "INVALID_TIME_RANGE")
     return start, end
+
+
+def _query_range(
+    *,
+    start_at: datetime | None,
+    end_at: datetime | None,
+    start_date: date | None,
+    end_date: date | None,
+    timezone_name: str,
+) -> tuple[datetime, datetime]:
+    has_datetimes = start_at is not None or end_at is not None
+    has_dates = start_date is not None or end_date is not None
+    if has_datetimes and has_dates:
+        _fail(422, "CALENDAR_RANGE_PARAMETERS_MIXED")
+    if has_dates:
+        if start_date is None or end_date is None or end_date < start_date:
+            _fail(422, "INVALID_DATE_RANGE")
+        zone, _ = resolve_user_timezone(timezone_name)
+        return local_date_range_utc(start_date, end_date, zone)
+    if start_at is None or end_at is None:
+        _fail(422, "CALENDAR_RANGE_REQUIRED")
+    return _range(start_at, end_at)
 
 
 def _course(db: DBSession, user_id: int, course_id: int) -> Course:
@@ -77,6 +99,10 @@ def _key(user_id: int, value: str) -> str:
     return f"calendar:{user_id}:{value}"
 
 
+def _manual_key(user_id: int, value: str) -> str:
+    return _key(user_id, f"manual:{value}")
+
+
 def _create_content(payload: CalendarEventCreate, key: str) -> dict:
     return {"title": payload.title, "start_at": as_utc(payload.start_at).isoformat(), "end_at": as_utc(payload.end_at).isoformat(), "study_task_id": payload.study_task_id, "idempotency_key": key}
 
@@ -97,12 +123,12 @@ def availability(start_at: datetime, end_at: datetime, db: DBSession, current_us
 
 
 @router.get("/events")
-def list_events(start_at: datetime, end_at: datetime, db: DBSession, current_user: CurrentUser, course_id: int | None = Query(None, gt=0), limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict:
-    start_at, end_at = _range(start_at, end_at)
+def list_events(db: DBSession, current_user: CurrentUser, start_at: datetime | None = None, end_at: datetime | None = None, start_date: date | None = None, end_date: date | None = None, course_id: int | None = Query(None, gt=0), limit: int = Query(100, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict:
+    start_at, end_at = _query_range(start_at=start_at, end_at=end_at, start_date=start_date, end_date=end_date, timezone_name=current_user.timezone)
     statement = _event_rows(db, current_user.id, start_at, end_at, course_id)
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     rows = db.execute(statement.order_by(CalendarEvent.start_at, CalendarEvent.id).offset(offset).limit(limit)).all()
-    return ok({"items": [_event_payload(event, task, course) for event, task, course in rows], "total": total})
+    return ok({"items": [_event_payload(event, task, course) for event, task, course in rows], "total": total, "timezone": current_user.timezone})
 
 
 @router.post("/events/preview")
@@ -114,7 +140,10 @@ def preview_event(payload: CalendarEventCreate, db: DBSession, current_user: Cur
     supplied = payload.idempotency_key or idempotency_key
     if payload.idempotency_key and idempotency_key and payload.idempotency_key != idempotency_key:
         _fail(422, "IDEMPOTENCY_KEY_MISMATCH")
-    content = _create_content(payload, _key(current_user.id, supplied or f"manual:{payload.title}:{start.isoformat()}"))
+    content = _create_content(
+        payload,
+        _manual_key(current_user.id, supplied or f"{payload.title}:{start.isoformat()}"),
+    )
     token = issue_confirmation(settings.jwt_secret, user_id=current_user.id, action="create_calendar_event", resource_id="new", payload=content)
     return ok({"status": "confirmation_required", "preview": content, "confirmation_token": token, "provider": "local", "task_id": task.id if task else None})
 
@@ -124,7 +153,10 @@ def create_event(payload: CalendarEventCreate, db: DBSession, current_user: Curr
     supplied = payload.idempotency_key or header_key
     if payload.idempotency_key and header_key and payload.idempotency_key != header_key:
         _fail(422, "IDEMPOTENCY_KEY_MISMATCH")
-    key = _key(current_user.id, supplied or f"manual:{payload.title}:{as_utc(payload.start_at).isoformat()}")
+    key = _manual_key(
+        current_user.id,
+        supplied or f"{payload.title}:{as_utc(payload.start_at).isoformat()}",
+    )
     content = _create_content(payload, key)
     try:
         verify_confirmation(confirmation_token, settings.jwt_secret, user_id=current_user.id, action="create_calendar_event", resource_id="new", payload=content)
@@ -142,11 +174,14 @@ def create_event(payload: CalendarEventCreate, db: DBSession, current_user: Curr
     event = CalendarEvent(user_id=current_user.id, title=payload.title, start_at=start, end_at=end, study_task_id=payload.study_task_id, idempotency_key=key, provider="local", sync_status="local")
     try:
         db.add(event); db.commit(); db.refresh(event)
-    except SQLAlchemyError:
+    except IntegrityError:
         db.rollback(); existing = db.scalar(select(CalendarEvent).where(CalendarEvent.idempotency_key == key))
         if existing and existing.title == payload.title and as_utc(existing.start_at) == start and as_utc(existing.end_at) == end and existing.study_task_id == payload.study_task_id:
             return ok({"event_id": existing.id, "sync_status": existing.sync_status, "provider": existing.provider, "idempotent_replay": True})
-        raise
+        _fail(409, "IDEMPOTENCY_KEY_REUSED")
+    except SQLAlchemyError:
+        db.rollback()
+        _fail(409, "CALENDAR_WRITE_FAILED")
     return ok({"event_id": event.id, "sync_status": event.sync_status, "provider": event.provider, "idempotent_replay": False})
 
 
@@ -180,8 +215,14 @@ def update_event(event_id: int, changes: CalendarEventUpdate, db: DBSession, cur
     if _conflict(db, current_user.id, start, end, event.id): _fail(409, "CALENDAR_CONFLICT")
     if changes.title is not None: event.title = changes.title
     event.start_at, event.end_at = start, end
-    db.commit(); db.refresh(event)
-    return ok({"event": _event_payload(event), "idempotent_replay": False})
+    try:
+        db.commit(); db.refresh(event)
+    except SQLAlchemyError:
+        db.rollback()
+        _fail(409, "CALENDAR_WRITE_FAILED")
+    task = db.get(StudyTask, event.study_task_id) if event.study_task_id else None
+    course = db.get(Course, task.course_id) if task else None
+    return ok({"event": _event_payload(event, task, course), "idempotent_replay": False})
 
 
 @router.post("/events/{event_id}/preview-delete")
@@ -195,7 +236,11 @@ def delete_event(event_id: int, db: DBSession, current_user: CurrentUser, settin
     event = _event_or_404(db, current_user.id, event_id); content = _snapshot(event)
     try: verify_confirmation(confirmation_token, settings.jwt_secret, user_id=current_user.id, action="delete_calendar_event", resource_id=str(event.id), payload=content)
     except ValueError: _fail(409, "CALENDAR_EVENT_STALE")
-    db.delete(event); db.commit()
+    try:
+        db.delete(event); db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        _fail(409, "CALENDAR_WRITE_FAILED")
     return ok({"id": event_id, "deleted": True})
 
 
@@ -227,6 +272,35 @@ def _plan_items(db: DBSession, user_id: int, request: CalendarPlanSyncRequest, t
     return items, zone_name
 
 
+def _same_plan_event(event: CalendarEvent, item: dict, user_id: int) -> bool:
+    return (
+        event.user_id == user_id
+        and event.study_task_id == item["task_id"]
+        and event.title == item["title"]
+        and as_utc(event.start_at) == datetime.fromisoformat(item["start_at"]).astimezone(timezone.utc)
+        and as_utc(event.end_at) == datetime.fromisoformat(item["end_at"]).astimezone(timezone.utc)
+        and event.provider == "local"
+        and event.sync_status == "local"
+        and event.idempotency_key == item["idempotency_key"]
+    )
+
+
+def _replayed_plan_events(
+    db: DBSession, user_id: int, expected: list[dict]
+) -> list[CalendarEvent] | None:
+    events: list[CalendarEvent] = []
+    for item in expected:
+        event = db.scalar(
+            select(CalendarEvent).where(
+                CalendarEvent.idempotency_key == item["idempotency_key"]
+            )
+        )
+        if event is None or not _same_plan_event(event, item, user_id):
+            return None
+        events.append(event)
+    return events
+
+
 @router.post("/plan-sync/preview")
 def preview_plan_sync(payload: CalendarPlanSyncRequest, db: DBSession, current_user: CurrentUser, settings: AppSettings) -> dict:
     items, zone = _plan_items(db, current_user.id, payload, current_user.timezone)
@@ -245,22 +319,77 @@ def confirm_plan_sync(payload: CalendarPlanSyncConfirm, db: DBSession, current_u
     try: verify_confirmation(confirmation_token, settings.jwt_secret, user_id=current_user.id, action="confirm_calendar_plan_sync", resource_id=f"{start_date}:{end_date}", payload=signed)
     except ValueError: _fail(409, "CONFIRMATION_PAYLOAD_MISMATCH")
     request = CalendarPlanSyncRequest.model_validate(scope)
-    fresh, _ = _plan_items(db, current_user.id, request, current_user.timezone)
     expected = [item for item in preview.get("items", []) if item.get("status") == "ready"]
-    now_ready = [item for item in fresh if item.get("status") == "ready"]
-    if [(item["task_id"], item["title"], item["start_at"], item["end_at"]) for item in expected] != [(item["task_id"], item["title"], item["start_at"], item["end_at"]) for item in now_ready]:
+    fresh, _ = _plan_items(db, current_user.id, request, current_user.timezone)
+    fresh_by_task = {item["task_id"]: item for item in fresh}
+    for item in expected:
+        current = fresh_by_task.get(item["task_id"])
+        if current is None or any(
+            current[field] != item[field]
+            for field in (
+                "course_id",
+                "title",
+                "task_type",
+                "scheduled_date",
+                "estimated_minutes",
+                "start_at",
+                "end_at",
+                "idempotency_key",
+            )
+        ):
+            _fail(409, "CALENDAR_PREVIEW_STALE")
+        existing_for_task = db.scalar(
+            select(CalendarEvent).where(
+                CalendarEvent.user_id == current_user.id,
+                CalendarEvent.study_task_id == item["task_id"],
+            )
+        )
+        if existing_for_task and not _same_plan_event(
+            existing_for_task, item, current_user.id
+        ):
+            _fail(409, "IDEMPOTENCY_KEY_REUSED")
+        clash = _conflict(
+            db,
+            current_user.id,
+            datetime.fromisoformat(item["start_at"]),
+            datetime.fromisoformat(item["end_at"]),
+            existing_for_task.id if existing_for_task else None,
+        )
+        if clash:
+            _fail(409, "CALENDAR_PREVIEW_STALE")
+
+    if not expected:
         _fail(409, "CALENDAR_PREVIEW_STALE")
     created, replayed, ids = 0, 0, []
     try:
-        for item in now_ready:
+        for item in expected:
             existing = db.scalar(select(CalendarEvent).where(CalendarEvent.idempotency_key == item["idempotency_key"]))
-            if existing: replayed += 1; ids.append(existing.id); continue
+            if existing:
+                if not _same_plan_event(existing, item, current_user.id):
+                    _fail(409, "IDEMPOTENCY_KEY_REUSED")
+                replayed += 1; ids.append(existing.id); continue
             event = CalendarEvent(user_id=current_user.id, study_task_id=item["task_id"], title=item["title"], start_at=datetime.fromisoformat(item["start_at"]), end_at=datetime.fromisoformat(item["end_at"]), provider="local", sync_status="local", idempotency_key=item["idempotency_key"])
             db.add(event); db.flush(); created += 1; ids.append(event.id)
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        db.rollback()
+        concurrent = _replayed_plan_events(db, current_user.id, expected)
+        if concurrent is None:
+            _fail(409, "CALENDAR_SYNC_CONFLICT")
+        return ok({
+            "created_count": 0,
+            "replayed_count": len(concurrent),
+            "event_ids": [event.id for event in concurrent],
+            "items": expected,
+            "idempotent_replay": True,
+        })
     except SQLAlchemyError:
-        db.rollback(); _fail(409, "CALENDAR_SYNC_CONFLICT")
-    return ok({"created_count": created, "replayed_count": replayed, "event_ids": ids, "items": now_ready, "idempotent_replay": bool(replayed and not created)})
+        db.rollback()
+        _fail(409, "CALENDAR_SYNC_FAILED")
+    return ok({"created_count": created, "replayed_count": replayed, "event_ids": ids, "items": expected, "idempotent_replay": bool(replayed and not created)})
 
 
 def _ics_escape(value: str) -> str:
@@ -272,8 +401,8 @@ def _ics_time(value: datetime) -> str:
 
 
 @router.get("/export.ics")
-def export_ics(start_at: datetime, end_at: datetime, db: DBSession, current_user: CurrentUser, course_id: int | None = Query(None, gt=0)) -> Response:
-    start_at, end_at = _range(start_at, end_at)
+def export_ics(db: DBSession, current_user: CurrentUser, start_at: datetime | None = None, end_at: datetime | None = None, start_date: date | None = None, end_date: date | None = None, course_id: int | None = Query(None, gt=0)) -> Response:
+    start_at, end_at = _query_range(start_at=start_at, end_at=end_at, start_date=start_date, end_date=end_date, timezone_name=current_user.timezone)
     rows = db.execute(_event_rows(db, current_user.id, start_at, end_at, course_id).order_by(CalendarEvent.start_at, CalendarEvent.id)).all()
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//StudyPilot//Learning Calendar//CN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"]
     for event, task, course in rows:

@@ -16,6 +16,9 @@ dependencies = [
 [project.scripts]
 smart-learning-mcp = "smart_learning_mcp.server:main"
 
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -1247,7 +1247,7 @@ export const statisticsApi = {
 }
 
 export const calendarApi = {
-  async list(params:{start_at:string;end_at:string;course_id?:number;limit?:number;offset?:number}) { return unwrapApiResponse<CalendarEventListResponse>(await apiClient.get('/calendar/events',{params})) },
+  async list(params:{start_at?:string;end_at?:string;start_date?:string;end_date?:string;course_id?:number;limit?:number;offset?:number}) { return unwrapApiResponse<CalendarEventListResponse>(await apiClient.get('/calendar/events',{params})) },
   async availability(params:{start_at:string;end_at:string;minimum_minutes?:number}) { return unwrapApiResponse<{timezone:string;slots:CalendarAvailabilitySlot[]}>(await apiClient.get('/calendar/availability',{params})) },
   async previewPlanSync(payload:CalendarPlanSyncRequest) { return unwrapApiResponse<CalendarPlanSyncPreview>(await apiClient.post('/calendar/plan-sync/preview',payload)) },
   async confirmPlanSync(preview:CalendarPlanSyncPreview, token:string) { return unwrapApiResponse<CalendarPlanSyncConfirmResult>(await apiClient.post('/calendar/plan-sync/confirm',{preview},{headers:{'X-Confirmation-Token':token}})) },
@@ -1257,7 +1257,7 @@ export const calendarApi = {
   async updateEvent(id:number, payload:CalendarEventUpdateRequest, token:string) { return unwrapApiResponse<{event:unknown}>(await apiClient.patch(`/calendar/events/${id}`,payload,{headers:{'X-Confirmation-Token':token}})) },
   async previewDelete(id:number) { return unwrapApiResponse<CalendarEventPreview>(await apiClient.post(`/calendar/events/${id}/preview-delete`)) },
   async deleteEvent(id:number, token:string) { return unwrapApiResponse<{id:number;deleted:boolean}>(await apiClient.delete(`/calendar/events/${id}`,{headers:{'X-Confirmation-Token':token}})) },
-  async exportIcs(params:{start_at:string;end_at:string;course_id?:number}) { const response=await apiClient.get('/calendar/export.ics',{params,responseType:'blob'}); const name=String(response.headers['content-disposition']||'').match(/filename="?([^";]+)"?/i)?.[1]||'studypilot-calendar.ics'; return {blob:response.data as Blob,filename:name} },
+  async exportIcs(params:{start_at?:string;end_at?:string;start_date?:string;end_date?:string;course_id?:number}) { const response=await apiClient.get('/calendar/export.ics',{params,responseType:'blob'}); const name=String(response.headers['content-disposition']||'').match(/filename="?([^";]+)"?/i)?.[1]||'studypilot-calendar.ics'; return {blob:response.data as Blob,filename:name} },
 }
 
 export const mcpApi = {
