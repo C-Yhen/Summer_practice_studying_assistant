@@ -10,23 +10,122 @@ import { courseApi, statisticsApi } from '@/api/services'
 import { getApiErrorMessage } from '@/api/client'
 import type { CourseListItem, StatisticsOverview } from '@/types'
 
-const route = useRoute(); const router = useRouter()
-const courses = ref<CourseListItem[]>([]); const overview = ref<StatisticsOverview | null>(null)
-const days = ref(7); const courseId = ref<number | undefined>(); const loading = ref(false); const exporting = ref(false); const error = ref('')
+const route = useRoute()
+const router = useRouter()
+const courses = ref<CourseListItem[]>([])
+const overview = ref<StatisticsOverview | null>(null)
+const days = ref(7)
+const courseId = ref<number | undefined>()
+const loading = ref(false)
+const exporting = ref(false)
+const loadError = ref('')
+const exportError = ref('')
 let requestVersion = 0
-const formatMinutes = (seconds: number) => seconds >= 3600 ? `${Math.floor(seconds / 3600)}h ${Math.round(seconds % 3600 / 60)}m` : `${Math.round(seconds / 60)}m`
+
+const formatMinutes = (seconds: number) => {
+  const totalMinutes = Math.round(Math.max(0, seconds) / 60)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return hours ? (minutes ? `${hours}h ${minutes}m` : `${hours}h`) : `${minutes}m`
+}
 const percent = (value: number | null) => value === null ? '--' : `${Math.round(value * 100)}%`
-const rangeHint = (change: number | null, unit = '分钟') => change === null ? '暂无上期数据' : `较上期 ${change >= 0 ? '+' : '-'}${Math.round(Math.abs(change) / 60)} ${unit}`
-const trendOption = computed<EChartsOption>(() => ({ color: ['#5e6de7', '#17aa90'], tooltip: { trigger: 'axis', valueFormatter: (value) => `${value} 分钟` }, grid: { top: 25, left: 10, right: 20, bottom: 5, containLabel: true }, legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 9, color: '#7d879b' } }, xAxis: { type: 'category', data: (overview.value?.daily || []).map((item) => item.date.slice(5)), axisLine: { lineStyle: { color: '#e5e9f0' } }, axisTick: { show: false }, axisLabel: { fontSize: 9, color: '#8d96a8' } }, yAxis: { type: 'value', axisLabel: { fontSize: 8, color: '#9aa2b3', formatter: '{value} min' }, splitLine: { lineStyle: { color: '#edf0f5', type: 'dashed' } } }, series: [{ name: '实际时长', type: 'line', smooth: true, symbolSize: 6, data: (overview.value?.daily || []).map((item) => Math.round(item.actual_learning_seconds / 60)), areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(94,109,231,.25)' }, { offset: 1, color: 'rgba(94,109,231,0)' }] } } }, { name: '计划时长', type: 'line', smooth: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1.5 }, data: (overview.value?.daily || []).map((item) => item.planned_minutes) }] }))
-const subjectOption = computed<EChartsOption>(() => ({ tooltip: { trigger: 'item', valueFormatter: (value) => `${Math.round(Number(value))} 分钟` }, legend: { bottom: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 9, color: '#7d879b' } }, series: [{ type: 'pie', radius: ['48%', '70%'], center: ['50%', '43%'], label: { show: false }, data: (overview.value?.course_distribution || []).map((item, index) => ({ name: item.course_name, value: Math.round(item.learning_seconds / 60), itemStyle: { color: ['#5e6de7', '#16aa90', '#ee994d', '#c8cfdd'][index % 4] } })) }] }))
+const minuteChangeHint = (change: number | null) => change === null ? '暂无上期数据' : change === 0 ? '与上期持平' : `较上期 ${change > 0 ? '+' : '-'}${Math.round(Math.abs(change) / 60)} 分钟`
+const percentagePointHint = (change: number | null) => change === null ? '暂无上期数据' : change === 0 ? '与上期持平' : `较上期 ${change > 0 ? '+' : '-'}${Math.round(Math.abs(change) * 100)} 个百分点`
+const taskHint = (summary: StatisticsOverview['summary']) => summary.task_completion_rate === null ? '当前范围没有生效计划任务' : `完成率 ${percent(summary.task_completion_rate)} · ${percentagePointHint(summary.task_completion_rate_change)}`
+const practiceHint = (summary: StatisticsOverview['summary']) => !summary.practice_attempts ? '暂无真实练习记录' : `共 ${summary.practice_attempts} 次练习 · ${percentagePointHint(summary.practice_accuracy_change)}`
+
+const trendOption = computed<EChartsOption>(() => ({
+  color: ['#5e6de7', '#17aa90'], tooltip: { trigger: 'axis', valueFormatter: (value) => `${value} 分钟` },
+  grid: { top: 25, left: 10, right: 20, bottom: 5, containLabel: true },
+  legend: { top: 0, right: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 9, color: '#7d879b' } },
+  xAxis: { type: 'category', data: (overview.value?.daily || []).map((item) => item.date.slice(5)), axisLine: { lineStyle: { color: '#e5e9f0' } }, axisTick: { show: false }, axisLabel: { fontSize: 9, color: '#8d96a8' } },
+  yAxis: { type: 'value', axisLabel: { fontSize: 8, color: '#9aa2b3', formatter: '{value} min' }, splitLine: { lineStyle: { color: '#edf0f5', type: 'dashed' } } },
+  series: [
+    { name: '实际时长', type: 'line', smooth: true, symbolSize: 6, data: (overview.value?.daily || []).map((item) => Math.round(item.actual_learning_seconds / 60)), areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(94,109,231,.25)' }, { offset: 1, color: 'rgba(94,109,231,0)' }] } } },
+    { name: '计划时长', type: 'line', smooth: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1.5 }, data: (overview.value?.daily || []).map((item) => item.planned_minutes) },
+  ],
+}))
+const subjectOption = computed<EChartsOption>(() => ({
+  tooltip: { trigger: 'item', valueFormatter: (value) => `${Math.round(Number(value))} 分钟` },
+  legend: { bottom: 0, itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 9, color: '#7d879b' } },
+  series: [{ type: 'pie', radius: ['48%', '70%'], center: ['50%', '43%'], label: { show: false }, data: (overview.value?.course_distribution || []).map((item, index) => ({ name: item.course_name, value: Math.round(item.learning_seconds / 60), itemStyle: { color: ['#5e6de7', '#16aa90', '#ee994d', '#c8cfdd'][index % 4] } })) }],
+}))
 const topCourse = computed(() => overview.value?.course_distribution[0] || null)
 function level(seconds: number) { const minutes = seconds / 60; return minutes === 0 ? 0 : minutes < 25 ? 1 : minutes < 60 ? 2 : minutes < 120 ? 3 : minutes < 180 ? 4 : 5 }
-async function load() { const version = ++requestVersion; loading.value = true; error.value = ''; overview.value = null; try { courses.value = (await courseApi.list()).items.filter((item) => !item.archived); const rawDays = Number(route.query.days); days.value = rawDays === 30 ? 30 : 7; const rawCourseId = Number(route.query.courseId); courseId.value = courses.value.some((item) => item.id === rawCourseId) ? rawCourseId : undefined; const data = await statisticsApi.getOverview({ days: days.value, course_id: courseId.value }); if (version !== requestVersion) return; overview.value = data; const query = { days: String(days.value), ...(courseId.value ? { courseId: String(courseId.value) } : {}) }; if (String(route.query.days || '') !== query.days || String(route.query.courseId || '') !== String(courseId.value || '')) await router.replace({ query }) } catch (loadError) { if (version === requestVersion) error.value = getApiErrorMessage(loadError, '统计加载失败') } finally { if (version === requestVersion) loading.value = false } }
+async function load() {
+  const version = ++requestVersion
+  loading.value = true
+  loadError.value = ''
+  exportError.value = ''
+  overview.value = null
+  try {
+    courses.value = (await courseApi.list()).items.filter((item) => !item.archived)
+    const rawDays = Number(route.query.days)
+    days.value = rawDays === 30 ? 30 : 7
+    const rawCourseId = Number(route.query.courseId)
+    courseId.value = courses.value.some((item) => item.id === rawCourseId) ? rawCourseId : undefined
+    const data = await statisticsApi.getOverview({ days: days.value, course_id: courseId.value })
+    if (version !== requestVersion) return
+    overview.value = data
+    const query = { days: String(days.value), ...(courseId.value ? { courseId: String(courseId.value) } : {}) }
+    if (String(route.query.days || '') !== query.days || String(route.query.courseId || '') !== String(courseId.value || '')) await router.replace({ query })
+  } catch (requestError) {
+    if (version === requestVersion) loadError.value = getApiErrorMessage(requestError, '统计加载失败')
+  } finally {
+    if (version === requestVersion) loading.value = false
+  }
+}
 function changeFilters() { void router.replace({ query: { days: String(days.value), ...(courseId.value ? { courseId: String(courseId.value) } : {}) } }) }
-async function exportCsv() { if (exporting.value) return; exporting.value = true; try { const file = await statisticsApi.exportCsv({ days: days.value, course_id: courseId.value }); const url = URL.createObjectURL(file.blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = file.filename; anchor.click(); URL.revokeObjectURL(url) } catch (exportError) { error.value = getApiErrorMessage(exportError, '统计导出失败') } finally { exporting.value = false } }
-watch(() => [route.query.days, route.query.courseId], () => void load()); onMounted(load)
+async function exportCsv() {
+  if (exporting.value) return
+  exporting.value = true
+  exportError.value = ''
+  try {
+    const file = await statisticsApi.exportCsv({ days: days.value, course_id: courseId.value })
+    const url = URL.createObjectURL(file.blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = file.filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  } catch (requestError) {
+    exportError.value = getApiErrorMessage(requestError, '统计导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+watch(() => [route.query.days, route.query.courseId], () => void load())
+onMounted(load)
 </script>
 
-<template><div><PageHeader title="学习统计" eyebrow="LEARNING ANALYTICS" description="基于真实学习记录、计划任务与练习结果的统计回顾。"><el-select v-model="days" style="width:130px" :disabled="loading" @change="changeFilters"><el-option label="最近 7 天" :value="7"/><el-option label="最近 30 天" :value="30"/></el-select><el-select v-model="courseId" clearable placeholder="全部课程" style="width:180px" :disabled="loading" @change="changeFilters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id"/></el-select><el-button plain :loading="exporting" :disabled="!overview" @click="exportCsv"><el-icon><Download/></el-icon>导出统计</el-button></PageHeader><el-alert v-if="error" :title="error" type="error"/><div v-else-if="loading" v-loading="true" class="page-loading"/><el-empty v-else-if="!courses.length" description="暂无真实课程，请先创建课程"/><template v-else-if="overview"><section class="metric-grid"><MetricCard label="总学习时长" :value="formatMinutes(overview.summary.total_learning_seconds)" :hint="rangeHint(overview.summary.learning_seconds_change)" icon="⌁" tone="blue"/><MetricCard label="完成任务" :value="overview.summary.task_total ? `${overview.summary.task_completed} / ${overview.summary.task_total}` : '--'" :hint="overview.summary.task_completion_rate === null ? '当前范围没有生效计划任务' : `完成率 ${percent(overview.summary.task_completion_rate)}`" icon="✓" tone="green"/><MetricCard label="练习正确率" :value="percent(overview.summary.practice_accuracy)" :hint="overview.summary.practice_attempts ? `共 ${overview.summary.practice_attempts} 次练习` : '暂无真实练习记录'" icon="◎" tone="purple"/><MetricCard label="高效练习时段" :value="overview.summary.efficient_period?.label || '--'" :hint="overview.summary.efficient_period ? `${overview.summary.efficient_period.attempts} 次作答，正确率 ${percent(overview.summary.efficient_period.accuracy)}` : '至少完成3次同一时段练习后显示'" icon="↗" tone="orange"/></section><section class="stats-grid"><article class="content-card card-pad trend"><div class="card-header"><div><h2>学习时长趋势</h2><p>{{overview.range.start_date}} 至 {{overview.range.end_date}} · {{overview.range.timezone}}</p></div></div><EChart :option="trendOption" height="280px"/></article><article class="content-card card-pad subject"><div class="card-header"><div><h2>课程时间分布</h2><p>真实 LearningRecord 聚合</p></div></div><el-empty v-if="!overview.course_distribution.length" description="当前范围暂无学习记录" :image-size="80"/><template v-else><EChart :option="subjectOption" height="230px"/><div class="subject-main"><strong>{{percent(topCourse?.percentage ?? null)}}</strong><span>{{topCourse?.course_name}}</span></div></template></article><article class="content-card card-pad activity"><div class="card-header"><div><h2>学习活跃热力图</h2><p>过去49天 · 颜色越深表示实际学习时长越长</p></div><span class="calendar"><el-icon><Calendar/></el-icon>近49天最长连续 {{overview.summary.longest_streak_days}} 天</span></div><div class="heatmap"><span v-for="item in overview.heatmap" :key="item.date" :class="`level-${level(item.learning_seconds)}`" :title="`${item.date} · ${Math.round(item.learning_seconds / 60)} 分钟`"/></div><div class="heat-label"><span>49 天前</span><span>今天</span></div></article><article class="content-card card-pad insights"><div class="card-header"><div><h2>学习洞察</h2><p>根据当前真实统计生成的规则描述</p></div><span class="soft-tag brand">规则洞察</span></div><el-empty v-if="!overview.insights.length" description="当前范围暂无足够数据生成洞察" :image-size="80"/><div v-else class="insight-list"><div v-for="(insight,index) in overview.insights" :key="insight.code"><span>0{{index+1}}</span><p><b>{{insight.title}}</b><small>{{insight.detail}}</small></p></div></div></article></section></template></div></template>
+<template>
+  <div>
+    <PageHeader title="学习统计" eyebrow="LEARNING ANALYTICS" description="基于真实学习记录、计划任务与练习结果的统计回顾。">
+      <el-select v-model="days" style="width:130px" :disabled="loading" @change="changeFilters"><el-option label="最近 7 天" :value="7"/><el-option label="最近 30 天" :value="30"/></el-select>
+      <el-select v-model="courseId" clearable placeholder="全部课程" style="width:180px" :disabled="loading" @change="changeFilters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id"/></el-select>
+      <el-button plain :loading="exporting" :disabled="!overview" @click="exportCsv"><el-icon><Download/></el-icon>导出统计</el-button>
+    </PageHeader>
+    <el-alert v-if="exportError" :title="exportError" type="error"/>
+    <el-alert v-if="loadError" :title="loadError" type="error"/>
+    <div v-else-if="loading" v-loading="true" class="page-loading"/>
+    <el-empty v-else-if="!courses.length" description="暂无真实课程，请先创建课程"/>
+    <template v-else-if="overview">
+      <section class="metric-grid">
+        <MetricCard label="总学习时长" :value="formatMinutes(overview.summary.total_learning_seconds)" :hint="minuteChangeHint(overview.summary.learning_seconds_change)" icon="⌁" tone="blue"/>
+        <MetricCard label="完成任务" :value="overview.summary.task_total ? `${overview.summary.task_completed} / ${overview.summary.task_total}` : '--'" :hint="taskHint(overview.summary)" icon="✓" tone="green"/>
+        <MetricCard label="练习正确率" :value="percent(overview.summary.practice_accuracy)" :hint="practiceHint(overview.summary)" icon="◎" tone="purple"/>
+        <MetricCard label="高效练习时段" :value="overview.summary.efficient_period?.label || '--'" :hint="overview.summary.efficient_period ? `${overview.summary.efficient_period.attempts} 次作答，正确率 ${percent(overview.summary.efficient_period.accuracy)}` : '至少完成3次同一时段练习后显示'" icon="↗" tone="orange"/>
+      </section>
+      <section class="stats-grid">
+        <article class="content-card card-pad trend"><div class="card-header"><div><h2>学习时长趋势</h2><p>{{ overview.range.start_date }} 至 {{ overview.range.end_date }} · {{ overview.range.timezone }}</p></div></div><EChart :option="trendOption" height="280px"/></article>
+        <article class="content-card card-pad subject"><div class="card-header"><div><h2>课程时间分布</h2><p>真实 LearningRecord 聚合</p></div></div><el-empty v-if="!overview.course_distribution.length" description="当前范围暂无学习记录" :image-size="80"/><template v-else><EChart :option="subjectOption" height="230px"/><div class="subject-main"><strong>{{ percent(topCourse?.percentage ?? null) }}</strong><span>{{ topCourse?.course_name }}</span></div></template></article>
+        <article class="content-card card-pad activity"><div class="card-header"><div><h2>学习活跃热力图</h2><p>过去49天 · 颜色越深表示实际学习时长越长</p></div><span class="calendar"><el-icon><Calendar/></el-icon>近49天最长连续 {{ overview.summary.longest_streak_days }} 天</span></div><div class="heatmap"><span v-for="item in overview.heatmap" :key="item.date" :class="`level-${level(item.learning_seconds)}`" :title="`${item.date} · ${Math.round(item.learning_seconds / 60)} 分钟`"/></div><div class="heat-label"><span>49 天前</span><span>今天</span></div></article>
+        <article class="content-card card-pad insights"><div class="card-header"><div><h2>学习洞察</h2><p>根据当前真实统计生成的规则描述</p></div><span class="soft-tag brand">规则洞察</span></div><el-empty v-if="!overview.insights.length" description="当前范围暂无足够数据生成洞察" :image-size="80"/><div v-else class="insight-list"><div v-for="(insight, index) in overview.insights" :key="insight.code"><span>0{{ index + 1 }}</span><p><b>{{ insight.title }}</b><small>{{ insight.detail }}</small></p></div></div></article>
+      </section>
+    </template>
+  </div>
+</template>
 
-<style scoped>.page-loading{min-height:420px}.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:17px;margin-bottom:17px}.stats-grid{display:grid;grid-template-columns:1.5fr .7fr;gap:17px}.trend,.subject{min-width:0}.subject{position:relative}.subject-main{position:absolute;left:50%;top:155px;display:flex;align-items:center;flex-direction:column;transform:translate(-50%,-50%)}.subject-main strong{font-size:18px}.subject-main span{margin-top:4px;color:#8d96a9;font-size:7px}.activity{grid-column:span 2}.calendar{display:flex;align-items:center;gap:5px;color:#16a088;font-size:8px}.heatmap{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.heatmap span{height:22px;border-radius:5px;background:#eef1f5}.heatmap .level-1{background:#dff3ee}.heatmap .level-2{background:#a9ded1}.heatmap .level-3{background:#64c6b1}.heatmap .level-4{background:#2baa92}.heatmap .level-5{background:#16836f}.heat-label{display:flex;justify-content:space-between;margin-top:7px;color:#9aa2b2;font-size:7px}.insights{grid-column:span 2}.insight-list{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.insight-list>div{display:flex;gap:10px;padding:13px;border-radius:11px;background:#f7f8fc}.insight-list>div>span{color:#6977df;font:10px Consolas,monospace}.insight-list p{display:flex;flex-direction:column;margin:0}.insight-list b{font-size:9px;color:#46516b}.insight-list small{margin-top:6px;color:#7f899e;font-size:8px;line-height:1.6}@media(max-width:950px){.metric-grid{grid-template-columns:repeat(2,1fr)}.stats-grid{grid-template-columns:1fr}.activity,.insights{grid-column:auto}.insight-list{grid-template-columns:1fr}}@media(max-width:520px){.metric-grid{grid-template-columns:1fr}.heatmap{gap:4px}.heatmap span{height:14px}}</style>
+<style scoped>
+.page-loading{min-height:420px}.metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:17px;margin-bottom:17px}.stats-grid{display:grid;grid-template-columns:1.5fr .7fr;gap:17px}.trend,.subject{min-width:0}.subject{position:relative}.subject-main{position:absolute;left:50%;top:155px;display:flex;align-items:center;flex-direction:column;transform:translate(-50%,-50%)}.subject-main strong{font-size:18px}.subject-main span{margin-top:4px;color:#8d96a9;font-size:7px}.activity{grid-column:span 2}.calendar{display:flex;align-items:center;gap:5px;color:#16a088;font-size:8px}.heatmap{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.heatmap span{height:22px;border-radius:5px;background:#eef1f5}.heatmap .level-1{background:#dff3ee}.heatmap .level-2{background:#a9ded1}.heatmap .level-3{background:#64c6b1}.heatmap .level-4{background:#2baa92}.heatmap .level-5{background:#16836f}.heat-label{display:flex;justify-content:space-between;margin-top:7px;color:#9aa2b2;font-size:7px}.insights{grid-column:span 2}.insight-list{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.insight-list>div{display:flex;gap:10px;padding:13px;border-radius:11px;background:#f7f8fc}.insight-list>div>span{color:#6977df;font:10px Consolas,monospace}.insight-list p{display:flex;flex-direction:column;margin:0}.insight-list b{font-size:9px;color:#46516b}.insight-list small{margin-top:6px;color:#7f899e;font-size:8px;line-height:1.6}@media(max-width:950px){.metric-grid{grid-template-columns:repeat(2,1fr)}.stats-grid{grid-template-columns:1fr}.activity,.insights{grid-column:auto}.insight-list{grid-template-columns:1fr}}@media(max-width:520px){.metric-grid{grid-template-columns:1fr}.heatmap{gap:4px}.heatmap span{height:14px}}
+</style>
