@@ -23,7 +23,9 @@ const category = ref<RecommendationCategory>('all')
 const result = ref<CourseRecommendationsResponse | null>(null)
 const loading = ref(false)
 const coursesLoading = ref(false)
-const error = ref('')
+const courseLoadError = ref('')
+const recommendationError = ref('')
+const routeError = ref('')
 const feedbackBusy = ref<string | null>(null)
 const feedbackState = ref<Record<string, 'saved' | 'skipped'>>({})
 const historyVisible = ref(false)
@@ -75,11 +77,12 @@ function recommendationQuery(id: number | null, nextCategory: RecommendationCate
 }
 
 async function loadCourses() {
+  courseLoadError.value = ''
   coursesLoading.value = true
   try {
     courses.value = (await courseApi.list()).items.filter((course) => !course.archived)
   } catch (value) {
-    error.value = pageError(value, '课程列表加载失败')
+    courseLoadError.value = pageError(value, '课程列表加载失败')
   } finally {
     coursesLoading.value = false
   }
@@ -90,21 +93,21 @@ async function loadRecommendations() {
   const requestedCategory = category.value
   const version = ++requestVersion
   result.value = null
-  error.value = ''
+  recommendationError.value = ''
   if (id === null) return
   loading.value = true
   try {
     const loaded = await recommendationApi.list(id, { category: requestedCategory, limit: 6 })
     if (version === requestVersion && courseId.value === id && category.value === requestedCategory) result.value = loaded
   } catch (value) {
-    if (version === requestVersion) error.value = pageError(value, '推荐加载失败')
+    if (version === requestVersion) recommendationError.value = pageError(value, '推荐加载失败')
   } finally {
     if (version === requestVersion) loading.value = false
   }
 }
 
 async function synchronizeRoute() {
-  if (coursesLoading.value || error.value) return
+  if (coursesLoading.value) return
   const requestedCourse = requestedCourseId()
   const requestedFilter = requestedCategory()
   let nextCourse: number | null = null
@@ -113,7 +116,8 @@ async function synchronizeRoute() {
     if (requestedCourse.value === null || !courses.value.some((course) => course.id === requestedCourse.value)) {
       courseId.value = null
       result.value = null
-      error.value = '课程不存在、已归档或无权访问'
+      recommendationError.value = ''
+      routeError.value = '课程不存在、已归档或无权访问'
       return
     }
     nextCourse = requestedCourse.value
@@ -132,6 +136,7 @@ async function synchronizeRoute() {
   const courseChanged = courseId.value !== nextCourse
   courseId.value = nextCourse
   category.value = requestedFilter.value
+  routeError.value = ''
   if (courseChanged) {
     feedbackState.value = {}
     history.value = null
@@ -141,12 +146,29 @@ async function synchronizeRoute() {
   await loadRecommendations()
 }
 
+async function retryCourses() {
+  await loadCourses()
+  if (!courseLoadError.value) await synchronizeRoute()
+}
+
+async function retryRecommendations() {
+  if (courseId.value !== null) await loadRecommendations()
+}
+
+function clearRecommendationState() {
+  requestVersion += 1
+  result.value = null
+  recommendationError.value = ''
+}
+
 async function selectCourse(id: number | null) {
+  clearRecommendationState()
   await router.replace({ name: 'recommendations', query: recommendationQuery(id, category.value) })
 }
 
 async function selectCategory(nextCategory: RecommendationCategory) {
   if (courseId.value === null) return
+  clearRecommendationState()
   await router.replace({ name: 'recommendations', query: recommendationQuery(courseId.value, nextCategory) })
 }
 
@@ -231,20 +253,23 @@ watch([() => route.query.courseId, () => route.query.category], () => { void syn
       <el-button plain :disabled="courseId === null" @click="openHistory"><el-icon><Star /></el-icon>推荐历史</el-button>
       <el-button type="primary" :loading="loading" :disabled="courseId === null" @click="loadRecommendations"><el-icon><Refresh /></el-icon>刷新推荐</el-button>
     </PageHeader>
-    <el-alert v-if="error" type="error" show-icon :closable="false" :title="error" class="page-alert"><template #default><el-button text @click="synchronizeRoute">重试</el-button></template></el-alert>
-    <el-empty v-else-if="!coursesLoading && !courses.length" description="请先创建课程"><el-button type="primary" @click="router.push({ name: 'courses' })">前往课程列表</el-button></el-empty>
+    <div v-if="coursesLoading && !courses.length" class="loading"><el-skeleton :rows="4" animated /></div>
+    <el-alert v-else-if="courseLoadError" type="error" show-icon :closable="false" :title="courseLoadError" class="page-alert"><template #default><el-button text @click="retryCourses">重新加载课程</el-button></template></el-alert>
+    <el-empty v-else-if="!courses.length" description="请先创建课程"><el-button type="primary" @click="router.push({ name: 'courses' })">前往课程列表</el-button></el-empty>
     <template v-else>
       <div class="toolbar">
         <el-select :model-value="courseId" placeholder="选择课程" :loading="coursesLoading" @update:model-value="selectCourse"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select>
         <el-radio-group :model-value="category" class="category-tabs" @update:model-value="selectCategory">
           <el-radio-button v-for="option in categoryOptions" :key="option.value" :value="option.value">
-            {{ option.label }}<small v-if="result">{{ option.value === 'all' ? ` ${result.selection.returned}/${result.category_counts.all}` : ` ${result.category_counts[option.value]}` }}</small>
+            {{ option.label }}<small v-if="result"> {{ result.category_counts[option.value] }}</small>
           </el-radio-button>
         </el-radio-group>
       </div>
+      <el-alert v-if="routeError" type="error" show-icon :closable="false" :title="routeError" class="page-alert"><template #default><el-button text @click="selectCourse(courses[0]?.id || null)">切换到可用课程</el-button></template></el-alert>
+      <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
       <section v-if="result" class="recommend-hero"><div><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>{{ selectedCategory.label }}展示 {{ result.selection.returned }} 条<small>共 {{ result.selection.candidate_total }} 条可用建议</small></strong></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
-      <el-empty v-else-if="result && !items.length" :description="selectedCategory.empty" />
+      <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />
       <section v-else-if="result" class="recommend-grid"><article v-for="item in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><details class="reason"><summary>推荐依据</summary><p>{{ item.reason }}</p><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} +{{ signal.contribution.toFixed(1) }}</el-tag></div><small>规则评分：{{ item.score.toFixed(1) }}</small></details><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusy === item.recommendation_key" :disabled="feedbackBusy === item.recommendation_key" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusy === item.recommendation_key" :disabled="feedbackBusy === item.recommendation_key" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
       <p v-if="result" class="rules-note">基于规则和真实学习记录生成 · 规则版本：{{ result.algorithm_version }}</p>
     </template>
