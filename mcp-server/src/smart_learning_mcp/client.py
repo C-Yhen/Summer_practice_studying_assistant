@@ -29,6 +29,7 @@ class BackendClient:
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        confirmation_token: str | None = None,
     ) -> Any:
         headers = {
             "X-MCP-User-ID": str(user_id),
@@ -39,6 +40,8 @@ class BackendClient:
             headers["Authorization"] = f"Bearer {token}"
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
+        if confirmation_token:
+            headers["X-Confirmation-Token"] = confirmation_token
 
         timeout = httpx.Timeout(20.0, connect=5.0)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client:
@@ -68,11 +71,12 @@ class BackendClient:
         error: str | None,
         started_at: float,
     ) -> None:
+        safe_input = {key: value for key, value in input_data.items() if key not in {"confirmation_token", "access_token"}}
         payload = {
             "user_id": user_id,
             "agent_run_id": agent_run_id,
             "tool_name": tool_name,
-            "input_data": input_data,
+            "input_data": safe_input,
             "output_data": output_data,
             "status": status,
             "error_message": error,

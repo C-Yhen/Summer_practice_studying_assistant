@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 
 from backend.app.dependencies import CurrentUser, DBSession
@@ -21,6 +21,8 @@ WRITE_TOOLS = {
     "update_calendar_event", "delete_calendar_event", "reschedule_study_plan",
     "generate_weekly_report",
 }
+ALLOWED_STATUSES = {"waiting_for_user", "success", "failed"}
+MAX_AUDIT_BYTES = 16_000
 
 
 @router.get("/tools")
@@ -39,11 +41,20 @@ def list_tools(current_user: CurrentUser) -> dict:
 
 @router.post("/tool-calls")
 def create_tool_call(payload: MCPToolCallCreate, db: DBSession, current_user: CurrentUser) -> dict:
+    if payload.tool_name not in READ_TOOLS | WRITE_TOOLS:
+        raise HTTPException(status_code=422, detail="UNKNOWN_MCP_TOOL")
+    if payload.status not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=422, detail="INVALID_MCP_TOOL_STATUS")
+    raw_input = dict(payload.input_data)
+    raw_input.pop("confirmation_token", None)
+    raw_input.pop("access_token", None)
+    if len(str(raw_input).encode()) > MAX_AUDIT_BYTES or len(str(payload.output_data or {}).encode()) > MAX_AUDIT_BYTES:
+        raise HTTPException(status_code=422, detail="MCP_AUDIT_PAYLOAD_TOO_LARGE")
     call = MCPToolCall(
         user_id=current_user.id,
         agent_run_id=payload.agent_run_id,
         tool_name=payload.tool_name,
-        input_data=payload.input_data,
+        input_data=raw_input,
         output_data=payload.output_data,
         status=payload.status,
         error_message=payload.error_message,
@@ -56,9 +67,12 @@ def create_tool_call(payload: MCPToolCallCreate, db: DBSession, current_user: Cu
 
 
 @router.get("/tool-calls")
-def list_tool_calls(db: DBSession, current_user: CurrentUser, tool_name: str | None = None) -> dict:
+def list_tool_calls(db: DBSession, current_user: CurrentUser, tool_name: str | None = None, calendar_only: bool = False, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict:
     statement = select(MCPToolCall).where(MCPToolCall.user_id == current_user.id)
     if tool_name:
         statement = statement.where(MCPToolCall.tool_name == tool_name)
-    calls = list(db.scalars(statement.order_by(MCPToolCall.created_at.desc()).limit(100)))
-    return ok({"items": [{"id": item.id, "agent_run_id": item.agent_run_id, "tool_name": item.tool_name, "status": item.status, "duration_ms": item.duration_ms, "error_message": item.error_message, "created_at": item.created_at.isoformat()} for item in calls], "total": len(calls)})
+    if calendar_only:
+        statement = statement.where(MCPToolCall.tool_name.in_({"get_available_time", "create_calendar_event", "update_calendar_event", "delete_calendar_event"}))
+    total = db.scalar(select(__import__("sqlalchemy").func.count()).select_from(statement.subquery())) or 0
+    calls = list(db.scalars(statement.order_by(MCPToolCall.created_at.desc(), MCPToolCall.id.desc()).offset(offset).limit(limit)))
+    return ok({"items": [{"id": item.id, "agent_run_id": item.agent_run_id, "tool_name": item.tool_name, "status": item.status, "duration_ms": item.duration_ms, "error_message": item.error_message, "created_at": item.created_at.isoformat()} for item in calls], "total": total})

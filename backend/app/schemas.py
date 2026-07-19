@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from pydantic import (
@@ -492,6 +492,40 @@ class CalendarEventCreate(BaseModel):
         if self.end_at <= self.start_at:
             raise ValueError("end_at must be after start_at")
         return self
+
+
+class CalendarEventUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> CalendarEventUpdate:
+        if self.start_at is not None and self.end_at is not None and self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        if self.title is None and self.start_at is None and self.end_at is None:
+            raise ValueError("at least one event field is required")
+        return self
+
+
+class CalendarPlanSyncRequest(BaseModel):
+    start_date: date
+    end_date: date
+    course_id: int | None = Field(default=None, gt=0)
+    daily_start_time: time
+    gap_minutes: int = Field(default=10, ge=0, le=120)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> CalendarPlanSyncRequest:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 30:
+            raise ValueError("date range must not exceed 31 days")
+        return self
+
+
+class CalendarPlanSyncConfirm(BaseModel):
+    preview: dict[str, Any]
 
 
 class HealthResponse(BaseModel):

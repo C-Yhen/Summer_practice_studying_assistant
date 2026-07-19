@@ -267,3 +267,11 @@
 - 新增统计专项测试，覆盖上期比较、30 天零填充与 49 天热力图、连续天数、高效时段时区/排序、归档及用户隔离、CSV 一致性与洞察稳定性。
 - 实际验证：统计专项 13 passed；完整后端 88 passed, 1 skipped；前端 npm run build 通过。PostgreSQL/API 验证了 7 天比较（3600/1800/+1800 秒）和 30 天 CSV（BOM、空练习正确率、30 条日期轴）。
 - 浏览器联调未执行；仍缺少可维护的前端 E2E 套件。
+
+## Round 13：真实学习日历、ICS 与 MCP 日历工具
+
+- 本轮日历为 StudyPilot 本地 CalendarEvent；未连接 Outlook、Google 或其他第三方账户，ICS 可供手动导入。
+- 增加范围/课程分页查询、空闲时间、计划同步预览与确认、单事件预览创建/修改/删除、ICS 导出和 MCP 审计筛选；计划只读取 active 计划的 active 版本 todo 任务，并按用户时区排布。
+- MCP 日历工具统一使用后端确认令牌，BackendClient 支持 X-Confirmation-Token，空闲时间参数改为 start_at/end_at。
+- 前端移除固定 Outlook、事件、审计和同步成功数字，改为真实周范围、课程、事件、预览、ICS 与 MCP 工具/审计请求。
+- 已执行前端 npm run build；后端完整测试、MCP 测试、PostgreSQL/API 与浏览器联调待本轮后续验证。

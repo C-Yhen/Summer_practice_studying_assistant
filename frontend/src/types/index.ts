@@ -591,3 +591,17 @@ export interface StatisticsHeatmapDay { date:string; learning_seconds:number }
 export interface StatisticsEfficientPeriod { label:string; start_hour:number; end_hour:number; attempts:number; correct:number; accuracy:number }
 export interface StatisticsInsight { code:string; title:string; detail:string; evidence:Record<string, unknown>|string }
 export interface StatisticsOverview { range:{start_date:string;end_date:string;days:number;timezone:string}; scope:{course_id:number|null;course_name:string|null}; summary:{total_learning_seconds:number;previous_total_learning_seconds:number|null;learning_seconds_change:number|null;learning_days:number;longest_streak_days:number;task_total:number;task_completed:number;task_completion_rate:number|null;previous_task_completion_rate:number|null;task_completion_rate_change:number|null;practice_attempts:number;practice_correct:number;practice_wrong:number;practice_accuracy:number|null;previous_practice_accuracy:number|null;practice_accuracy_change:number|null;efficient_period:StatisticsEfficientPeriod|null}; daily:StatisticsDailyPoint[]; course_distribution:StatisticsCourseDistribution[]; heatmap:StatisticsHeatmapDay[]; insights:StatisticsInsight[] }
+
+export interface CalendarEventItem { id:number; title:string; start_at:string; end_at:string; provider:string; sync_status:string; study_task_id:number|null; course_id:number|null; course_name:string|null; task_type:string|null; created_at:string; updated_at:string }
+export interface CalendarEventListResponse { items:CalendarEventItem[]; total:number }
+export interface CalendarAvailabilitySlot { start_at:string; end_at:string; source:string }
+export interface CalendarPlanSyncRequest { start_date:string; end_date:string; course_id?:number; daily_start_time:string; gap_minutes:number }
+export interface CalendarPlanSyncPreviewItem { task_id:number; course_id:number; course_name:string; title:string; task_type:string; scheduled_date:string; estimated_minutes:number; start_at:string; end_at:string; status:'ready'|'conflict'|'already_synced'|'outside_day'; reason:string|null; conflict_with:{event_id:number;title:string;start_at:string;end_at:string}|null; existing_event_id:number|null; idempotency_key:string }
+export interface CalendarPlanSyncPreview { timezone:string; scope:CalendarPlanSyncRequest; items:CalendarPlanSyncPreviewItem[]; ready_count:number; conflict_count:number; already_synced_count:number; outside_day_count:number; confirmation_token:string; expires_in_seconds:number }
+export interface CalendarPlanSyncConfirmResult { created_count:number; replayed_count:number; event_ids:number[]; items:CalendarPlanSyncPreviewItem[]; idempotent_replay:boolean }
+export interface CalendarEventCreateRequest { title:string; start_at:string; end_at:string; study_task_id?:number|null; idempotency_key?:string }
+export interface CalendarEventUpdateRequest { title?:string; start_at?:string; end_at?:string }
+export interface CalendarEventPreview { status:string; preview:Record<string, unknown>; confirmation_token:string; expires_in_seconds?:number }
+export interface MCPToolInfo { name:string; is_write:boolean; requires_confirmation:boolean; description:string }
+export interface MCPToolCallItem { id:number; agent_run_id:string; tool_name:string; status:string; duration_ms:number; error_message:string|null; created_at:string }
+export interface MCPToolCallListResponse { items:MCPToolCallItem[]; total:number }

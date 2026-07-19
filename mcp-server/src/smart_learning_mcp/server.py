@@ -119,6 +119,20 @@ async def _write_with_confirmation(
     )
 
 
+async def _calendar_preview(*, tool_name: str, user_id: int, payload: dict[str, Any], path: str, access_token: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Calendar writes use the backend's confirmation token, never MCP-local tokens."""
+    started_at = time.perf_counter()
+    try:
+        result = await client.request("POST", path, user_id=user_id, access_token=access_token, json=json or payload)
+        data = result.get("data", result) if isinstance(result, dict) else result
+        safe_output = dict(data) if isinstance(data, dict) else {"preview": data}
+        await client.audit(user_id=user_id, agent_run_id=str(uuid.uuid4()), tool_name=tool_name, input_data=payload, output_data=safe_output, status="waiting_for_user", error=None, started_at=started_at)
+        return {"ok": False, "status": "confirmation_required", "preview": safe_output.get("preview", safe_output), "confirmation_token": safe_output.get("confirmation_token"), "expires_in_seconds": safe_output.get("expires_in_seconds", 300)}
+    except Exception as exc:
+        await client.audit(user_id=user_id, agent_run_id=str(uuid.uuid4()), tool_name=tool_name, input_data=payload, output_data=None, status="failed", error=str(exc), started_at=started_at)
+        return {"ok": False, "error": str(exc)}
+
+
 @mcp.tool()
 async def get_user_courses(user_id: int, access_token: str = "") -> dict[str, Any]:
     """查询当前用户有权访问的课程。只读，不需要确认。"""
@@ -203,30 +217,37 @@ async def search_course_material(user_id: int, course_id: int, query: str, top_k
 
 
 @mcp.tool()
-async def get_available_time(user_id: int, start_time: str, end_time: str, access_token: str = "") -> dict[str, Any]:
+async def get_available_time(user_id: int, start_at: str, end_at: str, minimum_minutes: int = 30, access_token: str = "") -> dict[str, Any]:
     """查询指定时间范围的日历空闲时段。只读，不需要确认。"""
-    params = {"start_time": start_time, "end_time": end_time}
+    params = {"start_at": start_at, "end_at": end_at, "minimum_minutes": min(max(minimum_minutes, 1), 1440)}
     return await _run(tool_name="get_available_time", user_id=user_id, input_data=params, operation=lambda: client.request("GET", "/calendar/availability", user_id=user_id, access_token=access_token, params=params))
 
 
 @mcp.tool()
 async def create_calendar_event(user_id: int, event: dict[str, Any], confirmation_token: str = "", idempotency_key: str = "", access_token: str = "") -> dict[str, Any]:
     """创建日历事件。写第三方服务前必须二次确认，且要求幂等键。"""
-    return await _write_with_confirmation(tool_name="create_calendar_event", user_id=user_id, payload=event, confirmation_token=confirmation_token, operation=lambda: client.request("POST", "/calendar/events", user_id=user_id, access_token=access_token, json=event, idempotency_key=idempotency_key))
+    payload = {**event, **({"idempotency_key": idempotency_key} if idempotency_key else {})}
+    if not confirmation_token:
+        return await _calendar_preview(tool_name="create_calendar_event", user_id=user_id, payload=payload, path="/calendar/events/preview", access_token=access_token)
+    return await _run(tool_name="create_calendar_event", user_id=user_id, input_data=payload, operation=lambda: client.request("POST", "/calendar/events", user_id=user_id, access_token=access_token, json=payload, idempotency_key=idempotency_key, confirmation_token=confirmation_token))
 
 
 @mcp.tool()
 async def update_calendar_event(user_id: int, event_id: int, changes: dict[str, Any], confirmation_token: str = "", idempotency_key: str = "", access_token: str = "") -> dict[str, Any]:
     """修改日历事件。写第三方服务前必须二次确认。"""
     payload = {"event_id": event_id, "changes": changes}
-    return await _write_with_confirmation(tool_name="update_calendar_event", user_id=user_id, payload=payload, confirmation_token=confirmation_token, operation=lambda: client.request("PATCH", f"/calendar/events/{event_id}", user_id=user_id, access_token=access_token, json=changes, idempotency_key=idempotency_key))
+    if not confirmation_token:
+        return await _calendar_preview(tool_name="update_calendar_event", user_id=user_id, payload=payload, path=f"/calendar/events/{event_id}/preview-update", access_token=access_token, json=changes)
+    return await _run(tool_name="update_calendar_event", user_id=user_id, input_data=payload, operation=lambda: client.request("PATCH", f"/calendar/events/{event_id}", user_id=user_id, access_token=access_token, json=changes, idempotency_key=idempotency_key, confirmation_token=confirmation_token))
 
 
 @mcp.tool()
 async def delete_calendar_event(user_id: int, event_id: int, confirmation_token: str = "", idempotency_key: str = "", access_token: str = "") -> dict[str, Any]:
     """删除日历事件。破坏性写操作，必须二次确认。"""
     payload = {"event_id": event_id}
-    return await _write_with_confirmation(tool_name="delete_calendar_event", user_id=user_id, payload=payload, confirmation_token=confirmation_token, operation=lambda: client.request("DELETE", f"/calendar/events/{event_id}", user_id=user_id, access_token=access_token, idempotency_key=idempotency_key))
+    if not confirmation_token:
+        return await _calendar_preview(tool_name="delete_calendar_event", user_id=user_id, payload=payload, path=f"/calendar/events/{event_id}/preview-delete", access_token=access_token)
+    return await _run(tool_name="delete_calendar_event", user_id=user_id, input_data=payload, operation=lambda: client.request("DELETE", f"/calendar/events/{event_id}", user_id=user_id, access_token=access_token, idempotency_key=idempotency_key, confirmation_token=confirmation_token))
 
 
 @mcp.tool()

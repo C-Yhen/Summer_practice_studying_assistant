@@ -12,3 +12,6 @@ $env:MCP_CONFIRMATION_SECRET = "replace-with-random-secret"
 ```
 
 生产环境应配置后端服务令牌，并由后端再次校验 `user_id` 与资源所有权。确认令牌只证明“用户确认前后参数未变化”，不能替代 JWT、后端权限校验和幂等约束。
+# Calendar tools
+
+Calendar tools operate on the StudyPilot local calendar, not Outlook or Google Calendar. A write tool first calls the backend preview endpoint and returns the backend-issued confirmation token. Call it again with the identical payload and that token to create, update, or delete the local event. ICS export is the supported way to import local events into third-party calendar applications.
