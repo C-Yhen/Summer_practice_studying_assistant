@@ -245,5 +245,6 @@
 - 提供规则基础题 bootstrap、只读题目查询、幂等答题、真实错题本查询和状态更新 API；题目查询不返回正确答案。
 - 答题记录按 `submission_id` 对用户幂等；首次提交才更新掌握度、写入 `record_type=practice` 学习记录和更新错题条目。
 - Practice 与 WrongBook 页面改为课程上下文真实 API；规则题仅基于真实知识点，当前不接入外部模型或 AI 错因分析。
-- 实际测试：练习专项 2 passed；完整后端 59 passed；前端 `npm run build` 通过。PostgreSQL 浏览器/API 联调未执行；浏览器联调未执行。
+- 显式 `VITE_ENABLE_MOCK=true` 时，练习与错题本使用独立内存演示数据；真实模式不回退 Mock。
+- 实际测试：练习专项 2 passed；完整后端 59 passed；前端 `npm run build` 通过。PostgreSQL API 联调完成；浏览器联调未执行。
 - 局限：规则题是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析由后续或队友接入。

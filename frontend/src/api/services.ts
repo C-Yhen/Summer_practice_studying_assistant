@@ -56,6 +56,10 @@ import type {
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
 const mockRecommendationHistory = new Map<number, RecommendationHistoryResponse>()
+const mockPracticeQuestions = new Map<number, PracticeQuestion[]>()
+const mockPracticeAttempts = new Map<number, PracticeAttemptResult[]>()
+const mockPracticeSubmissions = new Map<string, PracticeAttemptResult>()
+const mockWrongBookEntries = new Map<number, WrongBookEntry[]>()
 
 function toCourseListItem(course: BackendCourse): CourseListItem {
   if (!Number.isInteger(course.id) || typeof course.name !== 'string' || !course.name.trim()) {
@@ -1122,9 +1126,69 @@ export const recommendationApi = {
 }
 
 export const practiceApi = {
-  async bootstrap(courseId: number) { return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await apiClient.post(`/courses/${courseId}/practice/questions/bootstrap`)) },
-  async questions(courseId: number, mode: 'all'|'wrong' = 'all') { return unwrapApiResponse<{course:{id:number;name:string};items:PracticeQuestion[];total:number;summary:PracticeSummary}>(await apiClient.get(`/courses/${courseId}/practice/questions?mode=${mode}`)) },
-  async submit(courseId:number, questionId:number, payload:{submission_id:string;selected_option:string;elapsed_seconds:number}) { return unwrapApiResponse<PracticeAttemptResult>(await apiClient.post(`/courses/${courseId}/practice/questions/${questionId}/attempts`,payload)) },
-  async wrongBook(courseId:number, status='all', q='') { return unwrapApiResponse<{items:WrongBookEntry[];total:number;summary:{pending:number;mastered:number;repeated_wrong:number}}>(await apiClient.get(`/courses/${courseId}/wrong-book?status=${status}&q=${encodeURIComponent(q)}`)) },
-  async updateWrong(courseId:number, entryId:number, status:'mastered'|'removed') { return unwrapApiResponse<{id:number;status:string}>(await apiClient.patch(`/courses/${courseId}/wrong-book/${entryId}`,{status})) },
+  async bootstrap(courseId: number) {
+    if (mockEnabled) {
+      await mockDelay()
+      const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+      if (!course) throw new ApiEnvelopeError('课程不存在')
+      const existing = mockPracticeQuestions.get(courseId) || []
+      if (!existing.length) {
+        mockPracticeQuestions.set(courseId, [{ id: courseId * 1000 + 1, knowledge_point_id: null, knowledge_point: `${course.name}基础知识`, question_type: 'single_choice', stem: `关于“${course.name}基础知识”，下列哪项表述正确？`, options: [{ key: 'A', text: '应结合课程资料理解核心概念。' }, { key: 'B', text: '无需学习即可掌握。' }], difficulty: 'basic', origin: 'rule_seed' }])
+        return { created_count: 1, existing_count: 0, total: 1, reason: null }
+      }
+      return { created_count: 0, existing_count: existing.length, total: existing.length, reason: null }
+    }
+    return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await apiClient.post(`/courses/${courseId}/practice/questions/bootstrap`))
+  },
+  async questions(courseId: number, mode: 'all'|'wrong' = 'all') {
+    if (mockEnabled) {
+      await mockDelay()
+      const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
+      if (!course) throw new ApiEnvelopeError('课程不存在')
+      const all = mockPracticeQuestions.get(courseId) || []
+      const wrong = mockWrongBookEntries.get(courseId) || []
+      const items = mode === 'wrong' ? wrong.filter((entry) => entry.status === 'pending').map((entry) => entry.question) : all
+      const attempts = mockPracticeAttempts.get(courseId) || []
+      const correct = attempts.filter((item) => item.is_correct).length
+      return structuredClone({ course: { id: course.id, name: course.name }, items, total: items.length, summary: { total_attempts: attempts.length, correct_attempts: correct, wrong_attempts: attempts.length - correct, accuracy: attempts.length ? correct / attempts.length : 0, pending_wrong_count: wrong.filter((entry) => entry.status === 'pending').length, knowledge_point_count: 0 } })
+    }
+    return unwrapApiResponse<{course:{id:number;name:string};items:PracticeQuestion[];total:number;summary:PracticeSummary}>(await apiClient.get(`/courses/${courseId}/practice/questions?mode=${mode}`))
+  },
+  async submit(courseId:number, questionId:number, payload:{submission_id:string;selected_option:string;elapsed_seconds:number}) {
+    if (mockEnabled) {
+      await mockDelay()
+      const replay = mockPracticeSubmissions.get(payload.submission_id)
+      if (replay) return structuredClone(replay)
+      const question = (mockPracticeQuestions.get(courseId) || []).find((item) => item.id === questionId)
+      if (!question || !question.options.some((item) => item.key === payload.selected_option)) throw new ApiEnvelopeError('题目或选项不存在')
+      const attempts = mockPracticeAttempts.get(courseId) || []
+      const isCorrect = payload.selected_option === 'A'
+      const correctAttempts = attempts.filter((item) => item.is_correct).length + Number(isCorrect)
+      const result: PracticeAttemptResult = { ...question, attempt_id: courseId * 10000 + attempts.length + 1, selected_option: payload.selected_option, is_correct: isCorrect, correct_option: 'A', explanation: '演示模式下的规则题解析。', mastery_score: isCorrect ? 0.42 : 0.2, wrong_book_updated: !isCorrect, summary: { total_attempts: attempts.length + 1, correct_attempts: correctAttempts, wrong_attempts: attempts.length + 1 - correctAttempts, accuracy: correctAttempts / (attempts.length + 1), pending_wrong_count: (mockWrongBookEntries.get(courseId) || []).filter((item) => item.status === 'pending').length + Number(!isCorrect), knowledge_point_count: 0 } }
+      attempts.push(result); mockPracticeAttempts.set(courseId, attempts); mockPracticeSubmissions.set(payload.submission_id, result)
+      if (!isCorrect) {
+        const entries = mockWrongBookEntries.get(courseId) || []; const current = entries.find((item) => item.question.id === questionId)
+        if (current) { current.wrong_count += 1; current.last_selected_option = payload.selected_option; current.last_wrong_at = new Date().toISOString(); current.status = 'pending' }
+        else entries.push({ id: courseId * 10000 + entries.length + 1, status: 'pending', wrong_count: 1, last_selected_option: payload.selected_option, last_wrong_at: new Date().toISOString(), question: { ...question, correct_option: 'A', explanation: result.explanation }, mastery_score: result.mastery_score })
+        mockWrongBookEntries.set(courseId, entries)
+      }
+      return structuredClone(result)
+    }
+    return unwrapApiResponse<PracticeAttemptResult>(await apiClient.post(`/courses/${courseId}/practice/questions/${questionId}/attempts`,payload))
+  },
+  async wrongBook(courseId:number, status='all', q='') {
+    if (mockEnabled) {
+      await mockDelay(); const entries = mockWrongBookEntries.get(courseId) || []
+      const items = entries.filter((item) => item.status !== 'removed' && (status === 'all' || item.status === status) && (!q || item.question.stem.includes(q) || (item.question.knowledge_point || '').includes(q)))
+      return structuredClone({ items, total: items.length, summary: { pending: entries.filter((item) => item.status === 'pending').length, mastered: entries.filter((item) => item.status === 'mastered').length, repeated_wrong: entries.filter((item) => item.wrong_count > 1).length } })
+    }
+    return unwrapApiResponse<{items:WrongBookEntry[];total:number;summary:{pending:number;mastered:number;repeated_wrong:number}}>(await apiClient.get(`/courses/${courseId}/wrong-book?status=${status}&q=${encodeURIComponent(q)}`))
+  },
+  async updateWrong(courseId:number, entryId:number, status:'mastered'|'removed') {
+    if (mockEnabled) {
+      await mockDelay(); const entry = (mockWrongBookEntries.get(courseId) || []).find((item) => item.id === entryId)
+      if (!entry) throw new ApiEnvelopeError('错题不存在'); entry.status = status; return { id: entry.id, status: entry.status }
+    }
+    return unwrapApiResponse<{id:number;status:string}>(await apiClient.patch(`/courses/${courseId}/wrong-book/${entryId}`,{status}))
+  },
 }
