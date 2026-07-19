@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -20,10 +21,14 @@ from backend.app.models import (
 )
 from backend.app.recommendation.engine import (
     ALGORITHM_VERSION,
+    CATEGORY_LABELS,
     Signal,
     base_signal,
+    category_for_item_type,
     recommendation_key,
+    recommendation_sort_key,
     score,
+    select_diverse_recommendations,
 )
 from backend.app.responses import ok
 from backend.app.schemas import CourseRecommendationFeedback
@@ -31,12 +36,22 @@ from backend.app.services.timezones import local_date_range_utc, resolve_user_ti
 
 router = APIRouter(tags=["recommendations"])
 
+RecommendationQueryCategory = Literal["all", "task", "mastery", "resource", "plan", "report"]
+
+CATEGORY_STRATEGY_SUMMARIES = {
+    "task": "当前显示全部学习任务，按到期时间、优先级和关联掌握度排序。",
+    "mastery": "当前显示已有真实学习记录的薄弱知识点复习建议。",
+    "resource": "当前显示资料上传或课程问答相关的可执行建议。",
+    "plan": "当前显示学习计划相关建议。",
+    "report": "当前显示基于最近学习记录的学习复盘建议。",
+}
+
 ACTION_MAP = {
-    "study_task": {"type": "open_today_tasks", "label": "查看任务"},
+    "study_task": {"type": "open_today_tasks", "label": "进入今日任务"},
     "mastery_review": {"type": "open_mastery", "label": "查看掌握度"},
-    "course_chat": {"type": "open_chat", "label": "开始问答"},
-    "create_plan": {"type": "open_plan", "label": "创建计划"},
-    "upload_document": {"type": "open_upload", "label": "上传资料"},
+    "course_chat": {"type": "open_chat", "label": "开始课程问答"},
+    "create_plan": {"type": "open_plan", "label": "创建学习计划"},
+    "upload_document": {"type": "open_upload", "label": "上传课程资料"},
     "weekly_report": {"type": "open_async_tasks", "label": "前往任务中心"},
 }
 
@@ -75,9 +90,12 @@ def _item(
     estimated_minutes: int | None = None, knowledge_point: dict | None = None,
 ) -> dict:
     item_score, breakdown = score(signals)
+    category = category_for_item_type(item_type)
     return {
         "recommendation_key": recommendation_key(course_id, item_type, item_id),
         "item_type": item_type,
+        "category": category,
+        "category_label": CATEGORY_LABELS[category],
         "item_id": item_id,
         "course_id": course_id,
         "title": title,
@@ -93,7 +111,13 @@ def _item(
 
 
 def build_course_recommendations(
-    db: DBSession, user_id: int, course_id: int, target_date: date, limit: int
+    db: DBSession,
+    user_id: int,
+    course_id: int,
+    target_date: date,
+    limit: int,
+    category: RecommendationQueryCategory = "all",
+    include_all_candidates: bool = False,
 ) -> dict:
     """Build deterministic, read-only recommendations from persisted course data."""
     course = _owned_course(db, course_id, user_id)
@@ -180,24 +204,47 @@ def build_course_recommendations(
     record_count = db.scalar(select(func.count()).select_from(LearningRecord).where(LearningRecord.user_id == user_id, LearningRecord.course_id == course_id, LearningRecord.occurred_at >= start_utc, LearningRecord.occurred_at < end_utc)) or 0
     if record_count:
         items.append(_item(course_id=course_id, item_type="weekly_report", item_id=course_id, title="生成学习周报", subtitle=f"最近 7 天有 {record_count} 条学习记录", reason=f"最近 7 天已有 {record_count} 条真实学习记录，可生成学习周报进行回顾。", signals=[base_signal("weekly_report"), Signal("recent_learning_records", "近期学习记录", min(1.0, record_count / 7), min(15.0, record_count * 2.0))], action=ACTION_MAP["weekly_report"]))
-    items.sort(key=lambda item: (-item["score"], item["item_type"], item["item_id"]))
+    items.sort(key=recommendation_sort_key)
+    category_counts = {"all": len(items), **{name: 0 for name in CATEGORY_LABELS}}
+    for item in items:
+        category_counts[item["category"]] += 1
+    if include_all_candidates:
+        selected_items = items
+        selection_mode = "all_candidates"
+    elif category == "all":
+        selected_items = select_diverse_recommendations(items, limit)
+        selection_mode = "diverse"
+    else:
+        selected_items = [item for item in items if item["category"] == category][:limit]
+        selection_mode = "category"
+    strategy_summary = (
+        "优先展示紧急学习任务，同时保留薄弱点、资料问答和学习复盘等不同类型的可执行建议。"
+        if category == "all"
+        else CATEGORY_STRATEGY_SUMMARIES[category]
+    )
     return {
         "course": {"id": course.id, "name": course.name}, "target_date": target_date.isoformat(),
         "algorithm_version": ALGORITHM_VERSION,
-        "strategy_summary": "优先处理当前活动计划中的待办任务，并结合真实掌握度、资料和学习记录给出可执行建议。",
-        "items": items[:limit],
+        "strategy_summary": strategy_summary,
+        "items": selected_items,
+        "category_counts": category_counts,
+        "selection": {
+            "mode": selection_mode,
+            "returned": len(selected_items),
+            "candidate_total": len(items),
+        },
     }
 
 
 @router.get("/courses/{course_id}/recommendations")
-def course_recommendations(course_id: int, db: DBSession, current_user: CurrentUser, target_date: date | None = None, limit: int = Query(6, ge=1, le=20)) -> dict:
-    return ok(build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit))
+def course_recommendations(course_id: int, db: DBSession, current_user: CurrentUser, target_date: date | None = None, limit: int = Query(6, ge=1, le=20), category: RecommendationQueryCategory = "all") -> dict:
+    return ok(build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit, category))
 
 
 @router.get("/courses/{course_id}/recommendations/resources")
 def recommend_resources(course_id: int, db: DBSession, current_user: CurrentUser, limit: int = Query(5, ge=1, le=20)) -> dict:
-    result = build_course_recommendations(db, current_user.id, course_id, _today_for_user(current_user), 20)
-    return ok({"items": [item for item in result["items"] if item["item_type"] in {"course_chat", "upload_document"}][:limit]})
+    result = build_course_recommendations(db, current_user.id, course_id, _today_for_user(current_user), limit, "resource")
+    return ok(result)
 
 
 @router.get("/courses/{course_id}/recommendations/exercises")
@@ -209,7 +256,9 @@ def recommend_exercises(course_id: int, db: DBSession, current_user: CurrentUser
 @router.post("/courses/{course_id}/recommendations/feedback")
 def recommendation_feedback(course_id: int, payload: CourseRecommendationFeedback, db: DBSession, current_user: CurrentUser) -> dict:
     _owned_course(db, course_id, current_user.id)
-    candidates = build_course_recommendations(db, current_user.id, course_id, _today_for_user(current_user), 20)["items"]
+    candidates = build_course_recommendations(
+        db, current_user.id, course_id, _today_for_user(current_user), 20, include_all_candidates=True
+    )["items"]
     candidate = next((item for item in candidates if item["recommendation_key"] == payload.recommendation_key), None)
     if candidate is None:
         raise HTTPException(status_code=404, detail="RECOMMENDATION_NOT_FOUND")
@@ -248,4 +297,15 @@ def recommendation_history(course_id: int, db: DBSession, current_user: CurrentU
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     records = list(db.scalars(statement.order_by(RecommendationRecord.updated_at.desc(), RecommendationRecord.id.desc()).offset(offset).limit(limit)))
     all_actions = list(db.scalars(select(RecommendationRecord.feedback_action).where(RecommendationRecord.user_id == current_user.id, RecommendationRecord.course_id == course_id)))
-    return ok({"items": [{"record_id": item.id, "item_type": item.item_type, "item_id": item.item_id, "title": _record_title(db, item, course), "score": item.score, "reason": item.reason, "feedback_action": item.feedback_action, "created_at": item.created_at.isoformat()} for item in records], "total": total, "metrics": {name: all_actions.count(name) for name in ("clicked", "saved", "skipped")}})
+    return ok({"items": [{
+        "record_id": item.id,
+        "item_type": item.item_type,
+        "category": category_for_item_type(item.item_type),
+        "category_label": CATEGORY_LABELS[category_for_item_type(item.item_type)],
+        "item_id": item.item_id,
+        "title": _record_title(db, item, course),
+        "score": item.score,
+        "reason": item.reason,
+        "feedback_action": item.feedback_action,
+        "created_at": item.created_at.isoformat(),
+    } for item in records], "total": total, "metrics": {name: all_actions.count(name) for name in ("clicked", "saved", "skipped")}})

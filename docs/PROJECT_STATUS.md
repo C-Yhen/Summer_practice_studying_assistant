@@ -288,3 +288,12 @@
 - 显式 Mock 边界继续由现有 API service 控制；真实模式请求失败不会回退固定演示课程。
 - 实际验证：`cd frontend && npm run build` 通过。未运行后端、Docker、PostgreSQL、Redis、Celery、MCP 或浏览器联调；浏览器联调未执行。
 - 已知问题：尚无仓库内可维护的前端 E2E 套件；构建仍提示既有大 chunk 警告，本轮未做拆包优化。
+
+## Round 15：推荐多样性与分类体验
+
+- 推荐候选新增稳定用户级分类：学习任务、薄弱点复习、资料与问答、学习计划、学习复盘；保留原始 `item_type` 与 recommendation key，反馈和历史仍使用真实持久化资源身份。
+- 默认综合页采用评分优先的多样化选择：任务最多 2 条、其他分类各最多 1 条；补位阶段允许任务最多 `max(2, ceil(limit / 2))` 条。最高优先的逾期/今日任务会优先保留，只有名额无法填满时才突破两条高优先任务保护。
+- 推荐接口支持 `category=all|task|mastery|resource|plan|report`；分类查询返回该分类的全部真实候选（再按 limit 截断），`category_counts` 在 limit 前按全部候选计算，GET 保持只读。
+- 推荐页通过 `courseId` 与 `category` URL 参数恢复课程/分类，切换分类重新请求后端；显示真实分类数量、用户级优先级、明确空状态和可读历史标签，规则版本移至轻量说明。显式 Mock 返回同构分类合同；真实请求失败不回退 Mock。
+- 实际验证：推荐专项 SQLite 测试 `10 passed`；完整后端 SQLite 测试 `99 passed, 3 skipped`；前端 `npm run build` 通过。未运行 PostgreSQL、Redis、Celery、MCP 或浏览器联调；浏览器联调未执行。
+- 已知问题：尚无仓库内可维护的前端 E2E 套件；构建仍提示既有大 chunk 警告，本轮未做拆包优化。

@@ -128,6 +128,7 @@ export interface LearningRecordListResponse {
 }
 
 export type RecommendationType = 'study_task' | 'mastery_review' | 'course_chat' | 'create_plan' | 'upload_document' | 'weekly_report'
+export type RecommendationCategory = 'all' | 'task' | 'mastery' | 'resource' | 'plan' | 'report'
 export type RecommendationFeedbackAction = 'clicked' | 'saved' | 'skipped'
 
 export interface RecommendationSignal {
@@ -140,6 +141,8 @@ export interface RecommendationSignal {
 export interface CourseRecommendationItem {
   recommendation_key: string
   item_type: RecommendationType
+  category: Exclude<RecommendationCategory, 'all'>
+  category_label: string
   item_id: number
   course_id: number
   title: string
@@ -159,11 +162,15 @@ export interface CourseRecommendationsResponse {
   algorithm_version: string
   strategy_summary: string
   items: CourseRecommendationItem[]
+  category_counts: Record<RecommendationCategory, number>
+  selection: { mode: 'diverse' | 'category'; returned: number; candidate_total: number }
 }
 
 export interface RecommendationHistoryItem {
   record_id: number
   item_type: RecommendationType
+  category: Exclude<RecommendationCategory, 'all'>
+  category_label: string
   item_id: number
   title: string
   score: number

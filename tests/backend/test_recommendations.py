@@ -15,6 +15,7 @@ from backend.app.models import (
     StudyTask,
     User,
 )
+from backend.app.recommendation.engine import select_diverse_recommendations
 
 TARGET = date(2026, 7, 17)
 
@@ -46,6 +47,16 @@ def _items(client: TestClient, headers: dict[str, str], course_id: int, **params
     )
     assert response.status_code == 200
     return response.json()["data"]["items"]
+
+
+def _recommendations(client: TestClient, headers: dict[str, str], course_id: int, **params):
+    response = client.get(
+        f"/api/v1/courses/{course_id}/recommendations",
+        headers=headers,
+        params={"target_date": TARGET.isoformat(), **params},
+    )
+    assert response.status_code == 200
+    return response.json()["data"]
 
 
 def _plan_versions(db, user_id: int, course_id: int):
@@ -218,12 +229,12 @@ def test_document_recommendations_only_use_ready_visible_course_documents(
             Document(course_id=course_b, title="other ready", file_type="txt", file_path="o", status="ready"),
         ])
         db.commit()
-    types = {item["item_type"] for item in _items(client, auth_headers, course_a)}
+    types = {item["item_type"] for item in _items(client, auth_headers, course_a, category="resource")}
     assert "upload_document" in types and "course_chat" not in types
     with client.app.state.database.session_factory() as db:
         db.add(Document(course_id=course_a, title="visible ready", file_type="txt", file_path="r", status="ready"))
         db.commit()
-    types = {item["item_type"] for item in _items(client, auth_headers, course_a)}
+    types = {item["item_type"] for item in _items(client, auth_headers, course_a, category="resource")}
     assert "course_chat" in types and "upload_document" not in types
 
 
@@ -277,3 +288,74 @@ def test_recommendation_course_ownership_and_archive_are_hidden(
         db.commit()
     assert client.get(f"/api/v1/courses/{course_id}/recommendations", headers=auth_headers).status_code == 404
     assert client.get("/api/v1/courses/999999/recommendations", headers=auth_headers).status_code == 404
+
+
+def test_diverse_default_selection_exposes_real_categories_and_category_queries(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Diverse recommendations")
+    user_id = _user_id(client, course_id)
+    with client.app.state.database.session_factory() as db:
+        course = db.get(Course, course_id)
+        course.exam_date = TARGET
+        _, active, _ = _plan_versions(db, user_id, course_id)
+        point = KnowledgePoint(course_id=course_id, name="Needs review")
+        db.add(point)
+        db.flush()
+        db.add_all([
+            *[_task(active.id, user_id, course_id, f"urgent {index}", point_id=point.id) for index in range(6)],
+            KnowledgeMastery(user_id=user_id, course_id=course_id, knowledge_point_id=point.id, score=0.2, attempts=3),
+            Document(course_id=course_id, title="ready", file_type="txt", file_path="ready", status="ready"),
+            LearningRecord(user_id=user_id, course_id=course_id, duration_seconds=600, completed=True, occurred_at=datetime(2026, 7, 16, 12, tzinfo=timezone.utc)),
+        ])
+        db.commit()
+
+    before = _record_count(client)
+    default = _recommendations(client, auth_headers, course_id, limit=6)
+    assert default["selection"] == {"mode": "diverse", "returned": 6, "candidate_total": 9}
+    assert default["category_counts"] == {"all": 9, "task": 6, "mastery": 1, "resource": 1, "plan": 0, "report": 1}
+    assert {item["category"] for item in default["items"]} >= {"task", "mastery", "resource", "report"}
+    assert sum(item["category"] == "task" for item in default["items"]) == 3
+    assert default["items"][0]["item_type"] == "study_task"
+    assert all("category" in item and "category_label" in item for item in default["items"])
+    assert _record_count(client) == before
+
+    for category, expected_type, expected_count in [
+        ("task", "study_task", 6),
+        ("mastery", "mastery_review", 1),
+        ("resource", "course_chat", 1),
+        ("report", "weekly_report", 1),
+        ("plan", None, 0),
+    ]:
+        scoped = _recommendations(client, auth_headers, course_id, category=category, limit=20)
+        assert scoped["selection"]["mode"] == "category"
+        assert scoped["category_counts"] == default["category_counts"]
+        assert len(scoped["items"]) == expected_count
+        assert all(item["category"] == category for item in scoped["items"])
+        if expected_type is not None:
+            assert all(item["item_type"] == expected_type for item in scoped["items"])
+    assert client.get(f"/api/v1/courses/{course_id}/recommendations", headers=auth_headers, params={"category": "unknown"}).status_code == 422
+    assert _record_count(client) == before
+
+
+def test_diverse_selector_is_stable_and_only_tasks_can_fill_the_limit() -> None:
+    def candidate(item_id: int, score: float, category: str = "task", high: bool = False) -> dict:
+        return {
+            "recommendation_key": f"rule-v2:1:study_task:{item_id}", "item_type": "study_task",
+            "item_id": item_id, "score": score, "category": category,
+            "signals": [{"code": "due_today" if high else "upcoming"}],
+        }
+
+    only_tasks = [candidate(index, 90 - index, high=index < 3) for index in range(10)]
+    assert [item["item_id"] for item in select_diverse_recommendations(only_tasks, 6)] == [0, 1, 3, 4, 5, 6]
+    assert select_diverse_recommendations(only_tasks, 6) == select_diverse_recommendations(only_tasks, 6)
+    assert [len(select_diverse_recommendations(only_tasks, limit)) for limit in (1, 2, 3, 6, 10)] == [1, 2, 3, 6, 10]
+
+    mixed = only_tasks + [
+        {**candidate(100, 60, "mastery"), "item_type": "mastery_review", "recommendation_key": "rule-v2:1:mastery_review:100"},
+        {**candidate(101, 59, "resource"), "item_type": "course_chat", "recommendation_key": "rule-v2:1:course_chat:101"},
+    ]
+    selected = select_diverse_recommendations(mixed, 6)
+    assert selected[0]["item_id"] == 0
+    assert sum(item["category"] == "task" for item in selected) <= 3
+    assert {item["category"] for item in selected} >= {"mastery", "resource"}

@@ -30,6 +30,7 @@ import type {
   KnowledgeMasteryResponse,
   LearningRecordListResponse,
   RecommendationFeedbackAction,
+  RecommendationCategory,
   RecommendationHistoryResponse,
   RagCitation,
   PlanConfirmRequest,
@@ -1097,51 +1098,61 @@ export const learningApi = {
 }
 
 function parseRecommendations(value: unknown): CourseRecommendationsResponse {
-  if (!isRecord(value) || !isRecord(value.course) || !Number.isInteger(value.course.id) || typeof value.course.name !== 'string' || typeof value.target_date !== 'string' || typeof value.algorithm_version !== 'string' || typeof value.strategy_summary !== 'string' || !Array.isArray(value.items)) {
+  const categories = ['all', 'task', 'mastery', 'resource', 'plan', 'report']
+  const itemCategories = ['task', 'mastery', 'resource', 'plan', 'report']
+  const selectionModes = ['diverse', 'category']
+  if (!isRecord(value)) throw new ApiEnvelopeError('后端返回的推荐数据结构不完整')
+  const course = value.course
+  const categoryCounts = value.category_counts
+  const selection = value.selection
+  if (!isRecord(course) || !Number.isInteger(course.id) || typeof course.name !== 'string' || typeof value.target_date !== 'string' || typeof value.algorithm_version !== 'string' || typeof value.strategy_summary !== 'string' || !Array.isArray(value.items) || !isRecord(categoryCounts) || !isRecord(selection) || !selectionModes.includes(String(selection.mode)) || !Number.isInteger(selection.returned) || !Number.isInteger(selection.candidate_total) || !categories.every((category) => typeof categoryCounts[category] === 'number')) {
     throw new ApiEnvelopeError('后端返回的推荐数据结构不完整')
   }
   const items = value.items as CourseRecommendationItem[]
-  if (items.some((item) => !item || typeof item.recommendation_key !== 'string' || !Number.isFinite(item.score) || !Array.isArray(item.signals) || !item.action)) {
+  if (items.some((item) => !item || typeof item.recommendation_key !== 'string' || !itemCategories.includes(item.category) || typeof item.category_label !== 'string' || !Number.isFinite(item.score) || !Array.isArray(item.signals) || !item.action)) {
     throw new ApiEnvelopeError('后端返回的推荐条目不完整')
   }
   return value as unknown as CourseRecommendationsResponse
 }
 
 function parseRecommendationHistory(value: unknown): RecommendationHistoryResponse {
-  if (!isRecord(value) || !Array.isArray(value.items) || typeof value.total !== 'number' || !isRecord(value.metrics)) {
+  const categories = ['task', 'mastery', 'resource', 'plan', 'report']
+  if (!isRecord(value) || !Array.isArray(value.items) || typeof value.total !== 'number' || !isRecord(value.metrics) || value.items.some((item) => !isRecord(item) || !categories.includes(String(item.category)) || typeof item.category_label !== 'string')) {
     throw new ApiEnvelopeError('后端返回的推荐历史结构不完整')
   }
   return value as unknown as RecommendationHistoryResponse
 }
 
-function mockRecommendations(courseId: number): CourseRecommendationsResponse {
+function mockRecommendations(courseId: number, category: RecommendationCategory = 'all', limit = 6): CourseRecommendationsResponse {
   const course = mockCourseRecords.find((item) => item.id === courseId && !item.archived)
   if (!course) throw new ApiEnvelopeError('课程不存在或无权访问', 404)
-  const item: CourseRecommendationItem = {
-    recommendation_key: `rule-v2:${courseId}:create_plan:${courseId}`,
-    item_type: 'create_plan', item_id: courseId, course_id: courseId,
-    title: '创建学习计划', subtitle: '演示课程尚无生效学习计划', score: 55,
-    reason: '演示模式：当前课程尚无生效学习计划，建议先生成一份学习计划。', estimated_minutes: null,
-    knowledge_point: null, signals: [{ code: 'rule_base', label: '规则基础分', value: 1, contribution: 55 }], score_breakdown: { rule_base: 55 }, action: { type: 'open_plan', label: '创建计划' },
-  }
-  return { course: { id: courseId, name: course.name }, target_date: new Date().toISOString().slice(0, 10), algorithm_version: 'rule-v2', strategy_summary: '演示模式：基于演示课程状态生成规则建议。', items: [item] }
+  const items: CourseRecommendationItem[] = [
+    { recommendation_key: `rule-v2:${courseId}:study_task:${courseId}`, item_type: 'study_task', category: 'task', category_label: '学习任务', item_id: courseId, course_id: courseId, title: '完成今日复习任务', subtitle: '今日任务 · 预计 30 分钟', score: 80, reason: '演示模式：当前有待完成的学习任务。', estimated_minutes: 30, knowledge_point: null, signals: [{ code: 'due_today', label: '今日到期', value: 1, contribution: 20 }], score_breakdown: { due_today: 20 }, action: { type: 'open_today_tasks', label: '进入今日任务' } },
+    { recommendation_key: `rule-v2:${courseId}:mastery_review:${courseId}`, item_type: 'mastery_review', category: 'mastery', category_label: '薄弱点复习', item_id: courseId, course_id: courseId, title: '复习核心知识点', subtitle: '已有演示学习记录', score: 62, reason: '演示模式：该知识点需要复习。', estimated_minutes: null, knowledge_point: { id: courseId, name: '核心知识点', score: 0.4, attempts: 2 }, signals: [{ code: 'low_mastery', label: '掌握度偏低', value: 0.6, contribution: 24 }], score_breakdown: { low_mastery: 24 }, action: { type: 'open_mastery', label: '查看掌握度' } },
+    { recommendation_key: `rule-v2:${courseId}:upload_document:${courseId}`, item_type: 'upload_document', category: 'resource', category_label: '资料与问答', item_id: courseId, course_id: courseId, title: '上传学习资料', subtitle: '当前课程没有就绪资料', score: 50, reason: '演示模式：上传资料后可用于课程问答。', estimated_minutes: null, knowledge_point: null, signals: [{ code: 'rule_base', label: '规则基础分', value: 1, contribution: 50 }], score_breakdown: { rule_base: 50 }, action: { type: 'open_upload', label: '上传课程资料' } },
+    { recommendation_key: `rule-v2:${courseId}:create_plan:${courseId}`, item_type: 'create_plan', category: 'plan', category_label: '学习计划', item_id: courseId, course_id: courseId, title: '创建学习计划', subtitle: '演示课程尚无生效学习计划', score: 55, reason: '演示模式：当前课程尚无生效学习计划，建议先生成一份学习计划。', estimated_minutes: null, knowledge_point: null, signals: [{ code: 'rule_base', label: '规则基础分', value: 1, contribution: 55 }], score_breakdown: { rule_base: 55 }, action: { type: 'open_plan', label: '创建学习计划' } },
+  ]
+  const categoryCounts: Record<RecommendationCategory, number> = { all: items.length, task: 1, mastery: 1, resource: 1, plan: 1, report: 0 }
+  const filtered = category === 'all' ? items : items.filter((item) => item.category === category)
+  return { course: { id: courseId, name: course.name }, target_date: new Date().toISOString().slice(0, 10), algorithm_version: 'rule-v2', strategy_summary: category === 'all' ? '演示模式：混合展示可执行的下一步建议。' : '演示模式：显示当前分类的演示候选。', items: filtered.slice(0, limit), category_counts: categoryCounts, selection: { mode: category === 'all' ? 'diverse' : 'category', returned: Math.min(filtered.length, limit), candidate_total: items.length } }
 }
 
 export const recommendationApi = {
-  async list(courseId: number, params: { target_date?: string; limit?: number } = {}): Promise<CourseRecommendationsResponse> {
-    if (mockEnabled) { await mockDelay(); return mockRecommendations(courseId) }
+  async list(courseId: number, params: { target_date?: string; limit?: number; category?: RecommendationCategory } = {}): Promise<CourseRecommendationsResponse> {
+    if (mockEnabled) { await mockDelay(); return mockRecommendations(courseId, params.category || 'all', params.limit || 6) }
     const query = new URLSearchParams()
     if (params.target_date) query.set('target_date', params.target_date)
     if (params.limit) query.set('limit', String(params.limit))
+    if (params.category) query.set('category', params.category)
     return parseRecommendations(unwrapApiResponse<unknown>(await apiClient.get(`/courses/${encodeURIComponent(String(courseId))}/recommendations${query.size ? `?${query}` : ''}`)))
   },
   async feedback(courseId: number, payload: { recommendation_key: string; action: RecommendationFeedbackAction }): Promise<{ record_id: number; accepted: boolean; action: RecommendationFeedbackAction }> {
     if (mockEnabled) {
-      await mockDelay(); const recommendation = mockRecommendations(courseId).items.find((item) => item.recommendation_key === payload.recommendation_key)
+      await mockDelay(); const recommendation = mockRecommendations(courseId, 'all', 20).items.find((item) => item.recommendation_key === payload.recommendation_key)
       if (!recommendation) throw new ApiEnvelopeError('推荐不存在', 404)
       const history = mockRecommendationHistory.get(courseId) || { items: [], total: 0, metrics: { clicked: 0, saved: 0, skipped: 0 } }
       if (!history.items.some((item) => item.item_type === recommendation.item_type && item.item_id === recommendation.item_id && item.feedback_action === payload.action)) {
-        history.items.unshift({ record_id: Date.now(), item_type: recommendation.item_type, item_id: recommendation.item_id, title: recommendation.title, score: recommendation.score, reason: recommendation.reason, feedback_action: payload.action, created_at: new Date().toISOString() }); history.total += 1; history.metrics[payload.action] += 1
+        history.items.unshift({ record_id: Date.now(), item_type: recommendation.item_type, category: recommendation.category, category_label: recommendation.category_label, item_id: recommendation.item_id, title: recommendation.title, score: recommendation.score, reason: recommendation.reason, feedback_action: payload.action, created_at: new Date().toISOString() }); history.total += 1; history.metrics[payload.action] += 1
       }
       mockRecommendationHistory.set(courseId, history); return { record_id: history.items[0].record_id, accepted: true, action: payload.action }
     }
