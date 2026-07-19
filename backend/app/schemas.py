@@ -430,6 +430,16 @@ class LearningRecordCreate(BaseModel):
     occurred_at: datetime | None = None
 
 
+class PracticeAttemptCreate(BaseModel):
+    submission_id: str = Field(min_length=8, max_length=64)
+    selected_option: str = Field(min_length=1, max_length=8)
+    elapsed_seconds: int = Field(default=0, ge=0, le=7200)
+
+
+class WrongBookUpdate(BaseModel):
+    status: Literal["mastered", "removed"]
+
+
 class RecommendationFeedback(BaseModel):
     action: Literal["shown", "clicked", "completed", "skipped", "saved"]
     rating: float | None = Field(default=None, ge=1, le=5)

@@ -10,6 +10,7 @@ from backend.app.api.v1 import (
     learning,
     mcp,
     plans,
+    practice,
     rag,
     recommendations,
 )
@@ -22,6 +23,7 @@ api_router.include_router(dashboard.router)
 api_router.include_router(documents.router)
 api_router.include_router(rag.router)
 api_router.include_router(plans.router)
+api_router.include_router(practice.router)
 api_router.include_router(learning.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(async_tasks.router)

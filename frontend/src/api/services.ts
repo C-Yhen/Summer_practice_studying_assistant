@@ -48,6 +48,10 @@ import type {
   UserPreferences,
   UserProfileResponse,
   UserProfileUpdate,
+  PracticeQuestion,
+  PracticeSummary,
+  PracticeAttemptResult,
+  WrongBookEntry,
 } from '@/types'
 
 const DEFAULT_COURSE_COLOR = '#5b6cf9'
@@ -1115,4 +1119,12 @@ export const recommendationApi = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]))
     return parseRecommendationHistory(unwrapApiResponse<unknown>(await apiClient.get(`/courses/${encodeURIComponent(String(courseId))}/recommendations/history?${query}`)))
   },
+}
+
+export const practiceApi = {
+  async bootstrap(courseId: number) { return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await apiClient.post(`/courses/${courseId}/practice/questions/bootstrap`)) },
+  async questions(courseId: number, mode: 'all'|'wrong' = 'all') { return unwrapApiResponse<{course:{id:number;name:string};items:PracticeQuestion[];total:number;summary:PracticeSummary}>(await apiClient.get(`/courses/${courseId}/practice/questions?mode=${mode}`)) },
+  async submit(courseId:number, questionId:number, payload:{submission_id:string;selected_option:string;elapsed_seconds:number}) { return unwrapApiResponse<PracticeAttemptResult>(await apiClient.post(`/courses/${courseId}/practice/questions/${questionId}/attempts`,payload)) },
+  async wrongBook(courseId:number, status='all', q='') { return unwrapApiResponse<{items:WrongBookEntry[];total:number;summary:{pending:number;mastered:number;repeated_wrong:number}}>(await apiClient.get(`/courses/${courseId}/wrong-book?status=${status}&q=${encodeURIComponent(q)}`)) },
+  async updateWrong(courseId:number, entryId:number, status:'mastered'|'removed') { return unwrapApiResponse<{id:number;status:string}>(await apiClient.patch(`/courses/${courseId}/wrong-book/${entryId}`,{status})) },
 }

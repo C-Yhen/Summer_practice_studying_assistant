@@ -238,3 +238,12 @@
 - 用户资料和学习偏好 PATCH 显式提交 `null` 统一返回 422，省略字段及空对象 PATCH 仍保持原值。
 - 昵称保存后立即以服务端去空格后的结果回填表单，并同步导航认证状态。
 - 实际测试：偏好专项 12 passed；完整后端 57 passed；前端 `npm run build` 通过。
+
+## Round 11：真实练习答题与错题本闭环
+
+- 新增 `PracticeQuestion`、`PracticeAttempt`、`WrongQuestionEntry`；通过现有 `create_all` 在 SQLite/PostgreSQL 创建新表。
+- 提供规则基础题 bootstrap、只读题目查询、幂等答题、真实错题本查询和状态更新 API；题目查询不返回正确答案。
+- 答题记录按 `submission_id` 对用户幂等；首次提交才更新掌握度、写入 `record_type=practice` 学习记录和更新错题条目。
+- Practice 与 WrongBook 页面改为课程上下文真实 API；规则题仅基于真实知识点，当前不接入外部模型或 AI 错因分析。
+- 实际测试：练习专项 2 passed；完整后端 59 passed；前端 `npm run build` 通过。PostgreSQL 浏览器/API 联调未执行；浏览器联调未执行。
+- 局限：规则题是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析由后续或队友接入。

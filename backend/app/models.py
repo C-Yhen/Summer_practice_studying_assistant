@@ -352,6 +352,57 @@ class LearningRecord(TimestampMixin, Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PracticeQuestion(TimestampMixin, Base):
+    __tablename__ = "practice_questions"
+    __table_args__ = (UniqueConstraint("course_id", "seed_key", name="uq_practice_question_seed"),)
+
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    knowledge_point_id: Mapped[int | None] = mapped_column(ForeignKey("knowledge_points.id", ondelete="SET NULL"))
+    question_type: Mapped[str] = mapped_column(String(24), default="single_choice", nullable=False)
+    stem: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list, nullable=False)
+    correct_option: Mapped[str] = mapped_column(String(8), nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    difficulty: Mapped[str] = mapped_column(String(24), default="basic", nullable=False)
+    origin: Mapped[str] = mapped_column(String(24), default="rule_seed", nullable=False)
+    seed_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id", ondelete="SET NULL"))
+    source_page_number: Mapped[int | None] = mapped_column(Integer)
+    source_quote: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class PracticeAttempt(TimestampMixin, Base):
+    __tablename__ = "practice_attempts"
+    __table_args__ = (UniqueConstraint("user_id", "submission_id", name="uq_practice_attempt_submission"),)
+
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    submission_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("practice_questions.id", ondelete="CASCADE"), index=True)
+    selected_option: Mapped[str] = mapped_column(String(8), nullable=False)
+    is_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    elapsed_seconds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class WrongQuestionEntry(TimestampMixin, Base):
+    __tablename__ = "wrong_question_entries"
+    __table_args__ = (UniqueConstraint("user_id", "question_id", name="uq_wrong_question_user_question"),)
+
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("practice_questions.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    wrong_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_selected_option: Mapped[str] = mapped_column(String(8), nullable=False)
+    last_wrong_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    mastered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class RecommendationRecord(TimestampMixin, Base):
     __tablename__ = "recommendation_records"
 
