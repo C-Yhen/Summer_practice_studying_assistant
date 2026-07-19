@@ -299,9 +299,10 @@ export interface StudyPlanGenerateRequest {
 }
 
 export interface PracticeOption { key: string; text: string }
-export interface PracticeQuestion { id:number; knowledge_point_id:number|null; knowledge_point:string|null; question_type:string; stem:string; options:PracticeOption[]; difficulty:string; origin:string }
+export interface PracticeQuestion { id:number; knowledge_point_id:number|null; knowledge_point:string|null; question_type:string; stem:string; options:PracticeOption[]; difficulty:string; origin:string; source_document_id:number|null; source_page_number:number|null; source_quote:string|null }
 export interface PracticeSummary { total_attempts:number; correct_attempts:number; wrong_attempts:number; accuracy:number; pending_wrong_count:number; knowledge_point_count:number }
-export interface PracticeAttemptResult extends PracticeQuestion { attempt_id:number; selected_option:string; is_correct:boolean; correct_option:string; explanation:string; mastery_score:number|null; wrong_book_updated:boolean; summary:PracticeSummary }
+export interface PracticeAttemptRequest { submission_id:string; selected_option:string; elapsed_seconds:number }
+export interface PracticeAttemptResult extends PracticeQuestion { attempt_id:number; question_id:number; selected_option:string; is_correct:boolean; correct_option:string; explanation:string; mastery_score:number|null; wrong_book_updated:boolean; summary:PracticeSummary; idempotent_replay:boolean }
 export interface WrongBookEntry { id:number; status:'pending'|'mastered'|'removed'; wrong_count:number; last_selected_option:string; last_wrong_at:string; question:PracticeQuestion & {correct_option:string;explanation:string}; mastery_score:number|null }
 
 export interface StudyPlanTask {

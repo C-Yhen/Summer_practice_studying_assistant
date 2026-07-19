@@ -22,6 +22,7 @@ from backend.app.planning.engine import PlanInput, PlanningPoint, build_plan, re
 from backend.app.responses import ok
 from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, TaskComplete
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
+from backend.app.services.mastery import apply_mastery_evidence
 
 router = APIRouter(tags=["study-plans"])
 
@@ -338,23 +339,16 @@ def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_us
     db.add(LearningRecord(user_id=current_user.id, course_id=task.course_id, task_id=task.id, knowledge_point_id=task.knowledge_point_id, duration_seconds=payload.actual_minutes * 60, completed=True))
     mastery_score = None
     if task.knowledge_point_id:
-        mastery = db.scalar(select(KnowledgeMastery).where(KnowledgeMastery.user_id == current_user.id, KnowledgeMastery.knowledge_point_id == task.knowledge_point_id))
-        if mastery is None:
-            mastery = KnowledgeMastery(
-                user_id=current_user.id,
-                course_id=task.course_id,
-                knowledge_point_id=task.knowledge_point_id,
-                score=0.3,
-                confidence=0.2,
-                attempts=0,
-                correct_attempts=0,
-            )
-            db.add(mastery)
-        mastery.score = round(min(1.0, mastery.score + 0.15 * (1 - mastery.score)), 4)
-        mastery.confidence = round(min(1.0, mastery.confidence + 0.1), 4)
-        mastery.attempts += 1
-        mastery.correct_attempts += 1
-        mastery.last_studied_at = task.completed_at
+        mastery = apply_mastery_evidence(
+            db,
+            user_id=current_user.id,
+            course_id=task.course_id,
+            knowledge_point_id=task.knowledge_point_id,
+            correct=True,
+            score_strength=0.15,
+            confidence_strength=0.1,
+            occurred_at=task.completed_at,
+        )
         mastery_score = mastery.score
     try:
         db.commit()

@@ -239,12 +239,14 @@
 - 昵称保存后立即以服务端去空格后的结果回填表单，并同步导航认证状态。
 - 实际测试：偏好专项 12 passed；完整后端 57 passed；前端 `npm run build` 通过。
 
-## Round 11：真实练习答题与错题本闭环
+## Round 11：真实练习答题与错题本闭环（补修完成，等待独立审查）
 
-- 新增 `PracticeQuestion`、`PracticeAttempt`、`WrongQuestionEntry`；通过现有 `create_all` 在 SQLite/PostgreSQL 创建新表。
-- 提供规则基础题 bootstrap、只读题目查询、幂等答题、真实错题本查询和状态更新 API；题目查询不返回正确答案。
-- 答题记录按 `submission_id` 对用户幂等；首次提交才更新掌握度、写入 `record_type=practice` 学习记录和更新错题条目。
-- Practice 与 WrongBook 页面改为课程上下文真实 API；规则题仅基于真实知识点，当前不接入外部模型或 AI 错因分析。
-- 显式 `VITE_ENABLE_MOCK=true` 时，练习与错题本使用独立内存演示数据；真实模式不回退 Mock。
-- 实际测试：练习专项 2 passed；完整后端 59 passed；前端 `npm run build` 通过。PostgreSQL API 联调完成；浏览器联调未执行。
-- 局限：规则题是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析由后续或队友接入。
+- `submission_id` 绑定原始 course、question、答案和耗时；完全一致才重放，错配统一返回 409。并发唯一约束冲突会回滚整个事务并重新校验持久化提交。
+- 前端首次提交冻结 UUID、答案和耗时，网络失败沿用同一 payload；提交期间锁定答案、课程和翻题操作，题目可答后才开始计时。显式 Mock 模式遵守同一幂等键绑定规则，真实模式不回退 Mock。
+- 今日任务和练习答题复用小型 mastery helper，保持原任务增长规则；练习正确不降分、错误不升分，所有数值限制在 0～1。
+- 每次新答题均写入 `record_type=practice` 的 LearningRecord；无知识点题目仍记录答题和学习时长，但不更新掌握度。
+- 题目 `total` 按过滤后、limit 前统计，并拒绝其他课程知识点；错题本 `total` 按过滤后、分页前统计，summary 始终使用整门课程未移除数据。
+- SQLite 专项测试：`18 passed, 1 skipped`；完整后端：`75 passed, 1 skipped`。跳过项为显式启用的 PostgreSQL API 并发用例。
+- PostgreSQL/API 并发测试：`1 passed, 18 deselected`；两个同步请求只产生一条 Attempt、一条 LearningRecord、一次 mastery attempt 和一次 wrong_count，并验证 409 错配、重复错题及分页汇总。
+- 前端 `npm run build` 通过；浏览器联调未执行。
+- 局限：规则题仍是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析不在本轮范围。

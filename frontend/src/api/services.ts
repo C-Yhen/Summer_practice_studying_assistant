@@ -50,6 +50,7 @@ import type {
   UserProfileUpdate,
   PracticeQuestion,
   PracticeSummary,
+  PracticeAttemptRequest,
   PracticeAttemptResult,
   WrongBookEntry,
 } from '@/types'
@@ -58,7 +59,12 @@ const DEFAULT_COURSE_COLOR = '#5b6cf9'
 const mockRecommendationHistory = new Map<number, RecommendationHistoryResponse>()
 const mockPracticeQuestions = new Map<number, PracticeQuestion[]>()
 const mockPracticeAttempts = new Map<number, PracticeAttemptResult[]>()
-const mockPracticeSubmissions = new Map<string, PracticeAttemptResult>()
+const mockPracticeSubmissions = new Map<string, {
+  courseId: number
+  questionId: number
+  payload: PracticeAttemptRequest
+  result: PracticeAttemptResult
+}>()
 const mockWrongBookEntries = new Map<number, WrongBookEntry[]>()
 
 function toCourseListItem(course: BackendCourse): CourseListItem {
@@ -1133,7 +1139,7 @@ export const practiceApi = {
       if (!course) throw new ApiEnvelopeError('课程不存在')
       const existing = mockPracticeQuestions.get(courseId) || []
       if (!existing.length) {
-        mockPracticeQuestions.set(courseId, [{ id: courseId * 1000 + 1, knowledge_point_id: null, knowledge_point: `${course.name}基础知识`, question_type: 'single_choice', stem: `关于“${course.name}基础知识”，下列哪项表述正确？`, options: [{ key: 'A', text: '应结合课程资料理解核心概念。' }, { key: 'B', text: '无需学习即可掌握。' }], difficulty: 'basic', origin: 'rule_seed' }])
+        mockPracticeQuestions.set(courseId, [{ id: courseId * 1000 + 1, knowledge_point_id: null, knowledge_point: `${course.name}基础知识`, question_type: 'single_choice', stem: `关于“${course.name}基础知识”，下列哪项表述正确？`, options: [{ key: 'A', text: '应结合课程资料理解核心概念。' }, { key: 'B', text: '无需学习即可掌握。' }], difficulty: 'basic', origin: 'rule_seed', source_document_id: null, source_page_number: null, source_quote: null }])
         return { created_count: 1, existing_count: 0, total: 1, reason: null }
       }
       return { created_count: 0, existing_count: existing.length, total: existing.length, reason: null }
@@ -1154,24 +1160,30 @@ export const practiceApi = {
     }
     return unwrapApiResponse<{course:{id:number;name:string};items:PracticeQuestion[];total:number;summary:PracticeSummary}>(await apiClient.get(`/courses/${courseId}/practice/questions?mode=${mode}`))
   },
-  async submit(courseId:number, questionId:number, payload:{submission_id:string;selected_option:string;elapsed_seconds:number}) {
+  async submit(courseId:number, questionId:number, payload:PracticeAttemptRequest) {
     if (mockEnabled) {
       await mockDelay()
       const replay = mockPracticeSubmissions.get(payload.submission_id)
-      if (replay) return structuredClone(replay)
+      if (replay) {
+        if (replay.courseId !== courseId || replay.questionId !== questionId || replay.payload.selected_option !== payload.selected_option || replay.payload.elapsed_seconds !== payload.elapsed_seconds) {
+          throw new ApiEnvelopeError('本次提交标识已被其他答案使用，请刷新题目后重试')
+        }
+        return structuredClone({ ...replay.result, idempotent_replay: true })
+      }
       const question = (mockPracticeQuestions.get(courseId) || []).find((item) => item.id === questionId)
       if (!question || !question.options.some((item) => item.key === payload.selected_option)) throw new ApiEnvelopeError('题目或选项不存在')
       const attempts = mockPracticeAttempts.get(courseId) || []
       const isCorrect = payload.selected_option === 'A'
       const correctAttempts = attempts.filter((item) => item.is_correct).length + Number(isCorrect)
-      const result: PracticeAttemptResult = { ...question, attempt_id: courseId * 10000 + attempts.length + 1, selected_option: payload.selected_option, is_correct: isCorrect, correct_option: 'A', explanation: '演示模式下的规则题解析。', mastery_score: isCorrect ? 0.42 : 0.2, wrong_book_updated: !isCorrect, summary: { total_attempts: attempts.length + 1, correct_attempts: correctAttempts, wrong_attempts: attempts.length + 1 - correctAttempts, accuracy: correctAttempts / (attempts.length + 1), pending_wrong_count: (mockWrongBookEntries.get(courseId) || []).filter((item) => item.status === 'pending').length + Number(!isCorrect), knowledge_point_count: 0 } }
-      attempts.push(result); mockPracticeAttempts.set(courseId, attempts); mockPracticeSubmissions.set(payload.submission_id, result)
       if (!isCorrect) {
         const entries = mockWrongBookEntries.get(courseId) || []; const current = entries.find((item) => item.question.id === questionId)
         if (current) { current.wrong_count += 1; current.last_selected_option = payload.selected_option; current.last_wrong_at = new Date().toISOString(); current.status = 'pending' }
-        else entries.push({ id: courseId * 10000 + entries.length + 1, status: 'pending', wrong_count: 1, last_selected_option: payload.selected_option, last_wrong_at: new Date().toISOString(), question: { ...question, correct_option: 'A', explanation: result.explanation }, mastery_score: result.mastery_score })
+        else entries.push({ id: courseId * 10000 + entries.length + 1, status: 'pending', wrong_count: 1, last_selected_option: payload.selected_option, last_wrong_at: new Date().toISOString(), question: { ...question, correct_option: 'A', explanation: '演示模式下的规则题解析。' }, mastery_score: 0.2 })
         mockWrongBookEntries.set(courseId, entries)
       }
+      const pending = (mockWrongBookEntries.get(courseId) || []).filter((item) => item.status === 'pending').length
+      const result: PracticeAttemptResult = { ...question, attempt_id: courseId * 10000 + attempts.length + 1, question_id: question.id, selected_option: payload.selected_option, is_correct: isCorrect, correct_option: 'A', explanation: '演示模式下的规则题解析。', mastery_score: isCorrect ? 0.42 : 0.2, wrong_book_updated: !isCorrect, idempotent_replay: false, summary: { total_attempts: attempts.length + 1, correct_attempts: correctAttempts, wrong_attempts: attempts.length + 1 - correctAttempts, accuracy: correctAttempts / (attempts.length + 1), pending_wrong_count: pending, knowledge_point_count: 0 } }
+      attempts.push(result); mockPracticeAttempts.set(courseId, attempts); mockPracticeSubmissions.set(payload.submission_id, { courseId, questionId, payload: structuredClone(payload), result })
       return structuredClone(result)
     }
     return unwrapApiResponse<PracticeAttemptResult>(await apiClient.post(`/courses/${courseId}/practice/questions/${questionId}/attempts`,payload))
