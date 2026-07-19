@@ -539,12 +539,51 @@ def test_postgres_plan_confirmation_concurrency_and_api_contract():
         assert replay.status_code == 200
         assert replay.json()["data"]["created_count"] == 0
         assert replay.json()["data"]["replayed_count"] == 2
+
+        manual_payload = {
+            "title": "Concurrent manual event",
+            "start_at": "2026-07-21T12:00:00Z",
+            "end_at": "2026-07-21T13:00:00Z",
+            "idempotency_key": f"concurrent-manual-{unique}",
+        }
+        manual_preview = api.post(
+            f"{base_url}/calendar/events/preview",
+            headers=headers,
+            json=manual_payload,
+        ).json()["data"]
+        manual_headers = {
+            **headers,
+            "X-Confirmation-Token": manual_preview["confirmation_token"],
+        }
+        manual_barrier = Barrier(2)
+
+        def create_manual():
+            manual_barrier.wait()
+            with httpx.Client(timeout=20) as concurrent_api:
+                return concurrent_api.post(
+                    f"{base_url}/calendar/events",
+                    headers=manual_headers,
+                    json=manual_payload,
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            manual_responses = list(
+                executor.map(lambda _: create_manual(), range(2))
+            )
+        assert [response.status_code for response in manual_responses] == [200, 200]
+        manual_results = [response.json()["data"] for response in manual_responses]
+        assert len({item["event_id"] for item in manual_results}) == 1
+        assert sorted(item["idempotent_replay"] for item in manual_results) == [
+            False,
+            True,
+        ]
+
         listing = api.get(
             f"{base_url}/calendar/events"
             "?start_date=2026-07-20&end_date=2026-07-26",
             headers=headers,
         ).json()["data"]
-        assert listing["total"] == 2
+        assert listing["total"] == 3
         assert listing["timezone"] == "Asia/Shanghai"
         event_id = listing["items"][0]["id"]
         exported = api.get(
@@ -596,5 +635,5 @@ def test_postgres_plan_confirmation_concurrency_and_api_contract():
                     .select_from(CalendarEvent)
                     .where(CalendarEvent.user_id == user_id)
                 )
-                == 2
+                == 3
             )
