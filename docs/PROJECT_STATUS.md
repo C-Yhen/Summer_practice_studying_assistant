@@ -312,3 +312,11 @@
 - 新增成功周报的 Markdown 下载接口，导出仅使用持久化 `result_data`，并进行表格字符串转义；任务中心支持结构化周报、旧报告兼容、导出错误状态和移动端详情展示。
 - 实际验证：前端 `npm run build` 通过；SQLite 容器专项测试 `8 passed`，完整后端测试 `100 passed, 3 skipped`。未启动 PostgreSQL、Redis、Celery、MCP 或浏览器；浏览器联调未执行。
 - 未解决问题：尚无仓库内可维护的前端 E2E 套件；构建仍有既有大 chunk 警告。
+
+### 验收补修：聚合精度与导出合同
+
+- 学习时长先按真实秒数分别聚合到总计、本地日期和课程，再使用稳定最大余数法分配整数分钟；`study_days` 按当天真实完成秒数大于零计算。
+- 活动计划任务新增 `StudyPlan.course_id == StudyTask.course_id` 一致性约束；继续排除归档课程、其他用户、零尝试与知识点课程错配数据。
+- Markdown 增加范围、时区、无生效计划任务文案和薄弱点百分比，兼容旧结构及异常持久化值；文件名仅接受合法 ISO 日期。
+- 前端按当前用户 IANA 时区生成默认日期并使用 date-only 运算，限制成功周报下载；显式 Mock 从同一份 `result_data` 渲染同构章节。
+- 实际验证：周报专项 `16 passed`；完整后端 `108 passed, 3 skipped`；前端 `npm run build` 通过。未启动 PostgreSQL、Redis、Celery 或 MCP；浏览器联调未执行。

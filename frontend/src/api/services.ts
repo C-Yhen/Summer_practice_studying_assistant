@@ -1,5 +1,6 @@
 import { ApiEnvelopeError, apiClient, isApiError, mockEnabled, unwrapApiResponse, withMockFallback } from './client'
 import { asyncTasks, courses, todayTasks } from '@/data/mock'
+import { normalizeWeeklyReport } from '@/types'
 import type {
   AsyncTask,
   AsyncTaskListParams,
@@ -872,7 +873,15 @@ export const asyncTaskApi = {
       await mockDelay()
       const task = mockTasks.get(taskId)
       if (!task || task.task_type !== 'weekly_report' || task.status !== 'success') throw new ApiEnvelopeError('周报尚未生成', 409)
-      return { blob: new Blob([`# StudyPilot Weekly Report\n\n${String(task.result_data?.summary || '')}\n`], { type: 'text/markdown;charset=utf-8' }), filename: 'studypilot-weekly-report.md' }
+      const report = normalizeWeeklyReport(task.result_data)
+      if (!report) throw new ApiEnvelopeError('演示周报数据无法识别', 409)
+      const scope = report.scope_label || (report.course_names?.length === 1 ? report.course_names[0] : '全部课程')
+      const lines = ['# StudyPilot 学习周报', '', `- 周期：${report.range_start} 至 ${report.range_end}`, `- 范围：${scope}`, `- 时区：${report.timezone || 'UTC'}`, '', '## 总览', '', `- 学习时长：${report.total_learning_minutes} 分钟`, `- 学习天数：${report.study_days} 天`, `- 完成任务：${report.completed_tasks} / ${report.scheduled_tasks}`, report.scheduled_tasks ? `- 完成率：${(report.completion_rate * 100).toFixed(1)}%` : '- 当前周期没有生效计划任务']
+      if (report.daily) lines.push('', '## 每日学习', '', '| 日期 | 分钟 | 完成 | 计划 |', '| --- | ---: | ---: | ---: |', ...report.daily.map(item => `| ${item.date} | ${item.learning_minutes} | ${item.completed_tasks} | ${item.scheduled_tasks} |`))
+      if (report.course_breakdown) lines.push('', '## 课程分布', '', '| 课程 | 分钟 | 完成 | 计划 |', '| --- | ---: | ---: | ---: |', ...report.course_breakdown.map(item => `| ${item.course_name.replace(/\|/g, '\\|')} | ${item.learning_minutes} | ${item.completed_tasks} | ${item.scheduled_tasks} |`))
+      if (report.weak_points.length) lines.push('', '## 薄弱知识点', '', ...report.weak_points.map(item => `- ${item.knowledge_point}：${(item.score * 100).toFixed(1)}%，${item.attempts || 0} 次真实尝试，置信度 ${((item.confidence || 0) * 100).toFixed(1)}%`))
+      lines.push('', '## 总结', '', report.summary)
+      return { blob: new Blob([`${lines.join('\n')}\n`], { type: 'text/markdown;charset=utf-8' }), filename: 'studypilot-weekly-report.md' }
     }
     const response = await apiClient.get(`/async-tasks/${encodeURIComponent(taskId)}/report.md`, { responseType: 'blob' })
     const header = response.headers['content-disposition']

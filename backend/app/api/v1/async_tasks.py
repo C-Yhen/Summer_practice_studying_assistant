@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
@@ -22,6 +24,20 @@ from backend.app.services.reports import render_weekly_report_markdown
 router = APIRouter(tags=["async-tasks"])
 TASK_STATUSES = {"queued", "processing", "cancelling", "success", "failed", "cancelled"}
 TASK_TYPES = {"document_parse", "weekly_report", "plan_generation"}
+REPORT_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _report_filename(result: dict) -> str:
+    values = [result.get("range_start"), result.get("range_end")]
+    if all(isinstance(value, str) and REPORT_DATE_PATTERN.fullmatch(value) for value in values):
+        try:
+            date.fromisoformat(values[0])
+            date.fromisoformat(values[1])
+        except ValueError:
+            pass
+        else:
+            return f"studypilot-weekly-report-{values[0]}-to-{values[1]}.md"
+    return "studypilot-weekly-report.md"
 
 
 def _owned_task(db: DBSession, task_id: str, user_id: int) -> AsyncTask:
@@ -132,9 +148,7 @@ def export_weekly_report_markdown(task_id: str, db: DBSession, current_user: Cur
     if task.status != "success" or not isinstance(task.result_data, dict):
         raise HTTPException(status_code=409, detail="WEEKLY_REPORT_NOT_READY")
     result = task.result_data
-    start = str(result.get("range_start") or "report")
-    end = str(result.get("range_end") or "report")
-    filename = f"studypilot-weekly-report-{start}-to-{end}.md"
+    filename = _report_filename(result)
     return Response(
         content=render_weekly_report_markdown(result),
         media_type="text/markdown; charset=utf-8",
