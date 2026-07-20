@@ -51,6 +51,17 @@ function queryCourseId(): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : -1
 }
 
+function queryDate(): string {
+  const raw = Array.isArray(route.query.date) ? route.query.date[0] : route.query.date
+  return typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : localDate()
+}
+
+function queryTaskId(): number | null {
+  const raw = Array.isArray(route.query.taskId) ? route.query.taskId[0] : route.query.taskId
+  const parsed = typeof raw === 'string' ? Number(raw) : NaN
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
 function courseName(courseId: number) {
   const course = courses.value.find((item) => item.id === courseId)
   return course ? (course.code ? `${course.name} · ${course.code}` : course.name) : `课程 #${courseId}`
@@ -88,11 +99,28 @@ async function loadTasks() {
 }
 
 async function changeCourse(value: number | '') {
-  await router.replace({ name: 'today', query: typeof value === 'number' ? { courseId: String(value) } : {} })
+  await router.replace({
+    name: 'today',
+    query: {
+      date: targetDate.value,
+      ...(typeof value === 'number' ? { courseId: String(value) } : {}),
+    },
+  })
+}
+
+async function changeDate() {
+  await router.replace({
+    name: 'today',
+    query: {
+      date: targetDate.value,
+      ...(typeof selectedCourseId.value === 'number' ? { courseId: String(selectedCourseId.value) } : {}),
+    },
+  })
 }
 
 async function initialize() {
   selectedCourseId.value = ''
+  targetDate.value = queryDate()
   tasks.value = []
   tasksError.value = ''
   await loadCourses()
@@ -104,13 +132,38 @@ async function initialize() {
   }
   selectedCourseId.value = requested || ''
   await loadTasks()
+  const requestedTaskId = queryTaskId()
+  const requestedTask = requestedTaskId ? tasks.value.find((task) => task.id === requestedTaskId) : null
+  if (requestedTask) openComplete(requestedTask, false)
 }
 
-function openComplete(task: TodayTask) {
+function openComplete(task: TodayTask, syncUrl = true) {
   if (task.status === 'completed' || completingTaskId.value !== null) return
   activeTask.value = task
   actualMinutes.value = task.estimated_minutes
   completeVisible.value = true
+  if (syncUrl) {
+    void router.replace({
+      name: 'today',
+      query: {
+        date: targetDate.value,
+        courseId: String(task.course_id),
+        taskId: String(task.id),
+      },
+    })
+  }
+}
+
+function closeComplete() {
+  completeVisible.value = false
+  activeTask.value = null
+  void router.replace({
+    name: 'today',
+    query: {
+      date: targetDate.value,
+      ...(typeof selectedCourseId.value === 'number' ? { courseId: String(selectedCourseId.value) } : {}),
+    },
+  })
 }
 
 async function completeTask() {
@@ -121,6 +174,14 @@ async function completeTask() {
   try {
     const result = await studyTaskApi.complete(task.id, { actual_minutes: actualMinutes.value })
     completeVisible.value = false
+    activeTask.value = null
+    await router.replace({
+      name: 'today',
+      query: {
+        date: targetDate.value,
+        ...(typeof selectedCourseId.value === 'number' ? { courseId: String(selectedCourseId.value) } : {}),
+      },
+    })
     await loadTasks()
     const mastery = result.mastery_score === null ? '该任务没有关联知识点' : `掌握度更新为 ${Math.round(result.mastery_score * 100)}%`
     ElMessage.success(result.idempotent_replay ? `任务已经完成，${mastery}` : `任务已完成，${mastery}`)
@@ -131,13 +192,13 @@ async function completeTask() {
   }
 }
 
-watch(() => route.query.courseId, () => void initialize(), { immediate: true })
+watch(() => [route.query.courseId, route.query.date], () => void initialize(), { immediate: true })
 </script>
 
 <template>
   <div class="today-page">
     <PageHeader title="今日任务" eyebrow="ACTIVE PLAN TASKS" :description="`${displayDate} · 仅展示当前生效计划版本中的真实任务`">
-      <el-input v-model="targetDate" type="date" style="width:155px" :disabled="tasksLoading" @change="loadTasks" />
+      <el-input v-model="targetDate" type="date" style="width:155px" :disabled="tasksLoading" @change="changeDate" />
       <el-select :model-value="selectedCourseId" placeholder="全部课程" :loading="coursesLoading" style="width:220px" @change="changeCourse">
         <el-option label="全部课程" value="" />
         <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
@@ -170,7 +231,7 @@ watch(() => route.query.courseId, () => void initialize(), { immediate: true })
 
     <el-dialog v-model="completeVisible" title="完成学习任务" width="min(450px, 92vw)">
       <div v-if="activeTask" class="complete-dialog"><b>{{ activeTask.title }}</b><p>预计 {{ activeTask.estimated_minutes }} 分钟。提交后将持久化学习记录，并更新关联知识点掌握度。</p><el-form label-position="top"><el-form-item label="实际学习分钟数"><el-input-number v-model="actualMinutes" :min="1" :max="1440" style="width:100%" /></el-form-item></el-form></div>
-      <template #footer><el-button :disabled="completingTaskId !== null" @click="completeVisible = false">取消</el-button><el-button type="primary" :loading="completingTaskId !== null" :disabled="completingTaskId !== null" @click="completeTask">确认完成</el-button></template>
+      <template #footer><el-button :disabled="completingTaskId !== null" @click="closeComplete">取消</el-button><el-button type="primary" :loading="completingTaskId !== null" :disabled="completingTaskId !== null" @click="completeTask">确认完成</el-button></template>
     </el-dialog>
   </div>
 </template>

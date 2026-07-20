@@ -8,7 +8,7 @@ import {
   unwrapApiResponse,
 } from '@/api/client'
 import type { AuthTokenResponse, AuthUser, BackendUser } from '@/types'
-import { resetSessionExpiryCoordinator } from '@/api/session-expiry'
+import { resetSessionExpiryCoordinator, suppressSessionExpiryCoordinator } from '@/api/session-expiry'
 
 const TOKEN_KEY = 'studypilot_token'
 const DEMO_USER_KEY = 'studypilot_demo_user'
@@ -168,6 +168,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    suppressSessionExpiryCoordinator()
     clearSession()
     restoreError.value = ''
   }

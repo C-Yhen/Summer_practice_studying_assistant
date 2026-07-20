@@ -50,8 +50,149 @@ export async function createCourse(request: APIRequestContext, token: string, na
   return (await response.json()).data
 }
 
+export function authHeaders(token: string) {
+  return { Authorization: `Bearer ${token}` }
+}
+
+export async function apiData(
+  request: APIRequestContext,
+  token: string,
+  method: 'get' | 'post' | 'patch' | 'delete',
+  path: string,
+  options: Record<string, unknown> = {},
+) {
+  const response = await request[method](`${apiOrigin}/api/v1${path}`, {
+    headers: authHeaders(token),
+    ...options,
+  })
+  if (!response.ok()) throw new Error(`${method.toUpperCase()} ${path} failed: ${response.status()} ${await response.text()}`)
+  const contentType = response.headers()['content-type'] || ''
+  if (!contentType.includes('application/json')) return response
+  return (await response.json()).data
+}
+
+export function localDate(offset = 0) {
+  const value = new Date()
+  value.setDate(value.getDate() + offset)
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+}
+
+export async function uploadDocument(
+  request: APIRequestContext,
+  token: string,
+  courseId: number,
+  name = `round17-${Date.now()}.txt`,
+) {
+  return apiData(request, token, 'post', `/courses/${courseId}/documents`, {
+    multipart: {
+      file: {
+        name,
+        mimeType: 'text/plain',
+        buffer: Buffer.from('事务隔离、数据库规范化、索引与查询优化是本课程的复习重点。'),
+      },
+      title: name.replace(/\.txt$/i, ''),
+    },
+  })
+}
+
+export async function createActivePlan(
+  request: APIRequestContext,
+  token: string,
+  courseId: number,
+  startDate = localDate(),
+) {
+  const generated = await apiData(request, token, 'post', `/courses/${courseId}/study-plans/generate`, {
+    data: {
+      start_date: startDate,
+      end_date: startDate,
+      daily_availability: { default_minutes: 90 },
+      unavailable_dates: [],
+      session_minutes: 30,
+      goal: 'Round 17 browser acceptance',
+    },
+  })
+  await apiData(
+    request,
+    token,
+    'post',
+    `/study-plans/${generated.plan_id}/versions/${generated.candidate_version.version}/confirm`,
+    {
+      data: {
+        expected_base_version: generated.expected_base_version,
+        confirmation_token: generated.confirmation_token,
+      },
+    },
+  )
+  return generated
+}
+
+export async function listTodayTasks(
+  request: APIRequestContext,
+  token: string,
+  courseId?: number,
+  targetDate = localDate(),
+) {
+  const query = new URLSearchParams({ target_date: targetDate })
+  if (courseId) query.set('course_id', String(courseId))
+  return apiData(request, token, 'get', `/study-tasks/today?${query}`)
+}
+
+export async function bootstrapPractice(request: APIRequestContext, token: string, courseId: number) {
+  await apiData(request, token, 'post', `/courses/${courseId}/practice/questions/bootstrap`)
+  return apiData(request, token, 'get', `/courses/${courseId}/practice/questions?mode=all`)
+}
+
+export async function submitPractice(
+  request: APIRequestContext,
+  token: string,
+  courseId: number,
+  questionId: number,
+  selectedOption: string,
+  submissionId = crypto.randomUUID(),
+) {
+  return apiData(request, token, 'post', `/courses/${courseId}/practice/questions/${questionId}/attempts`, {
+    data: { submission_id: submissionId, selected_option: selectedOption, elapsed_seconds: 3 },
+  })
+}
+
+export async function createLearningRecord(
+  request: APIRequestContext,
+  token: string,
+  courseId: number,
+  durationSeconds = 900,
+) {
+  return apiData(request, token, 'post', '/learning-records', {
+    data: {
+      course_id: courseId,
+      duration_seconds: durationSeconds,
+      record_type: 'study',
+      completed: true,
+      occurred_at: new Date().toISOString(),
+    },
+  })
+}
+
+export async function createCalendarEvent(
+  request: APIRequestContext,
+  token: string,
+  payload: { title: string; start_at: string; end_at: string; idempotency_key: string; study_task_id?: number },
+) {
+  const preview = await apiData(request, token, 'post', '/calendar/events/preview', { data: payload })
+  const response = await request.post(`${apiOrigin}/api/v1/calendar/events`, {
+    headers: {
+      ...authHeaders(token),
+      'X-Confirmation-Token': preview.confirmation_token,
+      'Idempotency-Key': payload.idempotency_key,
+    },
+    data: payload,
+  })
+  if (!response.ok()) throw new Error(`calendar event failed: ${response.status()} ${await response.text()}`)
+  return (await response.json()).data
+}
+
 export async function authenticatePage(page: Page, token: string) {
-  await page.addInitScript((accessToken) => {
+  await page.goto('/login')
+  await page.evaluate((accessToken) => {
     window.sessionStorage.setItem('studypilot_token', accessToken)
   }, token)
 }

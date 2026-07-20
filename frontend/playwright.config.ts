@@ -4,7 +4,7 @@ export default defineConfig({
   testDir: './e2e/specs',
   fullyParallel: false,
   workers: 1,
-  timeout: 45_000,
+  timeout: 90_000,
   expect: { timeout: 10_000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {

@@ -257,7 +257,11 @@ def _plan_items(db: DBSession, user_id: int, request: CalendarPlanSyncRequest, t
     cursors: dict[date, datetime] = {}
     items = []
     for task, course in rows:
-        local_start = cursors.setdefault(task.scheduled_date, datetime.combine(task.scheduled_date, request.daily_start_time, tzinfo=zone))
+        # Ambiguous fall-back wall times intentionally use fold=0 (the first occurrence).
+        local_start = cursors.setdefault(
+            task.scheduled_date,
+            datetime.combine(task.scheduled_date, request.daily_start_time, tzinfo=zone).replace(fold=0),
+        )
         local_end = local_start + timedelta(minutes=task.estimated_minutes)
         for local_value in (local_start, local_end):
             round_trip = local_value.astimezone(timezone.utc).astimezone(zone)

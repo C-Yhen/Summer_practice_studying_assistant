@@ -335,3 +335,16 @@
 - 实际验证：Playwright 桌面端与移动端共 `18 passed`；日历 DST 专项 `2 passed, 11 deselected`；相关后端 `85 passed, 3 skipped`；完整后端 `111 passed, 3 skipped`；前端 `npm run build` 通过。
 - 受控应用内浏览器实例不可用；改由仓库 Playwright 套件使用系统 Chrome 自动验收。未启动 PostgreSQL、Redis、Celery 或 MCP。
 - 未解决：验收清单中仍有 14 组未完成控件级实操，主要包括下载文件内容、完整 A/B 用户隔离故事、任务完成/反馈/历史、统计与日历全交互；这些项目保持 `BLOCKED`，未宣称通过。
+
+### Round 17 第二阶段：全部已实现可见交互验收
+
+- 重新统计并逐条补证 52 个清单条目；新增 `validate:acceptance` 自动校验 ID、状态和汇总。最终为 PASS 27、FIXED_AND_PASS 17、EXCLUDED 8、BLOCKED 0。
+- 共 27 个 Playwright 测试函数、54 个项目执行项。唯一一次完整矩阵原始结果为 desktop 27/27，mobile 21 passed、1 skipped、5 failed；修复移动引用区、练习选项覆盖、日历布局/dialog 触摸和周报日期 popper 竞态后，5 个失败均由对应 targeted spec 复测通过。最终 53 个可执行项有通过证据，1 个并发 401 用例按设计仅在 desktop 执行。
+- 浏览器真实验证了注册协议、重复邮箱、18 条生产路由、桌面/移动搜索入口、A/B/A 用户资源与搜索缓存隔离、并发 401、推荐独立反馈锁，以及全部现有课程、文档、问答、任务、练习、错题、掌握度、统计、周报和日历控件。
+- CSV、ICS、Markdown 均由页面按钮触发并通过 Playwright download 读取内容；文件写入用例临时目录并清理。A/B 故事在同一浏览器中验证课程、文档、任务、错题、反馈、周报和事件隔离及 A 数据恢复。
+- 保留 AI 学习助手、智能问答等产品定位；删除无真实来源的固定动态指标。问答仅使用离线 Provider 验证交互，不评价答案质量；外部 Chat/Embedding Provider 仍未接入并明确排除。
+- 本地日历、确认写入和 ICS 是真实功能；Outlook/Google 自动同步与真实 MCP Server 未接入。DST 春季不存在时间和秋季重复时间 `fold=0` 专项 `2 passed`。
+- 严重度台账：P0 0、P1 2、P2 16，逐项记录在 `VISIBLE_FUNCTION_ACCEPTANCE.md`。所有通过用例均启用 console/pageerror 审计，未发现未声明错误；写操作双击用请求计数验证未重复写入。
+- 实际验证：`npm run build` 通过（保留既有大 chunk 警告）；完整 SQLite 后端 `112 passed, 3 skipped`；验收脚本通过。未运行 MCP 测试，因为本轮未修改或启动 MCP。
+- 未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。隔离容器、SQLite、上传、下载、截图、trace、Playwright 报告和 test-results 在结束前清理。
+- 未解决问题仅为明确排除的未来能力与既有前端大 chunk 警告；本轮不提前宣布正式通过，等待独立审查。

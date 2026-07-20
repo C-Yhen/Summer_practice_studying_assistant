@@ -276,6 +276,8 @@ onMounted(load)
 <style scoped>
 .card-pad { padding: 24px; }
 .el-radio-group { display: grid; gap: 10px; margin: 20px 0; }
+.el-radio-group :deep(.el-radio) { height: auto; min-height: 40px; margin-right: 0; white-space: normal; }
+.el-radio-group :deep(.el-radio__label) { white-space: normal; line-height: 1.5; }
 .result { margin: 18px 0; padding: 14px; background: #f5f8ff; border-radius: 10px; }
-footer { display: flex; justify-content: space-between; }
+footer { position: relative; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
 </style>

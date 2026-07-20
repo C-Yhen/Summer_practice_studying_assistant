@@ -121,11 +121,16 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     const requestUrl = error.config?.url || ''
-    const authorization = error.config?.headers?.Authorization
+    const headers = error.config?.headers
+    const authorization = typeof headers?.get === 'function'
+      ? headers.get('Authorization')
+      : headers?.Authorization
+    const storedToken = window.sessionStorage.getItem('studypilot_token')
+    const isCurrentSession = Boolean(storedToken && authorization === `Bearer ${storedToken}`)
     const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/register')
-    if (error.response?.status === 401 && authorization && !isAuthRequest) {
+    if (error.response?.status === 401 && isCurrentSession && !isAuthRequest) {
       const redirect = `${window.location.pathname}${window.location.search}${window.location.hash}`
-      void notifySessionExpired(redirect)
+      void notifySessionExpired(redirect).catch(() => undefined)
     }
     return Promise.reject(error)
   },

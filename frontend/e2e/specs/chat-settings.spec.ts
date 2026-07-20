@@ -1,0 +1,105 @@
+import { expect, test } from '../fixtures'
+import { authenticatePage, createCourse, registerAndLogin, uploadDocument } from '../helpers/api'
+
+test('offline chat keeps two sessions, citations and messages across refresh and navigation', async ({ page, request }) => {
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Chat Persistence ${Date.now()}`)
+  await uploadDocument(request, token, course.id, 'chat-source.txt')
+  await authenticatePage(page, token)
+  await page.goto(`/chat?courseId=${course.id}`)
+  const composer = page.getByPlaceholder('向课程资料提问，Shift + Enter 换行…')
+  await expect(composer).toBeVisible()
+  await expect(page.getByRole('button', { name: '发送问题' })).toBeDisabled()
+  await composer.fill('第一段')
+  await composer.press('Shift+Enter')
+  await composer.type('第二段')
+  await expect(composer).toHaveValue('第一段\n第二段')
+  await composer.press('Enter')
+  await expect(page.locator('.message.user')).toContainText('第一段')
+  await expect(page.locator('.message.assistant')).toHaveCount(1)
+  const firstUrl = page.url()
+  expect(firstUrl).toContain('sessionId=')
+  const firstSessionId = new URL(firstUrl).searchParams.get('sessionId')
+  expect(firstSessionId).toBeTruthy()
+  const citationButton = page.locator('.answer-tools button').first()
+  if (await citationButton.count()) {
+    await citationButton.click()
+    await expect(page.locator('.source-list article').first()).toBeVisible()
+  } else {
+    await expect(page.getByText('选择一条带引用的回答查看来源')).toBeVisible()
+  }
+
+  await page.reload()
+  await expect(page.locator('.message.user')).toContainText('第一段')
+  await expect(page.locator('.message.assistant')).toHaveCount(1)
+  await page.goto('/courses')
+  await page.goto(firstUrl)
+  await expect(page.locator('.message.user')).toContainText('第一段')
+  await expect(page.locator('.message.assistant')).toHaveCount(1)
+
+  await page.getByRole('button', { name: '新建对话' }).click()
+  await composer.fill('第二个会话问题')
+  await composer.press('Enter')
+  await expect(page).toHaveURL(/sessionId=/)
+  const secondSessionId = new URL(page.url()).searchParams.get('sessionId')
+  expect(secondSessionId).not.toBe(firstSessionId)
+  await expect(page.locator('.session-item')).toHaveCount(2)
+  await page.locator('.session-item').filter({ hasText: '第一段' }).click()
+  await expect(page).toHaveURL(new RegExp(`sessionId=${firstSessionId}`))
+  await expect(page.locator('.message.user')).toContainText('第一段')
+})
+
+test('offline chat request failure keeps input and recovers with the same question', async ({ page, request, consoleAudit }) => {
+  consoleAudit.allow(/503.*chat-sessions|chat-sessions.*503|Failed to load resource.*503/)
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Chat Recovery ${Date.now()}`)
+  await uploadDocument(request, token, course.id, 'recovery-source.txt')
+  await authenticatePage(page, token)
+  await page.goto(`/chat?courseId=${course.id}`)
+  const composer = page.getByPlaceholder('向课程资料提问，Shift + Enter 换行…')
+  await composer.fill('失败后仍应保留的问题')
+  let failures = 1
+  await page.route('**/api/v1/chat-sessions/*/messages', async (route) => {
+    if (failures-- > 0) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"RAG_PROVIDER_UNAVAILABLE"}' })
+    } else {
+      await route.continue()
+    }
+  })
+  await composer.press('Enter')
+  await expect(page.locator('.el-message--error')).toBeVisible()
+  await expect(composer).toHaveValue('失败后仍应保留的问题')
+  await composer.press('Enter')
+  await expect(page.locator('.message.user')).toContainText('失败后仍应保留的问题')
+  await expect(page.locator('.message.assistant')).toHaveCount(1)
+})
+
+test('settings timezone and normalized profile survive refresh and can be restored', async ({ page, request }) => {
+  const { token } = await registerAndLogin(request)
+  await authenticatePage(page, token)
+  await page.goto('/settings')
+  await expect(page.locator('.el-loading-mask')).toBeHidden()
+  const nickname = page.getByLabel('昵称')
+  const updatedName = `Timezone User ${Date.now()}`
+  await nickname.fill(`  ${updatedName}  `)
+  const timezoneItem = page.locator('.el-form-item').filter({ hasText: '时区' })
+  await timezoneItem.locator('.el-select').click()
+  await page.getByRole('option', { name: 'America/New_York' }).click()
+  await page.getByRole('button', { name: '保存个人资料' }).click()
+  await expect(nickname).toHaveValue(updatedName)
+  await expect(timezoneItem.locator('.el-select')).toContainText('America/New_York')
+  await page.reload()
+  await expect(page.locator('.el-loading-mask')).toBeHidden()
+  await expect(timezoneItem.locator('.el-select')).toContainText('America/New_York')
+
+  await timezoneItem.locator('.el-select').click()
+  await page.getByRole('option', { name: 'Asia/Shanghai' }).click()
+  await page.getByRole('button', { name: '保存个人资料' }).click()
+  await page.reload()
+  await expect(page.locator('.el-loading-mask')).toBeHidden()
+  await expect(timezoneItem.locator('.el-select')).toContainText('Asia/Shanghai')
+  await page.getByText('学习偏好', { exact: true }).first().click()
+  await page.getByText('Markdown', { exact: true }).click()
+  await page.getByRole('button', { name: '保存学习偏好' }).click()
+  await expect(page.getByText('学习偏好已保存')).toBeVisible()
+})

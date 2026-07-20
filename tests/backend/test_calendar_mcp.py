@@ -322,6 +322,69 @@ def test_plan_preview_keeps_regular_shanghai_local_time(
     assert response.json()["data"]["items"][0]["start_at"] == "2026-07-19T18:30:00+00:00"
 
 
+def test_plan_preview_uses_first_occurrence_for_ambiguous_fall_time(
+    client: TestClient, auth_headers: dict
+):
+    user_id = _user_id(client)
+    course_id = _course(client, auth_headers, "DST fall boundary")
+    with client.app.state.database.session_factory() as db:
+        user = db.get(User, user_id)
+        user.timezone = "America/New_York"
+        plan = StudyPlan(
+            user_id=user_id,
+            course_id=course_id,
+            goal="DST fall boundary",
+            start_date=date(2026, 11, 1),
+            end_date=date(2026, 11, 1),
+            active_version=1,
+            status="active",
+        )
+        db.add(plan)
+        db.flush()
+        version = StudyPlanVersion(plan_id=plan.id, version=1, status="active")
+        db.add(version)
+        db.flush()
+        db.add(StudyTask(
+            plan_version_id=version.id,
+            user_id=user_id,
+            course_id=course_id,
+            scheduled_date=date(2026, 11, 1),
+            title="First repeated local time",
+            task_type="review",
+            estimated_minutes=20,
+            priority=1,
+            status="todo",
+        ))
+        db.commit()
+
+    payload = {
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-01",
+        "course_id": course_id,
+        "daily_start_time": "01:30",
+        "gap_minutes": 10,
+    }
+    first = client.post(
+        "/api/v1/calendar/plan-sync/preview",
+        headers=auth_headers,
+        json=payload,
+    )
+    second = client.post(
+        "/api/v1/calendar/plan-sync/preview",
+        headers=auth_headers,
+        json=payload,
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_item = first.json()["data"]["items"][0]
+    second_item = second.json()["data"]["items"][0]
+    assert first_item["scheduled_date"] == "2026-11-01"
+    assert first_item["start_at"] == "2026-11-01T05:30:00+00:00"
+    assert first_item["end_at"] == "2026-11-01T05:50:00+00:00"
+    assert second_item["start_at"] == first_item["start_at"]
+    assert second_item["end_at"] == first_item["end_at"]
+
+
 def test_plan_preview_only_uses_active_version_todo_tasks(
     client: TestClient, auth_headers: dict
 ):

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from '../fixtures'
 import { authenticatePage, createCourse, registerAndLogin } from '../helpers/api'
 
 test('upload, offline course chat and plan confirmation form a real learning flow', async ({ page, request }) => {

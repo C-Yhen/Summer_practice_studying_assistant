@@ -28,6 +28,7 @@ const weekStart = ref('')
 const courseId = ref<number | undefined>()
 const timezone = computed(() => auth.user?.timezone || 'UTC')
 const calendarError = ref('')
+const eventSelectionError = ref('')
 const toolError = ref('')
 const auditError = ref('')
 const exportError = ref('')
@@ -139,6 +140,7 @@ function clearRangeState() {
   updatePreview.value = null
   deletePreview.value = null
   calendarError.value = ''
+  eventSelectionError.value = ''
 }
 async function initializeFromRoute() {
   if (!courses.value.length) courses.value = (await courseApi.list()).items.filter((course) => !course.archived)
@@ -149,7 +151,13 @@ async function initializeFromRoute() {
   const needsNormalize = rawWeek !== weekStart.value || (route.query.courseId && courseId.value === undefined)
   if (needsNormalize) {
     internalNavigation = true
-    await router.replace({ query: { weekStart: weekStart.value, ...(courseId.value ? { courseId: String(courseId.value) } : {}) } })
+    await router.replace({
+      query: {
+        weekStart: weekStart.value,
+        ...(courseId.value ? { courseId: String(courseId.value) } : {}),
+        ...(typeof route.query.eventId === 'string' ? { eventId: route.query.eventId } : {}),
+      },
+    })
     internalNavigation = false
   }
 }
@@ -160,7 +168,17 @@ async function loadCalendarData() {
   const params = { start_date: weekStart.value, end_date: weekDays.value[6], course_id: courseId.value }
   try {
     const data = await calendarApi.list(params)
-    if (version === requestVersion) events.value = data.items
+    if (version === requestVersion) {
+      events.value = data.items
+      const rawEventId = typeof route.query.eventId === 'string' ? Number(route.query.eventId) : null
+      if (route.query.eventId !== undefined) {
+        const event = Number.isInteger(rawEventId) && rawEventId! > 0
+          ? data.items.find((item) => item.id === rawEventId)
+          : undefined
+        if (event) openEvent(event)
+        else eventSelectionError.value = '日历事件不存在或不属于当前账号'
+      }
+    }
   } catch (error) {
     if (version === requestVersion) calendarError.value = getApiErrorMessage(error, '日历事件加载失败')
   } finally {
@@ -176,7 +194,7 @@ async function updateRouteAndLoad(nextWeek: string, nextCourse: number | undefin
   weekStart.value = nextWeek
   courseId.value = nextCourse
   internalNavigation = true
-  await router.replace({ query: { weekStart: nextWeek, ...(nextCourse ? { courseId: String(nextCourse) } : {}) } })
+  await router.push({ query: { weekStart: nextWeek, ...(nextCourse ? { courseId: String(nextCourse) } : {}) } })
   internalNavigation = false
   await loadCalendarData()
 }
@@ -289,11 +307,12 @@ onMounted(async () => {
     </PageHeader>
     <el-alert v-if="exportError" :title="exportError" type="error"/>
     <el-alert v-if="calendarError" :title="calendarError" type="error"/>
+    <el-alert v-if="eventSelectionError" :title="eventSelectionError" type="warning"/>
     <section class="layout">
       <main>
         <article class="content-card card-pad local-state"><b>StudyPilot 本地日历：可用</b><span>用户时区：{{ timezone }}</span><span>外部日历账户：未连接</span><span>ICS 可手动导入 Outlook、Google Calendar 等应用</span></article>
         <article class="content-card card-pad">
-          <div class="head"><h2>自然周安排</h2><span>{{ weekStart }} 至 {{ weekDays[6] }}</span><el-button size="small" @click="changeWeek(-1)">上一周</el-button><el-button size="small" @click="goToday">今天</el-button><el-button size="small" @click="changeWeek(1)">下一周</el-button></div>
+          <div class="head"><h2>自然周安排</h2><span>{{ weekStart }} 至 {{ weekDays[6] }}</span><div class="head-actions"><el-button size="small" @click="changeWeek(-1)">上一周</el-button><el-button size="small" @click="goToday">今天</el-button><el-button size="small" @click="changeWeek(1)">下一周</el-button></div></div>
           <div v-if="loadingEvents" v-loading="true" class="loading"/>
           <el-empty v-else-if="!events.length" description="当前周暂无本地日历事件"/>
           <div v-else class="days"><div v-for="day in weekDays" :key="day"><h3>{{ day }}</h3><button v-for="event in events.filter(item=>eventLocal(item).startDate===day)" :key="event.id" class="event" @click="openEvent(event)"><b>{{ event.title }}</b><small>{{ eventLocal(event).range }}</small><small>{{ event.course_name || '本地事件' }} · {{ event.task_type || '手工事件' }}</small></button></div></div>
@@ -304,13 +323,13 @@ onMounted(async () => {
         <article class="content-card card-pad"><h2>最近 MCP 日历调用</h2><el-alert v-if="auditError" :title="auditError" type="error"/><el-empty v-else-if="!calls.length" description="暂无 MCP 日历调用记录" :image-size="55"/><div v-for="call in calls" :key="call.id" class="line"><b>{{call.tool_name}}</b><small>{{call.status}} · {{call.duration_ms}}ms</small></div></article>
       </aside>
     </section>
-    <el-dialog v-model="syncVisible" title="同步学习计划到本地日历" width="min(720px,94vw)">
+    <el-dialog v-model="syncVisible" class="calendar-dialog" title="同步学习计划到本地日历" width="min(720px,94vw)" append-to-body align-center>
       <el-form label-position="top"><el-form-item label="每日开始时间"><el-time-select v-model="dailyStart" start="06:00" step="00:30" end="23:30"/></el-form-item><el-form-item label="任务间隔（分钟）"><el-input-number v-model="gap" :min="0" :max="120"/></el-form-item></el-form>
       <el-button :loading="previewingPlan" :disabled="confirmingPlan" @click="previewPlan">生成真实预览</el-button>
       <div v-if="planPreview" class="preview"><p>可创建 {{planPreview.ready_count}} 项；冲突 {{planPreview.conflict_count}} 项；已同步 {{planPreview.already_synced_count}} 项；跨日 {{planPreview.outside_day_count}} 项。</p><div v-for="item in planPreview.items" :key="item.task_id"><b>{{item.title}}</b><span>{{item.status}} · {{item.reason || previewRange(item.start_at,item.end_at)}}</span></div></div>
       <template #footer><el-button :disabled="confirmingPlan" @click="syncVisible=false">取消</el-button><el-button type="primary" :loading="confirmingPlan" :disabled="!planPreview?.ready_count || previewingPlan" @click="confirmPlan">确认创建</el-button></template>
     </el-dialog>
-    <el-dialog v-model="detailVisible" title="本地日历事件" width="min(620px,94vw)">
+    <el-dialog v-model="detailVisible" class="calendar-dialog" title="本地日历事件" width="min(620px,94vw)" append-to-body align-center>
       <template v-if="selected">
         <div class="details"><p><b>课程：</b>{{selected.course_name || '无关联课程'}}</p><p><b>任务类型：</b>{{selected.task_type || '手工事件'}}</p><p><b>来源：</b>{{selected.provider}} / {{selected.sync_status}}</p></div>
         <el-form label-position="top"><el-form-item label="标题"><el-input v-model="editTitle" @input="updatePreview=null"/></el-form-item><el-form-item label="本地开始时间"><el-input v-model="editStart" type="datetime-local" @input="updatePreview=null"/></el-form-item><el-form-item label="本地结束时间"><el-input v-model="editEnd" type="datetime-local" @input="updatePreview=null"/></el-form-item></el-form>
@@ -323,4 +342,16 @@ onMounted(async () => {
 
 <style scoped>
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}.local-state{display:flex;gap:16px;color:#758096}.local-state b{color:#168f78}.head{display:flex;align-items:center;gap:8px}.head span{flex:1;color:#8791a4;font-size:9px}.days{display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:8px;overflow:auto}.days>div{min-height:170px;border:1px solid #e8ebf1;padding:8px;border-radius:8px}.days h3{font-size:9px}.event{display:flex;width:100%;flex-direction:column;gap:4px;margin:6px 0;padding:8px;border:0;border-left:3px solid #5e6de7;background:#eff1ff;text-align:left}.event b,.event small{font-size:8px}.event small{color:#7d879b}.loading{min-height:320px}.line{display:flex;flex-direction:column;gap:4px;padding:8px 0;border-bottom:1px solid #edf0f4}.line b{font:8px Consolas,monospace}.line small{color:#7d879b;font-size:7px}.preview{display:grid;gap:7px;margin-top:12px;padding:10px;background:#f5f7fb}.preview>div{display:flex;justify-content:space-between;font-size:9px}.details{display:flex;gap:14px;font-size:9px}@media(max-width:900px){.layout{grid-template-columns:1fr}.local-state{align-items:flex-start;flex-direction:column}}
+@media(max-width:900px){
+  .head{display:grid;grid-template-columns:1fr}
+  .head span{grid-row:2}
+  .head-actions{display:flex;flex-wrap:wrap;gap:8px}
+  .head-actions :deep(.el-button){margin-left:0}
+  .details{flex-wrap:wrap}
+  :global(.calendar-dialog .el-dialog__footer){display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+  :global(.calendar-dialog .el-dialog__footer .el-button){flex:1 1 120px;margin-left:0}
+  :global(.calendar-dialog.el-dialog),:global(.calendar-dialog .el-dialog){display:flex;max-height:94vh;margin:0 auto!important;flex-direction:column}
+  :global(.calendar-dialog .el-dialog__body){min-height:0;overflow-y:auto}
+  :global(.calendar-dialog .el-dialog__header),:global(.calendar-dialog .el-dialog__footer){flex:none}
+}
 </style>

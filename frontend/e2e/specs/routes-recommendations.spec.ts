@@ -1,35 +1,52 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from '../fixtures'
 import { authenticatePage, createCourse, registerAndLogin } from '../helpers/api'
 
-const routes = [
-  ['/dashboard', '学习首页'],
-  ['/courses', '课程管理'],
-  ['/upload', '资料上传'],
-  ['/documents/tasks', '文档处理进度'],
-  ['/chat', '智能问答'],
-  ['/plan', '学习计划'],
-  ['/today', '今日任务'],
-  ['/recommendations', '推荐中心'],
-  ['/practice', '练习答题'],
-  ['/wrong-book', '错题本'],
-  ['/mastery', '知识点掌握度'],
-  ['/statistics', '学习统计'],
-  ['/tasks', '长时任务中心'],
-  ['/calendar', '学习日历'],
-  ['/settings', '个人设置'],
+const protectedRoutes = [
+  ['/dashboard', '学习首页', 'LEARNING OVERVIEW'],
+  ['/courses', '课程管理', '课程管理'],
+  ['/upload', '资料上传', '资料上传'],
+  ['/documents/tasks', '文档处理进度', '文档处理进度'],
+  ['/chat', '智能问答', '智能问答'],
+  ['/plan', '学习计划', '学习计划'],
+  ['/today', '今日任务', '今日任务'],
+  ['/recommendations', '推荐中心', '推荐中心'],
+  ['/practice', '练习答题', '练习答题'],
+  ['/wrong-book', '错题本', '错题本'],
+  ['/mastery', '知识点掌握度', '知识点掌握度'],
+  ['/statistics', '学习统计', '学习统计'],
+  ['/tasks', '长时任务中心', '长时任务中心'],
+  ['/calendar', '学习日历', '学习日历'],
+  ['/settings', '个人设置', '个人设置'],
 ] as const
 
-test('all production pages render their honest page title', async ({ page, request }) => {
+test('all 18 production routes render matching titles and stable content', async ({ page, request }) => {
+  await page.goto('/login')
+  await expect(page).toHaveTitle(/登录/)
+  await expect(page.getByRole('heading', { name: '继续你的学习旅程' })).toBeVisible()
+  await page.goto('/register')
+  await expect(page).toHaveTitle(/注册/)
+  await expect(page.getByRole('heading', { name: '创建你的学习档案' })).toBeVisible()
+
   const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Route Detail ${Date.now()}`)
   await authenticatePage(page, token)
-  for (const [path, title] of routes) {
+  for (const [path, title, marker] of protectedRoutes) {
     await page.goto(path)
     await expect(page).toHaveTitle(new RegExp(title))
     await expect(page.locator('.page-content')).toBeVisible()
+    await expect(page.getByText(marker, { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('404', { exact: true })).toHaveCount(0)
   }
+  await page.goto(`/courses/${course.id}`)
+  await expect(page).toHaveTitle(/课程详情/)
+  await expect(page.getByRole('heading', { name: course.name }).first()).toBeVisible()
+  await expect(page.getByText('LEARNING CALENDAR', { exact: true })).toHaveCount(0)
+  await page.goto('/calendar')
+  await expect(page.getByText('LEARNING CALENDAR', { exact: true })).toBeVisible()
 })
 
-test('recommendation errors recover through visible retry and filter controls', async ({ page, request }) => {
+test('recommendation errors recover through visible retry and filter controls', async ({ page, request, consoleAudit }) => {
+  consoleAudit.allow(/503.*recommendations|recommendations.*503|Failed to load resource.*503/)
   const { token } = await registerAndLogin(request)
   const course = await createCourse(request, token)
   await authenticatePage(page, token)
