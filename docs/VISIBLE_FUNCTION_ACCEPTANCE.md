@@ -34,7 +34,7 @@
 | H02 | 今日任务 | 日期/课程/taskId、分钟、完成、幂等、重试 | active 与 candidate 版本并存 | URL 恢复；非法分钟；双击完成；刷新与重复完成 | 只完成一次并持久化；candidate/旧版本不出现；失败可重试 | 通过 | 通过 | `learning-recommendations: today task...` | 日期和 taskId 曾不能完整 URL 恢复 | `TodayTasksView.vue` | FIXED_AND_PASS |
 | I01 | 推荐中心 | 加载失败与重试 | 已有课程 | 拦截 503 后点击重试 | 保留工具栏并重新 GET 成功 | 通过 | 通过 | `routes-recommendations: recommendation errors...` | 重试/刷新锁曾不完整 | `RecommendationsView.vue` | FIXED_AND_PASS |
 | I02 | 推荐中心 | 分类和 URL | 已有多类候选 | 切换分类并刷新 | URL 恢复且分类 GET 只读 | 通过 | 通过 | `routes-recommendations: category URL...` | 无 | — | PASS |
-| I03 | 推荐中心 | 两卡并发反馈、主操作、历史 | 已有多条推荐 | A/B 同时反馈；双击主操作；打开/刷新历史 | 卡片锁独立；每动作一次写入；跳转不被反馈失败阻止；历史实时更新 | 通过 | 通过 | `learning-recommendations: independent feedback...` | 单一 busy 状态会错误解锁其他卡片 | `RecommendationsView.vue` | FIXED_AND_PASS |
+| I03 | 推荐中心 | 两卡并发反馈、主操作、历史 | 已有多条推荐 | A/B 同时反馈；跨卡片连续触发主操作；打开/刷新历史 | 反馈卡片锁独立；主操作全局单锁；每动作一次写入和一次跳转；历史请求防重复 | 通过 | 通过 | `learning-recommendations: recommendation feedback locks...` | 反馈曾使用单一 busy；主操作 busy key 曾可被另一卡片覆盖 | `RecommendationsView.vue` | FIXED_AND_PASS |
 | J01 | 练习答题 | 课程、答案、提交、失败重试、下一题 | 已有题目 | 改答案；双击；中断一次网络并以相同 submission 重试 | 单次有效提交；结果/解析正确；切课清未提交状态 | 通过 | 通过 | `learning-recommendations: practice...` | 移动端长选项文本曾覆盖“下一题”点击区域 | `PracticeView.vue` | FIXED_AND_PASS |
 | K01 | 错题本 | 筛选、分页、详情、标记、移出、再次练习 | 已有错误作答 | 操作现有控件并刷新 | summary 与列表一致，锁有效，持久化且切课不残留 | 通过 | 通过 | `learning-recommendations: practice...` | 无新增生产问题 | — | PASS |
 | L01 | 掌握度 | 课程、刷新、筛选、排序、空状态 | 有尝试和 attempts=0 数据 | 操作现有控件并切课 | 只把真实尝试作为掌握记录；空状态和错误可恢复 | 通过 | 通过 | `learning-recommendations: practice...` | 无新增生产问题 | — | PASS |
@@ -77,6 +77,7 @@
 |---|---|---|---|---|---|
 | R17-P1-01 | P1 | 并发 401 可能重复清理、提示或导航，手动退出后的旧 401 可能误提示 | `session-expiry.ts`、`client.ts`、`auth.ts` | `concurrent business 401`、`stale 401 after logout` | FIXED_AND_PASS |
 | R17-P1-02 | P1 | 单一推荐 busy 状态不能安全支持两卡并发，先完成请求可能解除另一卡锁 | `RecommendationsView.vue` | `independent feedback locks` | FIXED_AND_PASS |
+| R17-P1-03 | P1 | A 卡片主操作等待反馈时 B 仍可点击并覆盖 busy key，导致跨卡片重复写入或导航 | `RecommendationsView.vue` | `recommendation feedback locks...` 定向 desktop/mobile | FIXED_AND_PASS |
 | R17-P2-01 | P2 | 注册协议默认勾选且确认密码/显隐证据不足 | `RegisterView.vue` | `register agreement` | FIXED_AND_PASS |
 | R17-P2-02 | P2 | AI 展示区固定动态指标没有真实数据来源 | `AuthShowcase.vue` | `dashboard shortcuts` | FIXED_AND_PASS |
 | R17-P2-03 | P2 | 日历周导航没有浏览器历史，eventId 直链不能完整恢复 | `CalendarView.vue` | `calendar navigation`、`calendar sync ICS` | FIXED_AND_PASS |
@@ -94,4 +95,4 @@
 | R17-P2-15 | P2 | 移动日历周导航溢出，dialog 子控件在触摸仿真下命中父 overlay | `CalendarView.vue`、`e2e/helpers/ui.ts` | `calendar navigation...` mobile | FIXED_AND_PASS |
 | R17-P2-16 | P2 | 移动周报日期 popper 遮挡创建按钮，E2E 未等待面板关闭 | `statistics-tasks-calendar.spec.ts` | `async task filters...` mobile | FIXED_AND_PASS |
 
-严重度统计：P0 = 0，P1 = 2，P2 = 16。每项均有修复文件、自动化用例和最终结果；没有以删除可见功能规避验收。
+严重度统计：P0 = 0，P1 = 3，P2 = 16。每项均有修复文件、自动化用例和最终结果；没有以删除可见功能规避验收。

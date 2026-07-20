@@ -174,15 +174,32 @@ test('recommendation feedback locks are per card, history refreshes, and primary
   const cards = page.locator('.recommend-card')
   await expect.poll(() => cards.count()).toBeGreaterThanOrEqual(2)
 
-  const writes: { key: string; action: string }[] = []
+  const writes: { recommendation_key: string; action: string }[] = []
+  let clickedMode: 'hold' | 'fail' = 'hold'
+  let releaseClicked: (() => void) | undefined
+  let markClickedStarted: (() => void) | undefined
+  const clickedStarted = new Promise<void>((resolve) => { markClickedStarted = resolve })
+  const clickedGate = new Promise<void>((resolve) => { releaseClicked = resolve })
   await page.route(`**/api/v1/courses/${course.id}/recommendations/feedback`, async (route) => {
-    const body = route.request().postDataJSON()
+    const body = route.request().postDataJSON() as { recommendation_key: string; action: string }
     writes.push(body)
     if (body.action === 'clicked') {
+      if (clickedMode === 'hold') {
+        markClickedStarted?.()
+        await clickedGate
+        await route.continue()
+        return
+      }
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"FEEDBACK_TEMPORARY"}' })
       return
     }
     await new Promise((resolve) => setTimeout(resolve, body.action === 'saved' ? 250 : 400))
+    await route.continue()
+  })
+  let historyGets = 0
+  await page.route(`**/api/v1/courses/${course.id}/recommendations/history**`, async (route) => {
+    historyGets += 1
+    await new Promise((resolve) => setTimeout(resolve, 250))
     await route.continue()
   })
   const first = cards.nth(0)
@@ -194,17 +211,95 @@ test('recommendation feedback locks are per card, history refreshes, and primary
   expect(writes.filter((item) => item.action === 'saved')).toHaveLength(1)
   expect(writes.filter((item) => item.action === 'skipped')).toHaveLength(1)
 
-  await page.getByRole('button', { name: '推荐历史' }).click()
-  await expect(page.getByRole('dialog', { name: '推荐历史' })).toBeVisible()
+  const historyButton = page.getByRole('button', { name: '推荐历史' })
+  await historyButton.evaluate((button) => {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  const historyDialog = page.getByRole('dialog', { name: '推荐历史' })
+  await expect(historyDialog).toBeVisible()
+  await expect.poll(() => historyGets).toBe(1)
   await expect(page.getByText('有帮助 1')).toBeVisible()
   await expect(page.getByText('不感兴趣 1')).toBeVisible()
-  await page.getByRole('button', { name: '刷新历史' }).click()
-  await page.getByRole('dialog', { name: '推荐历史' }).locator('.el-dialog__headerbtn').click()
+  const historyRefresh = page.getByRole('button', { name: '刷新历史' })
+  await historyRefresh.evaluate((button) => {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await expect.poll(() => historyGets).toBe(2)
+  await historyDialog.locator('.el-dialog__headerbtn').click()
 
-  const actionButton = first.locator('.card-actions .el-button--primary')
-  const destination = await actionButton.textContent()
-  await actionButton.dblclick()
-  await expect(page).not.toHaveURL(/\/recommendations/)
+  const actionButtons = page.locator('.recommend-card .card-actions .el-button--primary')
+  await expect.poll(() => actionButtons.count()).toBeGreaterThanOrEqual(2)
+  const expectedPath: Record<string, RegExp> = {
+    进入今日任务: /\/today(?:\?|$)/,
+    查看掌握度: /\/mastery(?:\?|$)/,
+    开始课程问答: /\/chat(?:\?|$)/,
+    创建学习计划: /\/plan(?:\?|$)/,
+    上传课程资料: /\/upload(?:\?|$)/,
+    前往任务中心: /\/tasks(?:\?|$)/,
+  }
+  const firstActionLabel = (await actionButtons.nth(0).innerText()).trim()
+  const firstDestination = expectedPath[firstActionLabel]
+  if (!firstDestination) throw new Error(`Unexpected recommendation action: ${firstActionLabel}`)
+  let actionNavigations = 0
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame() && !new URL(frame.url()).pathname.endsWith('/recommendations')) {
+      actionNavigations += 1
+    }
+  })
+  await actionButtons.evaluateAll((buttons) => {
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await clickedStarted
+  for (let index = 0; index < await actionButtons.count(); index += 1) {
+    await expect(actionButtons.nth(index)).toBeDisabled()
+  }
+  releaseClicked?.()
+  await expect(page).toHaveURL(firstDestination)
+  expect(actionNavigations).toBe(1)
   expect(writes.filter((item) => item.action === 'clicked')).toHaveLength(1)
-  expect(destination).toBeTruthy()
+
+  await page.goto(`/recommendations?courseId=${course.id}`)
+  await expect(page).toHaveURL(/\/recommendations/)
+  await expect.poll(() => actionButtons.count()).toBeGreaterThanOrEqual(2)
+  actionNavigations = 0
+  clickedMode = 'fail'
+  const failedActionLabel = (await actionButtons.nth(0).innerText()).trim()
+  const failedDestination = expectedPath[failedActionLabel]
+  if (!failedDestination) throw new Error(`Unexpected recommendation action: ${failedActionLabel}`)
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __round17WarningCount?: number
+      __round17WarningObserver?: MutationObserver
+    }
+    state.__round17WarningCount = 0
+    state.__round17WarningObserver?.disconnect()
+    state.__round17WarningObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (
+            node instanceof Element
+            && (node.matches('.el-message--warning') || node.querySelector('.el-message--warning'))
+          ) {
+            state.__round17WarningCount = (state.__round17WarningCount || 0) + 1
+          }
+        }
+      }
+    })
+    state.__round17WarningObserver.observe(document.body, { childList: true, subtree: true })
+  })
+  await actionButtons.evaluateAll((buttons) => {
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { __round17WarningCount?: number }).__round17WarningCount,
+  )).toBe(1)
+  await expect(page).toHaveURL(failedDestination)
+  expect(actionNavigations).toBe(1)
+  expect(writes.filter((item) => item.action === 'clicked')).toHaveLength(2)
 })

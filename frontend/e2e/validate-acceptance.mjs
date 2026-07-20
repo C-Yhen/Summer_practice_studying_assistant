@@ -36,6 +36,11 @@ for (const [label, value] of Object.entries(expected)) {
   }
 }
 
+const blockedCount = process.argv.includes('--simulate-blocked') ? counts.BLOCKED + 1 : counts.BLOCKED
+if (blockedCount !== 0) {
+  errors.push(`仍有 BLOCKED：${blockedCount}`)
+}
+
 if (errors.length) {
   console.error(errors.join('\n'))
   process.exit(1)

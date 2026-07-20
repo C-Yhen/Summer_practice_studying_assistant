@@ -348,3 +348,11 @@
 - 实际验证：`npm run build` 通过（保留既有大 chunk 警告）；完整 SQLite 后端 `112 passed, 3 skipped`；验收脚本通过。未运行 MCP 测试，因为本轮未修改或启动 MCP。
 - 未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。隔离容器、SQLite、上传、下载、截图、trace、Playwright 报告和 test-results 在结束前清理。
 - 未解决问题仅为明确排除的未来能力与既有前端大 chunk 警告；本轮不提前宣布正式通过，等待独立审查。
+
+### Round 17 最终小型补修：推荐主操作锁
+
+- 推荐主操作改为页面级全局单锁：任一卡片等待 `clicked` 反馈时，所有卡片主操作均禁用；课程、请求版本或页面生命周期变化后，旧操作不会继续跳转。反馈失败仍只跳转一次，逐卡片“有帮助/不感兴趣”锁保持不变。
+- 推荐历史入口和刷新增加函数级防重复，快速连续触发分别只产生一个初始 GET 和一个刷新 GET。
+- `validate:acceptance` 现在除校验汇总一致性外，还强制 `BLOCKED=0`，并通过内存模拟非零 BLOCKED 验证失败分支。
+- 本次只运行 `learning-recommendations` 中 1 个推荐锁测试函数：desktop 1/1、mobile 1/1，共 `2 passed`；验收脚本在当前 `BLOCKED=0` 时通过、模拟非零时按预期退出 1；`npm run build` 通过。
+- 没有重新运行完整 Playwright 矩阵，也没有运行后端测试；未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。

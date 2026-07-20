@@ -147,6 +147,8 @@ async function synchronizeRoute() {
     actionBusyKey.value = null
     history.value = null
     historyVisible.value = false
+    historyLoading.value = false
+    historyRefreshing.value = false
     historyRequestVersion += 1
   }
   await loadRecommendations()
@@ -193,6 +195,7 @@ function routeFor(item: CourseRecommendationItem) {
 
 async function refreshHistory(initial = false) {
   if (courseId.value === null) return
+  if (historyLoading.value || historyRefreshing.value) return
   const id = courseId.value
   const version = ++historyRequestVersion
   if (initial) historyLoading.value = true
@@ -204,26 +207,44 @@ async function refreshHistory(initial = false) {
     if (viewActive && version === historyRequestVersion) ElMessage.error(pageError(value, '推荐历史加载失败'))
   } finally {
     if (version === historyRequestVersion) {
-      historyLoading.value = false
-      historyRefreshing.value = false
+      if (initial) historyLoading.value = false
+      else historyRefreshing.value = false
     }
   }
 }
 
 async function act(item: CourseRecommendationItem) {
   const destination = routeFor(item)
-  if (!destination || actionBusyKey.value === item.recommendation_key) return
-  actionBusyKey.value = item.recommendation_key
+  if (!destination || actionBusyKey.value !== null) return
+  const key = item.recommendation_key
+  const sourceCourseId = item.course_id
+  const sourceRequestVersion = requestVersion
+  actionBusyKey.value = key
   try {
     try {
-      await recommendationApi.feedback(item.course_id, { recommendation_key: item.recommendation_key, action: 'clicked' })
+      await recommendationApi.feedback(sourceCourseId, { recommendation_key: key, action: 'clicked' })
     } catch (value) {
-      ElMessage.warning(pageError(value, '点击反馈未保存，仍可继续跳转'))
+      if (
+        viewActive
+        && requestVersion === sourceRequestVersion
+        && courseId.value === sourceCourseId
+        && actionBusyKey.value === key
+      ) {
+        ElMessage.warning(pageError(value, '点击反馈未保存，仍可继续跳转'))
+      }
+    }
+    if (
+      !viewActive
+      || requestVersion !== sourceRequestVersion
+      || courseId.value !== sourceCourseId
+      || actionBusyKey.value !== key
+    ) {
+      return
     }
     if (viewActive && historyVisible.value) void refreshHistory()
-    if (viewActive && courseId.value === item.course_id) await router.push(destination)
+    await router.push(destination)
   } finally {
-    if (actionBusyKey.value === item.recommendation_key) actionBusyKey.value = null
+    if (actionBusyKey.value === key) actionBusyKey.value = null
   }
 }
 
@@ -248,7 +269,7 @@ async function feedback(item: CourseRecommendationItem, action: RecommendationFe
 }
 
 async function openHistory() {
-  if (courseId.value === null) return
+  if (courseId.value === null || historyVisible.value || historyLoading.value) return
   historyVisible.value = true
   history.value = null
   await refreshHistory(true)
@@ -302,7 +323,7 @@ onBeforeUnmount(() => {
       <section v-if="result" class="recommend-hero"><div><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>{{ selectedCategory.label }}展示 {{ result.selection.returned }} 条<small>共 {{ result.selection.candidate_total }} 条可用建议</small></strong></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
       <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />
-      <section v-else-if="result" class="recommend-grid"><article v-for="item in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><details class="reason"><summary>推荐依据</summary><p>{{ item.reason }}</p><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} +{{ signal.contribution.toFixed(1) }}</el-tag></div><small>规则评分：{{ item.score.toFixed(1) }}</small></details><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" :loading="actionBusyKey === item.recommendation_key" :disabled="actionBusyKey === item.recommendation_key" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
+      <section v-else-if="result" class="recommend-grid"><article v-for="item in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><details class="reason"><summary>推荐依据</summary><p>{{ item.reason }}</p><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} +{{ signal.contribution.toFixed(1) }}</el-tag></div><small>规则评分：{{ item.score.toFixed(1) }}</small></details><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" :loading="actionBusyKey === item.recommendation_key" :disabled="actionBusyKey !== null" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
       <p v-if="result" class="rules-note">基于规则和真实学习记录生成 · 规则版本：{{ result.algorithm_version }}</p>
     </template>
     <el-dialog v-model="historyVisible" title="推荐历史" width="620px"><div v-loading="historyLoading"><div v-if="history" class="history-metrics"><el-tag>点击 {{ history.metrics.clicked }}</el-tag><el-tag>有帮助 {{ history.metrics.saved }}</el-tag><el-tag>不感兴趣 {{ history.metrics.skipped }}</el-tag><el-button size="small" :loading="historyRefreshing" :disabled="historyRefreshing" @click="refreshHistory()">刷新历史</el-button></div><el-empty v-if="history && !history.items.length" description="暂无真实反馈历史" /><el-timeline v-else><el-timeline-item v-for="item in history?.items || []" :key="item.record_id" :timestamp="item.created_at"><b>{{ item.title }}</b> · {{ item.category_label }} · {{ feedbackLabel(item.feedback_action) }}<p>{{ item.reason }}</p></el-timeline-item></el-timeline></div></el-dialog>
