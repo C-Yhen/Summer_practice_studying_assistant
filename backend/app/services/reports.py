@@ -275,7 +275,9 @@ def generate_weekly_report(db: Session, task: AsyncTask) -> dict:
     completed = sum(item["completed_tasks"] for item in by_day.values())
     course_breakdown = []
     for row in course_rows.values():
-        if row["learning_minutes"] or row["scheduled_tasks"]:
+        has_real_learning = seconds_by_course[row["course_id"]] > 0
+        has_active_tasks = row["scheduled_tasks"] > 0
+        if has_real_learning or has_active_tasks:
             row["completion_rate"] = round(row["completed_tasks"] / row["scheduled_tasks"], 4) if row["scheduled_tasks"] else 0.0
             course_breakdown.append(row)
     course_breakdown.sort(key=lambda item: (-item["learning_minutes"], -item["scheduled_tasks"], item["course_id"]))

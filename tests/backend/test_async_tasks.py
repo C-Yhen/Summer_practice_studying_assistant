@@ -65,7 +65,32 @@ def test_weekly_report_allocates_seconds_consistently_across_days_and_courses(
     assert sum(item["learning_minutes"] for item in report["course_breakdown"]) == 1
     assert report["daily"][0]["learning_minutes"] == 1
     assert report["daily"][1]["learning_minutes"] == 0
+    assert [(item["course_id"], item["learning_minutes"]) for item in report["course_breakdown"]] == [
+        (course_a, 1),
+        (course_b, 0),
+    ]
     assert report["study_days"] == 2
+
+
+def test_weekly_report_keeps_one_second_course_but_excludes_incomplete_only_course(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_a = _course(client, auth_headers, "One real second")
+    course_b = _course(client, auth_headers, "Incomplete only")
+    with client.app.state.database.session_factory() as db:
+        user_id = db.scalar(select(Course.owner_id).where(Course.id == course_a))
+        db.add_all([
+            LearningRecord(user_id=user_id, course_id=course_a, duration_seconds=1, completed=True, occurred_at=datetime(2026, 7, 10, 1, tzinfo=timezone.utc)),
+            LearningRecord(user_id=user_id, course_id=course_b, duration_seconds=60, completed=False, occurred_at=datetime(2026, 7, 10, 2, tzinfo=timezone.utc)),
+        ])
+        db.commit()
+    report = _weekly(client, auth_headers, start_date="2026-07-10", end_date="2026-07-10").json()["data"]["result_data"]
+    assert report["total_learning_minutes"] == 0
+    assert report["study_days"] == 1
+    assert [(item["course_id"], item["learning_minutes"]) for item in report["course_breakdown"]] == [
+        (course_a, 0),
+    ]
+    assert sum(item["learning_minutes"] for item in report["course_breakdown"]) == report["total_learning_minutes"]
 
 
 def test_weekly_report_counts_subminute_study_day_from_real_seconds(

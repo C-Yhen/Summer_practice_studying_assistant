@@ -320,3 +320,9 @@
 - Markdown 增加范围、时区、无生效计划任务文案和薄弱点百分比，兼容旧结构及异常持久化值；文件名仅接受合法 ISO 日期。
 - 前端按当前用户 IANA 时区生成默认日期并使用 date-only 运算，限制成功周报下载；显式 Mock 从同一份 `result_data` 渲染同构章节。
 - 实际验证：周报专项 `16 passed`；完整后端 `108 passed, 3 skipped`；前端 `npm run build` 通过。未启动 PostgreSQL、Redis、Celery 或 MCP；浏览器联调未执行。
+
+### 最终小型补修：不足一分钟课程明细
+
+- 课程明细改为依据真实完成学习秒数或生效计划任务纳入；不足一分钟且分配为 0 分钟的真实学习课程不再从 `course_breakdown` 消失。
+- 验证 31 秒双课程稳定保留 `1/0` 分钟两行、1 秒完成记录保留 0 分钟行，仅含 `completed=false` 记录的课程不纳入。
+- 实际验证：周报专项 `17 passed`；完整后端 `109 passed, 3 skipped`。本次未修改前端，因此未重新运行前端构建；未启动 PostgreSQL、Redis、Celery 或 MCP，浏览器联调未执行。
