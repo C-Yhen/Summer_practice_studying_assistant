@@ -251,10 +251,10 @@ watch([() => route.query.courseId, () => route.query.category], () => { void syn
   <div>
     <PageHeader title="推荐中心" eyebrow="NEXT STEP SUGGESTIONS" description="根据当前课程的任务、掌握度、资料和学习记录，建议下一步可以执行的事项。">
       <el-button plain :disabled="courseId === null" @click="openHistory"><el-icon><Star /></el-icon>推荐历史</el-button>
-      <el-button type="primary" :loading="loading" :disabled="courseId === null" @click="loadRecommendations"><el-icon><Refresh /></el-icon>刷新推荐</el-button>
+      <el-button type="primary" :loading="loading" :disabled="loading || courseId === null" @click="loadRecommendations"><el-icon><Refresh /></el-icon>刷新推荐</el-button>
     </PageHeader>
     <div v-if="coursesLoading && !courses.length" class="loading"><el-skeleton :rows="4" animated /></div>
-    <el-alert v-else-if="courseLoadError" type="error" show-icon :closable="false" :title="courseLoadError" class="page-alert"><template #default><el-button text @click="retryCourses">重新加载课程</el-button></template></el-alert>
+    <el-alert v-else-if="courseLoadError" type="error" show-icon :closable="false" :title="courseLoadError" class="page-alert"><template #default><el-button text :loading="coursesLoading" :disabled="coursesLoading" @click="retryCourses">重新加载课程</el-button></template></el-alert>
     <el-empty v-else-if="!courses.length" description="请先创建课程"><el-button type="primary" @click="router.push({ name: 'courses' })">前往课程列表</el-button></el-empty>
     <template v-else>
       <div class="toolbar">
@@ -266,7 +266,7 @@ watch([() => route.query.courseId, () => route.query.category], () => { void syn
         </el-radio-group>
       </div>
       <el-alert v-if="routeError" type="error" show-icon :closable="false" :title="routeError" class="page-alert"><template #default><el-button text @click="selectCourse(courses[0]?.id || null)">切换到可用课程</el-button></template></el-alert>
-      <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
+      <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text :loading="loading" :disabled="loading" @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
       <section v-if="result" class="recommend-hero"><div><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>{{ selectedCategory.label }}展示 {{ result.selection.returned }} 条<small>共 {{ result.selection.candidate_total }} 条可用建议</small></strong></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
       <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />

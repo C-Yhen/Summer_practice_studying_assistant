@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { getApiErrorMessage } from '@/api/client'
 import { courseApi } from '@/api/services'
@@ -28,6 +28,7 @@ const emit = defineEmits<{
 
 const auth = useAuthStore()
 const inputRef = ref<HTMLInputElement>()
+const resultListRef = ref<HTMLElement>()
 const query = ref('')
 const courses = ref<CourseListItem[]>([])
 const coursesLoadedForUser = ref<number | null>(null)
@@ -91,6 +92,19 @@ function resetCourseCache() {
   loadingCourses.value = false
 }
 
+function resetSearchState() {
+  resetCourseCache()
+  query.value = ''
+  activeIndex.value = 0
+}
+
+function scrollActiveResultIntoView() {
+  void nextTick(() => {
+    const active = resultListRef.value?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
+    active?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
 async function loadCourses(force = false) {
   const userId = auth.user?.id
   if (!userId) {
@@ -140,19 +154,27 @@ function chooseHighlighted() {
   choose(results.value[activeIndex.value])
 }
 
-watch(() => auth.user?.id, resetCourseCache)
+watch(() => auth.user?.id, resetSearchState)
 watch(() => props.open, (isOpen) => {
   if (isOpen) {
-    activeIndex.value = 0
+    resetSearchState()
     focusInput()
-    void loadCourses()
+    void loadCourses(true)
   } else {
-    requestVersion += 1
+    resetSearchState()
   }
 })
 watch(results, (currentResults) => {
   if (activeIndex.value >= currentResults.length) activeIndex.value = 0
 })
+watch(activeKey, scrollActiveResultIntoView)
+
+function handleSessionExpired() {
+  resetSearchState()
+}
+
+onMounted(() => window.addEventListener('studypilot:session-expired', handleSessionExpired))
+onBeforeUnmount(() => window.removeEventListener('studypilot:session-expired', handleSessionExpired))
 
 defineExpose({ focusInput })
 </script>
@@ -183,7 +205,7 @@ defineExpose({ focusInput })
         <kbd>Esc</kbd>
       </div>
 
-      <div class="result-list" role="listbox" aria-label="搜索结果">
+      <div ref="resultListRef" class="result-list" role="listbox" aria-label="搜索结果">
         <section v-if="functionResults.length" class="result-group">
           <h3>功能入口</h3>
           <button

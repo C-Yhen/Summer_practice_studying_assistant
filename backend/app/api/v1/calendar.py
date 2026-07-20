@@ -259,6 +259,10 @@ def _plan_items(db: DBSession, user_id: int, request: CalendarPlanSyncRequest, t
     for task, course in rows:
         local_start = cursors.setdefault(task.scheduled_date, datetime.combine(task.scheduled_date, request.daily_start_time, tzinfo=zone))
         local_end = local_start + timedelta(minutes=task.estimated_minutes)
+        for local_value in (local_start, local_end):
+            round_trip = local_value.astimezone(timezone.utc).astimezone(zone)
+            if round_trip.replace(tzinfo=None) != local_value.replace(tzinfo=None):
+                _fail(422, "INVALID_LOCAL_TIME")
         status, reason, conflict_data, existing_id = "ready", None, None, None
         existing = db.scalar(select(CalendarEvent).where(CalendarEvent.user_id == user_id, CalendarEvent.study_task_id == task.id))
         if existing: status, reason, existing_id = "already_synced", "任务已有本地日历事件", existing.id

@@ -251,6 +251,77 @@ def test_plan_preview_timezone_confirm_and_repeat_are_idempotent(
     assert _event_count(client) == before + 2
 
 
+def test_plan_preview_rejects_nonexistent_dst_local_time(
+    client: TestClient, auth_headers: dict
+):
+    user_id = _user_id(client)
+    course_id = _course(client, auth_headers, "DST boundary")
+    with client.app.state.database.session_factory() as db:
+        user = db.get(User, user_id)
+        user.timezone = "America/New_York"
+        plan = StudyPlan(
+            user_id=user_id,
+            course_id=course_id,
+            goal="DST boundary",
+            start_date=date(2026, 3, 8),
+            end_date=date(2026, 3, 8),
+            active_version=1,
+            status="active",
+        )
+        db.add(plan)
+        db.flush()
+        version = StudyPlanVersion(plan_id=plan.id, version=1, status="active")
+        db.add(version)
+        db.flush()
+        db.add(StudyTask(
+            plan_version_id=version.id,
+            user_id=user_id,
+            course_id=course_id,
+            scheduled_date=date(2026, 3, 8),
+            title="Nonexistent local time",
+            task_type="review",
+            estimated_minutes=30,
+            priority=1,
+            status="todo",
+        ))
+        db.commit()
+
+    response = client.post(
+        "/api/v1/calendar/plan-sync/preview",
+        headers=auth_headers,
+        json={
+            "start_date": "2026-03-08",
+            "end_date": "2026-03-08",
+            "course_id": course_id,
+            "daily_start_time": "02:30",
+            "gap_minutes": 10,
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "INVALID_LOCAL_TIME"
+
+
+def test_plan_preview_keeps_regular_shanghai_local_time(
+    client: TestClient, auth_headers: dict
+):
+    user_id = _user_id(client)
+    course_id = _course(client, auth_headers, "Shanghai boundary")
+    _active_tasks(client, user_id, course_id, [{"title": "Regular local time"}])
+    response = client.post(
+        "/api/v1/calendar/plan-sync/preview",
+        headers=auth_headers,
+        json={
+            "start_date": "2026-07-20",
+            "end_date": "2026-07-26",
+            "course_id": course_id,
+            "daily_start_time": "02:30",
+            "gap_minutes": 10,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["start_at"] == "2026-07-19T18:30:00+00:00"
+
+
 def test_plan_preview_only_uses_active_version_todo_tasks(
     client: TestClient, auth_headers: dict
 ):

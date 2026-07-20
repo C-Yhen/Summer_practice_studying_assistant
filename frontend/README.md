@@ -80,3 +80,14 @@ VITE_ENABLE_MOCK=true
 4. 展示 AI 调整计划的原因和 `v2 → v3` 差异，再演示用户确认机制。
 5. 完成一道练习，展示错题分析、掌握度变化和可解释推荐。
 6. 在日历页预览事件，强调 MCP 只读调用可自动执行，写操作必须经用户确认且全部记录日志。
+
+## 可见功能 E2E 验收
+
+仓库包含桌面端与移动端 Playwright 验收套件。它会启动一个短生命周期的 SQLite 后端容器和本地 Vite 服务，不依赖 PostgreSQL、Redis 或 Celery，也不会写入日常开发数据库。
+
+```powershell
+cd frontend
+powershell -ExecutionPolicy Bypass -File .\e2e\run-isolated.ps1
+```
+
+运行前需要 Docker Desktop 可用，并已安装前端依赖和系统 Chrome。测试完成后，脚本会移除临时后端容器和 Playwright 输出目录。各可见功能的实际覆盖、排除项与阻塞项记录在 `docs/VISIBLE_FUNCTION_ACCEPTANCE.md`。

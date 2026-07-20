@@ -1,5 +1,6 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios'
 import type { ApiEnvelope } from '@/types'
+import { notifySessionExpired } from '@/api/session-expiry'
 
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
@@ -118,7 +119,16 @@ apiClient.interceptors.request.use((config) => {
 
 apiClient.interceptors.response.use(
   (response) => response,
-  (error: AxiosError) => Promise.reject(error),
+  (error: AxiosError) => {
+    const requestUrl = error.config?.url || ''
+    const authorization = error.config?.headers?.Authorization
+    const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/register')
+    if (error.response?.status === 401 && authorization && !isAuthRequest) {
+      const redirect = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      void notifySessionExpired(redirect)
+    }
+    return Promise.reject(error)
+  },
 )
 
 export const mockEnabled = import.meta.env.VITE_ENABLE_MOCK === 'true'

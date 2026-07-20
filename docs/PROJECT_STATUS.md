@@ -326,3 +326,12 @@
 - 课程明细改为依据真实完成学习秒数或生效计划任务纳入；不足一分钟且分配为 0 分钟的真实学习课程不再从 `course_breakdown` 消失。
 - 验证 31 秒双课程稳定保留 `1/0` 分钟两行、1 秒完成记录保留 0 分钟行，仅含 `completed=false` 记录的课程不纳入。
 - 实际验证：周报专项 `17 passed`；完整后端 `109 passed, 3 skipped`。本次未修改前端，因此未重新运行前端构建；未启动 PostgreSQL、Redis、Celery 或 MCP，浏览器联调未执行。
+
+## Round 17：可见交互验收与关键恢复补修（等待独立审查）
+
+- 建立桌面端与移动端 Playwright 隔离验收套件：使用短生命周期 SQLite 后端容器、真实前端路由和真实 API，不污染日常开发数据库；完整清单见 `docs/VISIBLE_FUNCTION_ACCEPTANCE.md`。
+- 补修带认证请求收到 401 后的全局会话清理与登录重定向；修复全局搜索跨用户缓存、长列表键盘滚动、推荐重复请求锁、日历标题和登录页无效可点击入口。
+- 日历计划同步拒绝 DST 不存在的本地时间，并增加合法非 DST 时区对照测试。
+- 实际验证：Playwright 桌面端与移动端共 `18 passed`；日历 DST 专项 `2 passed, 11 deselected`；相关后端 `85 passed, 3 skipped`；完整后端 `111 passed, 3 skipped`；前端 `npm run build` 通过。
+- 受控应用内浏览器实例不可用；改由仓库 Playwright 套件使用系统 Chrome 自动验收。未启动 PostgreSQL、Redis、Celery 或 MCP。
+- 未解决：验收清单中仍有 14 组未完成控件级实操，主要包括下载文件内容、完整 A/B 用户隔离故事、任务完成/反馈/历史、统计与日历全交互；这些项目保持 `BLOCKED`，未宣称通过。
