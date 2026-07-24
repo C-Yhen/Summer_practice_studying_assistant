@@ -450,6 +450,14 @@ class CourseRecommendationFeedback(BaseModel):
     action: Literal["clicked", "saved", "skipped"]
 
 
+class UserBehaviorTrack(BaseModel):
+    action: str = Field(min_length=1, max_length=32)
+    target_type: str = Field(min_length=1, max_length=32)
+    target_id: str | None = None
+    dwell_seconds: int = Field(default=0, ge=0)
+    weight: float = Field(default=1.0, ge=0.1, le=10.0)
+
+
 class AsyncTaskCreate(BaseModel):
     task_type: str = Field(min_length=1, max_length=64)
     input_data: dict[str, Any] = Field(default_factory=dict)
@@ -532,3 +540,11 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+
+
+class AIRuntimeStatus(BaseModel):
+    provider: str
+    chat_model: str
+    chat_mode: Literal["remote", "mock"]
+    embedding_mode: Literal["remote", "local"]
+    is_mock: bool

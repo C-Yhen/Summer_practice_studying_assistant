@@ -54,12 +54,21 @@ class MockLLMProvider(LLMProvider):
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, fallback: LLMProvider | None = None) -> None:
         self.settings = settings
-        self.headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+        self.fallback = fallback
+        self.headers = {
+            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Content-Type": "application/json",
+        }
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        if not self.settings.llm_chat_model:
+            if self.fallback is None:
+                raise RuntimeError("chat model is not configured")
+            return await self.fallback.chat(messages, **kwargs)
+        timeout = kwargs.pop("_timeout", 180)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
                 headers=self.headers,
@@ -69,22 +78,60 @@ class OpenAICompatibleProvider(LLMProvider):
             return response.json()["choices"][0]["message"]["content"]
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self.settings.llm_embedding_model:
+            if self.fallback is None:
+                raise RuntimeError("embedding model is not configured")
+            return await self.fallback.embed(texts)
+        if not texts:
+            return []
+        batch_size = max(1, self.settings.llm_embedding_batch_size)
+        embeddings: list[list[float]] = []
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{self.settings.llm_base_url.rstrip('/')}/embeddings",
-                headers=self.headers,
-                json={"model": self.settings.llm_embedding_model, "input": texts},
-            )
-            response.raise_for_status()
-            return [item["embedding"] for item in response.json()["data"]]
+            for start in range(0, len(texts), batch_size):
+                response = await client.post(
+                    f"{self.settings.llm_base_url.rstrip('/')}/embeddings",
+                    headers=self.headers,
+                    json={
+                        "model": self.settings.llm_embedding_model,
+                        "input": texts[start : start + batch_size],
+                    },
+                )
+                response.raise_for_status()
+                batch = response.json()["data"]
+                if len(batch) != min(batch_size, len(texts) - start):
+                    raise RuntimeError("embedding provider returned an unexpected item count")
+                embeddings.extend(item["embedding"] for item in batch)
+        return embeddings
+
+
+def llm_runtime_status(settings: Settings) -> dict[str, str | bool]:
+    provider = settings.llm_provider.strip().lower()
+    is_mock = provider == "mock"
+    return {
+        "provider": provider,
+        "chat_model": settings.llm_chat_model if not is_mock else "",
+        "chat_mode": "mock" if is_mock else "remote",
+        "embedding_mode": "local" if is_mock or not settings.llm_embedding_model else "remote",
+        "is_mock": is_mock,
+    }
 
 
 def get_llm_provider(settings: Settings) -> LLMProvider:
-    if (
-        settings.llm_provider != "mock"
-        and settings.llm_base_url
-        and settings.llm_api_key
-        and settings.llm_embedding_model
-    ):
-        return OpenAICompatibleProvider(settings)
-    return MockLLMProvider(settings.embedding_dimension)
+    fallback = MockLLMProvider(settings.embedding_dimension)
+    provider = settings.llm_provider.strip().lower()
+    if provider == "mock":
+        return fallback
+    if not provider:
+        raise ValueError("LLM_PROVIDER must be configured explicitly")
+    missing = [
+        name
+        for name, value in (
+            ("LLM_BASE_URL", settings.llm_base_url),
+            ("LLM_API_KEY", settings.llm_api_key),
+            ("LLM_CHAT_MODEL", settings.llm_chat_model),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError(f"{provider} provider is missing required settings: {', '.join(missing)}")
+    return OpenAICompatibleProvider(settings, fallback=fallback)

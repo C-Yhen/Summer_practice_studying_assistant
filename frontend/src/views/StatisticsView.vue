@@ -100,7 +100,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="学习统计" eyebrow="LEARNING ANALYTICS" description="基于真实学习记录、计划任务与练习结果的统计回顾。">
+    <PageHeader title="学习统计" eyebrow="学习进度" description="基于真实学习记录、计划任务与练习结果的统计回顾。">
       <el-select v-model="days" style="width:130px" :disabled="loading" @change="changeFilters"><el-option label="最近 7 天" :value="7"/><el-option label="最近 30 天" :value="30"/></el-select>
       <el-select v-model="courseId" clearable placeholder="全部课程" style="width:180px" :disabled="loading" @change="changeFilters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id"/></el-select>
       <el-button plain :loading="exporting" :disabled="!overview" @click="exportCsv"><el-icon><Download/></el-icon>导出统计</el-button>

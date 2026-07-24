@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     sync_document_processing: bool = True
     upload_dir: Path = Path("./backend/storage/uploads")
     max_upload_bytes: int = 10 * 1024 * 1024
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_language: str = "chi_sim+eng"
+    pdf_ocr_dpi: int = 300
+    pdf_ocr_min_text_chars: int = 80
     rag_top_k: int = 5
     embedding_dimension: int = 1024
     llm_provider: str = "mock"
@@ -26,6 +30,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_chat_model: str = ""
     llm_embedding_model: str = ""
+    llm_embedding_batch_size: int = 20
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"

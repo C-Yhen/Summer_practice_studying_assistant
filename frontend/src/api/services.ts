@@ -1,7 +1,8 @@
-import { ApiEnvelopeError, apiClient, isApiError, mockEnabled, unwrapApiResponse, withMockFallback } from './client'
+import { aiApiClient, ApiEnvelopeError, apiClient, isApiError, mockEnabled, unwrapApiResponse, withMockFallback } from './client'
 import { asyncTasks, courses, todayTasks } from '@/data/mock'
 import { normalizeWeeklyReport } from '@/types'
 import type {
+  AIRuntimeStatus,
   AsyncTask,
   AsyncTaskListParams,
   AsyncTaskListResponse,
@@ -891,6 +892,19 @@ export const asyncTaskApi = {
 }
 
 export const chatApi = {
+  async runtimeStatus(): Promise<AIRuntimeStatus> {
+    if (mockEnabled) {
+      return {
+        provider: 'frontend-mock',
+        chat_model: '',
+        chat_mode: 'mock',
+        embedding_mode: 'local',
+        is_mock: true,
+      }
+    }
+    return unwrapApiResponse<AIRuntimeStatus>(await apiClient.get('/system/ai-status'))
+  },
+
   async listSessions(courseId: number): Promise<ChatSessionListResponse> {
     if (mockEnabled) {
       await mockDelay()
@@ -978,7 +992,7 @@ export const chatApi = {
       session.updated_at = timestamp
       return { message_id: messages[messages.length - 1].id, answer, sufficient_evidence: sufficient, citations }
     }
-    return parseChatAnswer(unwrapApiResponse<unknown>(await apiClient.post(`/chat-sessions/${encodeURIComponent(sessionId)}/messages`, payload)))
+    return parseChatAnswer(unwrapApiResponse<unknown>(await aiApiClient.post(`/chat-sessions/${encodeURIComponent(sessionId)}/messages`, payload)))
   },
 }
 
@@ -1040,7 +1054,7 @@ export const planApi = {
       })
       return { async_task_id: `mock-plan-task-${planId}`, plan_id: planId, course_id: courseId, goal: payload.goal, start_date: payload.start_date, end_date: payload.end_date, expected_base_version: 0, candidate_version: version, confirmation_token: token }
     }
-    return parseGeneratedPlan(unwrapApiResponse<unknown>(await apiClient.post(`/courses/${courseId}/study-plans/generate`, payload)))
+    return parseGeneratedPlan(unwrapApiResponse<unknown>(await aiApiClient.post(`/courses/${courseId}/study-plans/generate`, payload)))
   },
 
   async confirm(planId: number, version: number, payload: PlanConfirmRequest): Promise<PlanConfirmResponse> {
@@ -1200,7 +1214,7 @@ export const practiceApi = {
       }
       return { created_count: 0, existing_count: existing.length, total: existing.length, reason: null }
     }
-    return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await apiClient.post(`/courses/${courseId}/practice/questions/bootstrap`))
+    return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await aiApiClient.post(`/courses/${courseId}/practice/questions/bootstrap`))
   },
   async questions(courseId: number, mode: 'all'|'wrong' = 'all') {
     if (mockEnabled) {

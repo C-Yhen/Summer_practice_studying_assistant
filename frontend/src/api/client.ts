@@ -7,6 +7,12 @@ export const apiClient = axios.create({
   timeout: 8000,
 })
 
+/** 用于 AI 调用的客户端，超时 120 秒（聊天 / 计划生成等耗时操作） */
+export const aiApiClient = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  timeout: 120_000,
+})
+
 export class ApiEnvelopeError extends Error {
   constructor(
     message: string,
@@ -118,6 +124,34 @@ apiClient.interceptors.request.use((config) => {
 })
 
 apiClient.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => {
+    const requestUrl = error.config?.url || ''
+    const headers = error.config?.headers
+    const authorization = typeof headers?.get === 'function'
+      ? headers.get('Authorization')
+      : headers?.Authorization
+    const storedToken = window.sessionStorage.getItem('studypilot_token')
+    const isCurrentSession = Boolean(storedToken && authorization === `Bearer ${storedToken}`)
+    const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/register')
+    if (error.response?.status === 401 && isCurrentSession && !isAuthRequest) {
+      const redirect = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      void notifySessionExpired(redirect).catch(() => undefined)
+    }
+    return Promise.reject(error)
+  },
+)
+
+// ---- aiApiClient 复用相同的拦截器 ----
+
+aiApiClient.interceptors.request.use((config) => {
+  const token = sessionStorage.getItem('studypilot_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  config.headers['X-Client-Version'] = 'frontend-mvp/0.1'
+  return config
+})
+
+aiApiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
     const requestUrl = error.config?.url || ''

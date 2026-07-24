@@ -15,6 +15,9 @@ from backend.app.api.v1 import (
     recommendations,
     statistics,
 )
+from backend.app.dependencies import AppSettings
+from backend.app.providers.llm import llm_runtime_status
+from backend.app.responses import ok
 from backend.app.schemas import HealthResponse
 
 api_router = APIRouter()
@@ -36,3 +39,8 @@ api_router.include_router(calendar.router)
 @api_router.get("/health", response_model=HealthResponse, tags=["system"])
 def api_health() -> HealthResponse:
     return HealthResponse(status="ok", service="studypilot-api", version="0.1.0")
+
+
+@api_router.get("/system/ai-status", tags=["system"])
+def ai_status(settings: AppSettings) -> dict:
+    return ok(llm_runtime_status(settings))

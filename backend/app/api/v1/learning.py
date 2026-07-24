@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from backend.app.api.v1.courses import _owned_course
-from backend.app.dependencies import CurrentUser, DBSession
+from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     KnowledgeMastery,
     KnowledgePoint,
@@ -15,6 +15,8 @@ from backend.app.models import (
 )
 from backend.app.responses import ok
 from backend.app.schemas import LearningRecordCreate
+from backend.app.services.ai_mastery import assess_all_masteries as ai_assess
+from backend.app.providers.llm import get_llm_provider
 
 router = APIRouter(tags=["learning"])
 
@@ -84,7 +86,10 @@ def list_learning_records(course_id: int, db: DBSession, current_user: CurrentUs
 
 
 @router.get("/courses/{course_id}/knowledge-mastery")
-def knowledge_mastery(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+async def knowledge_mastery(
+    course_id: int, db: DBSession, current_user: CurrentUser,
+    settings: AppSettings, ai: bool = False,
+) -> dict:
     _owned_course(db, course_id, current_user.id)
     points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
     mastery_by_point = {item.knowledge_point_id: item for item in db.scalars(select(KnowledgeMastery).where(KnowledgeMastery.user_id == current_user.id, KnowledgeMastery.course_id == course_id))}
@@ -100,4 +105,19 @@ def knowledge_mastery(course_id: int, db: DBSession, current_user: CurrentUser) 
             "trend": None,
             "has_record": mastery is not None,
         })
-    return ok({"items": items})
+
+    # ---- AI holistic assessment (optional) ----
+    ai_assessments = None
+    if ai:
+        llm_provider = get_llm_provider(settings)
+        is_mock = settings.llm_provider.strip().lower() == "mock"
+        if not is_mock:
+            try:
+                ai_assessments = await ai_assess(db, llm_provider, user_id=current_user.id, course_id=course_id, limit=3)
+            except Exception:
+                pass
+
+    result = {"items": items}
+    if ai_assessments:
+        result["ai_assessments"] = ai_assessments
+    return ok(result)

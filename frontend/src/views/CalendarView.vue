@@ -300,7 +300,7 @@ onMounted(async () => {
 
 <template>
   <div>
-    <PageHeader title="学习日历" eyebrow="LEARNING CALENDAR" description="将当前活动学习计划同步到 StudyPilot 本地日历，并可导出 ICS 文件。">
+    <PageHeader title="学习日历" eyebrow="计划日程" description="将当前活动学习计划同步到 StudyPilot 本地日历，并可导出 ICS 文件。">
       <el-select :model-value="courseId" clearable placeholder="全部课程" @change="onCourseChange"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id"/></el-select>
       <el-button plain :loading="exportingIcs" :disabled="loadingEvents" @click="exportIcs"><el-icon><Download/></el-icon>导出 ICS</el-button>
       <el-button type="primary" :disabled="loadingEvents || !courses.length" @click="syncVisible=true"><el-icon><Calendar/></el-icon>同步学习计划</el-button>

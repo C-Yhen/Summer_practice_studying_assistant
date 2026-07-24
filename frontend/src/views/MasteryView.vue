@@ -115,7 +115,7 @@ watch(() => route.fullPath, () => {
 
 <template>
   <div>
-    <PageHeader title="知识点掌握度" eyebrow="MASTERY MAP" :description="selectedCourse ? `只展示「${selectedCourse.name}」的真实掌握记录` : '按课程查看真实掌握记录'">
+    <PageHeader title="知识点掌握度" eyebrow="学习掌握情况" :description="selectedCourse ? `只展示「${selectedCourse.name}」的真实掌握记录` : '按课程查看真实掌握记录'">
       <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" style="width:240px" @change="selectCourse">
         <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
       </el-select>

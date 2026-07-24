@@ -196,6 +196,49 @@ def test_failed_document_parse_records_consistent_error_state(
         assert version.error_message == "DOCUMENT_TEXT_EMPTY"
 
 
+def test_reparse_allocates_after_failed_version_without_reusing_its_number(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Document reparse retry")
+    uploaded = client.post(
+        f"/api/v1/courses/{course_id}/documents",
+        headers=auth_headers,
+        files={"file": ("retry.txt", b"Valid material for a retry.", "text/plain")},
+    )
+    assert uploaded.status_code == 201
+    document_id = uploaded.json()["data"]["document"]["id"]
+
+    with client.app.state.database.session_factory() as db:
+        document = db.get(Document, document_id)
+        assert document is not None and document.current_version == 1
+        db.add(
+            DocumentVersion(
+                document_id=document_id,
+                version_no=2,
+                file_path=document.file_path,
+                status="failed",
+                error_message="simulated provider failure",
+            )
+        )
+        db.commit()
+
+    reparsed = client.post(
+        f"/api/v1/documents/{document_id}/reparse", headers=auth_headers
+    )
+    assert reparsed.status_code == 200
+    assert reparsed.json()["data"]["version"] == 3
+
+    versions = client.get(
+        f"/api/v1/documents/{document_id}/versions", headers=auth_headers
+    )
+    assert versions.status_code == 200
+    items = versions.json()["data"]["items"]
+    assert [item["version"] for item in items] == [3, 2, 1]
+    assert items[0]["status"] == "ready"
+    assert items[0]["is_current"] is True
+    assert items[1]["status"] == "failed"
+
+
 def test_document_task_detail_requires_the_matching_document_resource_chain(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

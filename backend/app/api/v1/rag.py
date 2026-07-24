@@ -126,8 +126,8 @@ async def ask_question(
     session = _owned_session(db, session_id, current_user.id)
     document_ids = payload.document_ids or session.document_ids
     document_ids = _validated_document_ids(db, session.course_id, document_ids)
-    provider = get_llm_provider(settings)
     try:
+        provider = get_llm_provider(settings)
         sources = await retrieve(
             db,
             provider,
@@ -138,7 +138,7 @@ async def ask_question(
         )
         mode = payload.mode or session.mode
         answer, sufficient = await answer_from_sources(provider, payload.question, sources, mode)
-    except RagProviderError:
+    except (RagProviderError, ValueError):
         db.rollback()
         raise HTTPException(status_code=503, detail="RAG_PROVIDER_UNAVAILABLE") from None
     citations = [{"source_id": f"S{index}", **source} for index, source in enumerate(sources, 1)] if sufficient else []
@@ -226,6 +226,6 @@ async def search_material(
             document_ids=document_ids,
             top_k=payload.top_k,
         )
-    except RagProviderError:
+    except (RagProviderError, ValueError):
         raise HTTPException(status_code=503, detail="RAG_PROVIDER_UNAVAILABLE") from None
     return ok({"items": sources, "sufficient_evidence": bool(sources and sources[0]["score"] >= 0.08)})

@@ -197,7 +197,7 @@ watch(() => [route.query.courseId, route.query.date], () => void initialize(), {
 
 <template>
   <div class="today-page">
-    <PageHeader title="今日任务" eyebrow="ACTIVE PLAN TASKS" :description="`${displayDate} · 仅展示当前生效计划版本中的真实任务`">
+    <PageHeader title="今日任务" eyebrow="今日学习重点" :description="`${displayDate} · 仅展示当前生效计划版本中的真实任务`">
       <el-input v-model="targetDate" type="date" style="width:155px" :disabled="tasksLoading" @change="changeDate" />
       <el-select :model-value="selectedCourseId" placeholder="全部课程" :loading="coursesLoading" style="width:220px" @change="changeCourse">
         <el-option label="全部课程" value="" />

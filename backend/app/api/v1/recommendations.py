@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from backend.app.api.v1.courses import _owned_course
-from backend.app.dependencies import CurrentUser, DBSession
+from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     Course,
     Document,
@@ -18,6 +18,7 @@ from backend.app.models import (
     StudyPlan,
     StudyPlanVersion,
     StudyTask,
+    UserBehavior,
 )
 from backend.app.recommendation.engine import (
     ALGORITHM_VERSION,
@@ -31,8 +32,10 @@ from backend.app.recommendation.engine import (
     select_diverse_recommendations,
 )
 from backend.app.responses import ok
-from backend.app.schemas import CourseRecommendationFeedback
+from backend.app.schemas import CourseRecommendationFeedback, UserBehaviorTrack
+from backend.app.services.ai_recommend import generate_recommendations as ai_recommend
 from backend.app.services.timezones import local_date_range_utc, resolve_user_timezone
+from backend.app.providers.llm import get_llm_provider
 
 router = APIRouter(tags=["recommendations"])
 
@@ -237,8 +240,36 @@ def build_course_recommendations(
 
 
 @router.get("/courses/{course_id}/recommendations")
-def course_recommendations(course_id: int, db: DBSession, current_user: CurrentUser, target_date: date | None = None, limit: int = Query(6, ge=1, le=20), category: RecommendationQueryCategory = "all") -> dict:
-    return ok(build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit, category))
+async def course_recommendations(
+    course_id: int, db: DBSession, current_user: CurrentUser, settings: AppSettings,
+    target_date: date | None = None, limit: int = Query(6, ge=1, le=20),
+    category: RecommendationQueryCategory = "all",
+) -> dict:
+    result = build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit, category)
+
+    # ---- Blend AI-powered suggestions ----
+    llm_provider = get_llm_provider(settings)
+    is_mock = settings.llm_provider.strip().lower() == "mock"
+    if not is_mock and result.get("items"):
+        try:
+            course = db.get(Course, course_id)
+            ai_result = await ai_recommend(
+                db, llm_provider,
+                user_id=current_user.id,
+                course_id=course_id,
+                course_name=course.name if course else "",
+                exam_date=course.exam_date if course else None,
+            )
+            ai_summary = ai_result.get("summary", "")
+            ai_items = ai_result.get("recommendations", [])
+            if ai_summary:
+                result["ai_summary"] = ai_summary
+            if ai_items:
+                result["ai_suggestions"] = ai_items[:3]
+        except Exception:
+            pass  # AI failure → keep rule-based only
+
+    return ok(result)
 
 
 @router.get("/courses/{course_id}/recommendations/resources")
@@ -251,6 +282,24 @@ def recommend_resources(course_id: int, db: DBSession, current_user: CurrentUser
 def recommend_exercises(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
     _owned_course(db, course_id, current_user.id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="PRACTICE_RECOMMENDATIONS_NOT_IMPLEMENTED")
+
+
+@router.post("/courses/{course_id}/behavior", status_code=status.HTTP_201_CREATED)
+def track_behavior(course_id: int, payload: UserBehaviorTrack, db: DBSession, current_user: CurrentUser) -> dict:
+    """Track user click/dwell behavior for AI recommendation weighting."""
+    _owned_course(db, course_id, current_user.id)
+    behavior = UserBehavior(
+        user_id=current_user.id,
+        course_id=course_id,
+        action=payload.action,
+        target_type=payload.target_type,
+        target_id=payload.target_id,
+        dwell_seconds=payload.dwell_seconds,
+        weight=payload.weight,
+    )
+    db.add(behavior)
+    db.commit()
+    return ok({"id": behavior.id, "recorded": True})
 
 
 @router.post("/courses/{course_id}/recommendations/feedback")

@@ -95,7 +95,7 @@ onMounted(loadCourses)
 
 <template>
   <div>
-    <PageHeader title="课程管理" eyebrow="COURSE SPACE" description="把目标、资料、计划与学习记录组织在每一门课程下。">
+    <PageHeader title="课程管理" eyebrow="我的课程" description="把目标、资料、计划与学习记录组织在每一门课程下。">
       <el-button type="primary" @click="dialogVisible = true"><el-icon><Plus /></el-icon>创建课程</el-button>
     </PageHeader>
 

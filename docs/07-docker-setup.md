@@ -291,7 +291,7 @@ docker compose down -v
 
 重新执行 `docker compose up -d` 会创建全新的数据卷，并重新安装 `vector` 与 `pg_trgm` 扩展。
 
-## 10. 接入 OpenAI 兼容模型（可选）
+## 10. 接入 DeepSeek Chat（可选）
 
 保持离线演示时不需要修改：
 
@@ -299,23 +299,28 @@ docker compose down -v
 LLM_PROVIDER=mock
 ```
 
-接入兼容 `/chat/completions` 和 `/embeddings` 的服务时，在 `.env` 中配置：
+DeepSeek 的密钥只配置在项目根目录的 `.env`，不要写入前端变量或提交到 Git：
 
 ```dotenv
-LLM_PROVIDER=openai-compatible
-LLM_BASE_URL=https://你的服务地址/v1
-LLM_API_KEY=你的密钥
-LLM_CHAT_MODEL=聊天模型名称
-LLM_EMBEDDING_MODEL=向量模型名称
+LLM_PROVIDER=deepseek
+LLM_BASE_URL=https://api.deepseek.com
+LLM_API_KEY=sk-替换为你的DeepSeek密钥
+LLM_CHAT_MODEL=deepseek-chat
+LLM_EMBEDDING_MODEL=
 ```
 
-当前数据库向量维度为 1024。真实 Embedding 模型必须输出 1024 维向量；如果要更换维度，需要同步修改后端模型、数据库索引并重建相关向量数据。
+此配置下，DeepSeek 负责生成课程问答内容，资料检索继续使用项目内置的 1024 维本地向量，因此已有文档和数据库结构不需要迁移。前端仍调用后端 `/api/v1/chat-sessions/{session_id}/messages`，API Key 不会暴露到浏览器。
+
+如需改用同时兼容 `/chat/completions` 和 `/embeddings` 的其他服务，可以填写 `LLM_EMBEDDING_MODEL`。远程 Embedding 模型必须输出 1024 维向量；更换维度需要同步修改后端模型和数据库索引，并重新处理已上传文档。
 
 应用配置：
 
 ```powershell
-docker compose up -d --force-recreate backend worker
+docker compose up -d --build --force-recreate backend worker
+docker compose logs --tail 100 backend
 ```
+
+打开 <http://localhost:8080/chat>，选择已有课程和已处理完成的资料后即可提问。聊天页固定由后端代理 DeepSeek 请求，无需修改前端配置。
 
 ## 11. 常见故障排查
 

@@ -11,6 +11,14 @@ export interface Course {
   targetScore: number
 }
 
+export interface AIRuntimeStatus {
+  provider: string
+  chat_model: string
+  chat_mode: 'remote' | 'mock'
+  embedding_mode: 'remote' | 'local'
+  is_mock: boolean
+}
+
 export interface BackendCourse {
   id: number
   owner_id: number

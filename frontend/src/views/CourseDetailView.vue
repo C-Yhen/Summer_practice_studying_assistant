@@ -321,7 +321,7 @@ watch(() => route.params.id, () => void loadCourse(), { immediate: true })
 
 <template>
   <div>
-    <PageHeader :title="course?.name || '课程详情'" eyebrow="COURSE DETAIL" description="所有资料、计划、掌握度和学习记录均限定在当前 URL 对应的课程。">
+    <PageHeader :title="course?.name || '课程详情'" eyebrow="课程空间" description="集中查看这门课程的资料、计划、掌握情况和学习记录。">
       <el-button plain @click="router.push('/courses')"><el-icon><ArrowLeft /></el-icon>返回课程</el-button>
     </PageHeader>
 

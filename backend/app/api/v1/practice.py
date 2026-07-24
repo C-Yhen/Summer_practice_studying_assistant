@@ -7,7 +7,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.app.api.v1.courses import _owned_course
-from backend.app.dependencies import CurrentUser, DBSession
+from backend.app.api.v1.plans import _seed_points
+from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     KnowledgeMastery,
     KnowledgePoint,
@@ -19,6 +20,9 @@ from backend.app.models import (
 from backend.app.responses import ok
 from backend.app.schemas import PracticeAttemptCreate, WrongBookUpdate
 from backend.app.services.mastery import apply_mastery_evidence
+from backend.app.services.practice_gen import generate_question as ai_generate_question
+from backend.app.providers.llm import get_llm_provider
+from backend.app.dependencies import AppSettings
 
 router = APIRouter(tags=["practice"])
 
@@ -169,7 +173,9 @@ def _persisted_replay(
 
 
 @router.post("/courses/{course_id}/practice/questions/bootstrap")
-def bootstrap(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
+async def bootstrap(
+    course_id: int, db: DBSession, current_user: CurrentUser, settings: AppSettings
+) -> dict:
     course = _owned_course(db, course_id, current_user.id)
     points = list(
         db.scalars(
@@ -179,50 +185,81 @@ def bootstrap(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
             .limit(10)
         )
     )
+    if not points:
+        points = _seed_points(db, course_id)
+
     created = existing = 0
+    ai_generated = 0
+
+    # ---- Try AI-powered question generation (replaces rule-based over time) ----
+    if not is_mock:
+        for point in points[:3]:
+            key = f"ai_gen:kp:{point.id}:v2"
+            if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
+                continue
+            try:
+                question_data = await ai_generate_question(
+                    db, llm_provider,
+                    course_id=course_id,
+                    knowledge_point=point.name,
+                    difficulty=point.difficulty,
+                )
+                if question_data and question_data.get("stem"):
+                    # Replace old rule-based question for this KP
+                    old_key = f"rule_seed:kp:{point.id}"
+                    old_q = db.scalar(select(PracticeQuestion).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == old_key))
+                    if old_q:
+                        db.delete(old_q)
+                        db.flush()
+                    db.add(PracticeQuestion(
+                        course_id=course.id, knowledge_point_id=point.id, seed_key=key,
+                        stem=question_data["stem"],
+                        options=[{"key": opt.get("label","A"), "text": opt.get("text","")} for opt in question_data.get("options",[])],
+                        correct_option=question_data.get("correct_option","A"),
+                        explanation=question_data.get("explanation",""),
+                        difficulty=point.difficulty, origin="ai_gen",
+                        source_quote=question_data.get("source_quote"),
+                    ))
+                    created += 1
+                    ai_generated += 1
+                    db.flush()
+            except Exception:
+                continue
+
+    # ---- Rule-based fallback for KPs without any question ----
     for point in points:
-        key = f"rule_seed:kp:{point.id}"
-        if db.scalar(
+        has_any = db.scalar(
             select(PracticeQuestion.id).where(
                 PracticeQuestion.course_id == course.id,
-                PracticeQuestion.seed_key == key,
-            )
-        ):
-            existing += 1
-            continue
-        name = point.name
-        db.add(
-            PracticeQuestion(
-                course_id=course.id,
-                knowledge_point_id=point.id,
-                seed_key=key,
-                stem=f'关于知识点“{name}”，下列哪项最符合完成该知识点学习后的要求？',
-                options=[
-                    {
-                        "key": "A",
-                        "text": f"能够用自己的话解释“{name}”的核心含义，并说明基本适用场景。",
-                    },
-                    {"key": "B", "text": "只浏览任务标题即可。"},
-                    {"key": "C", "text": "只累计学习时长而无需理解。"},
-                    {"key": "D", "text": "跳过该知识点并直接标记完成。"},
-                ],
-                correct_option="A",
-                explanation=point.description
-                or f"这是课程“{course.name}”中“{name}”的规则化基础自测题。",
-                difficulty=point.difficulty,
-                origin="rule_seed",
+                PracticeQuestion.knowledge_point_id == point.id,
             )
         )
+        if has_any:
+            continue
+        key = f"rule_seed:kp:{point.id}"
+        if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
+            continue
+        name = point.name
+        db.add(PracticeQuestion(
+            course_id=course.id, knowledge_point_id=point.id, seed_key=key,
+            stem=f'关于知识点"{name}"，下列哪项最符合完成该知识点学习后的要求？',
+            options=[
+                {"key": "A", "text": f'能够用自己的话解释"{name}"的核心含义，并说明基本适用场景。'},
+                {"key": "B", "text": "只浏览任务标题即可。"},
+                {"key": "C", "text": "只累计学习时长而无需理解。"},
+                {"key": "D", "text": "跳过该知识点并直接标记完成。"},
+            ],
+            correct_option="A",
+            explanation=point.description or f'这是课程"{course.name}"中"{name}"的规则化基础自测题。',
+            difficulty=point.difficulty, origin="rule_seed",
+        ))
         created += 1
     db.commit()
-    return ok(
-        {
-            "created_count": created,
-            "existing_count": existing,
-            "total": created + existing,
-            "reason": "NO_KNOWLEDGE_POINTS" if not points else None,
-        }
-    )
+    return ok({
+        "created_count": created, "existing_count": existing,
+        "total": created + existing, "ai_generated": ai_generated,
+        "reason": "NO_KNOWLEDGE_POINTS" if not points else None,
+    })
 
 
 @router.get("/courses/{course_id}/practice/questions")

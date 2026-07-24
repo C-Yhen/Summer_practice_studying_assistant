@@ -84,7 +84,7 @@ onMounted(() => { void load() })
 
 <template>
   <div>
-    <PageHeader title="个人设置" eyebrow="PREFERENCES" description="管理真实账户资料和用于生成学习计划的偏好。" />
+    <PageHeader title="个人设置" eyebrow="账户与偏好" description="管理真实账户资料和用于生成学习计划的偏好。" />
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="load">重试</el-button></template></el-alert>
     <div v-else v-loading="loading" class="settings-layout">
       <aside class="content-card settings-nav">

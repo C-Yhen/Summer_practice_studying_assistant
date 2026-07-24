@@ -81,7 +81,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="错题本" eyebrow="ERROR REVIEW" description="真实错题、掌握度和规则复习提示。">
+    <PageHeader title="错题本" eyebrow="错题复习" description="真实错题、掌握度和规则复习提示。">
       <el-select
         v-model="courseId"
         style="width: 200px"

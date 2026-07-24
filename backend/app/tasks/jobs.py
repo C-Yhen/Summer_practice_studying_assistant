@@ -30,7 +30,7 @@ def process_document_job(self, document_id: int, task_public_id: str) -> dict:
             if task.cancel_requested:
                 mark_task_cancelled(db, task, "cancelled_before_start")
                 return {"cancelled": True}
-            asyncio.run(process_document(db, document, task, get_llm_provider(settings)))
+            asyncio.run(process_document(db, document, task, get_llm_provider(settings), settings))
             db.refresh(task)
             set_task_progress(task.public_id, {"status": task.status, "progress": task.progress, "current_step": task.current_step})
             return task.result_data

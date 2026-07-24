@@ -79,7 +79,7 @@ async def dispatch_async_task(db: Session, task: AsyncTask, settings: Any) -> No
                 mark_dispatch_failed(db, task, "TASK_RESOURCE_NOT_FOUND")
                 return
             try:
-                await process_document(db, document, task, get_llm_provider(settings))
+                await process_document(db, document, task, get_llm_provider(settings), settings)
             except Exception:
                 # process_document records the safe failed/cancelled state itself.
                 return

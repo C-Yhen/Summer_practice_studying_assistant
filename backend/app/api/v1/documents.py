@@ -166,7 +166,16 @@ async def reparse_document(
     settings: AppSettings,
 ) -> dict:
     document = _owned_document(db, document_id, current_user.id)
-    target_version = document.current_version + 1
+    latest_version = db.scalar(
+        select(DocumentVersion.version_no)
+        .where(DocumentVersion.document_id == document.id)
+        .order_by(DocumentVersion.version_no.desc())
+        .limit(1)
+    )
+    # A failed parse is intentionally kept in the version history, while
+    # ``current_version`` continues to point at the latest ready version.
+    # Allocate after both values so retrying cannot reuse an occupied number.
+    target_version = max(document.current_version, latest_version or 0) + 1
     db.add(
         DocumentVersion(
             document_id=document.id,

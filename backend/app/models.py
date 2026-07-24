@@ -472,3 +472,18 @@ class CalendarEvent(TimestampMixin, Base):
     remote_event_id: Mapped[str | None] = mapped_column(String(255))
     sync_status: Mapped[str] = mapped_column(String(24), default="local", nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
+
+
+class UserBehavior(TimestampMixin, Base):
+    """Tracks user clicks and dwell time for AI recommendation weighting."""
+    __tablename__ = "user_behaviors"
+    __table_args__ = (Index("ix_behaviors_user_course_date", "user_id", "course_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(64))
+    dwell_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
