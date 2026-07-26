@@ -68,8 +68,14 @@ const runtimeLabel = computed(() => {
 })
 const runtimeDetail = computed(() => {
   if (!aiRuntime.value) return ''
-  return aiRuntime.value.embedding_mode === 'local' ? '本地检索向量' : '远程检索向量'
+  const embedding = aiRuntime.value.embedding_mode === 'local' ? '本地检索向量' : '远程检索向量'
+  return `${embedding} · 优先依据当前课程资料；资料不足时明确标注并使用通用知识补充`
 })
+
+function answerModeLabel(message: ChatMessage): string {
+  if (aiRuntime.value?.is_mock) return '离线规则结果'
+  return message.sufficient_evidence === false ? '通用模型知识补充' : '课程资料回答'
+}
 
 function parseCourseId(value: unknown): number | null {
   const raw = Array.isArray(value) ? value[0] : value
@@ -349,7 +355,7 @@ watch(() => route.fullPath, () => {
       </aside>
 
       <main class="conversation">
-        <div class="conversation-head"><div><span class="ai-avatar" :class="{ demo: aiRuntime?.is_mock }">{{ assistantAvatar }}</span><p><b>{{ assistantName }}</b><small><i :class="{ warning: aiRuntime?.is_mock || aiRuntimeError }"></i>{{ selectedCourse?.name }}</small></p></div><div class="runtime-status"><span class="model-pill" :class="{ demo: aiRuntime?.is_mock, error: aiRuntimeError }">{{ runtimeLabel }}</span><small v-if="runtimeDetail">{{ runtimeDetail }} · 回答仅依据课程资料</small></div></div>
+        <div class="conversation-head"><div><span class="ai-avatar" :class="{ demo: aiRuntime?.is_mock }">{{ assistantAvatar }}</span><p><b>{{ assistantName }}</b><small><i :class="{ warning: aiRuntime?.is_mock || aiRuntimeError }"></i>{{ selectedCourse?.name }}</small></p></div><div class="runtime-status"><span class="model-pill" :class="{ demo: aiRuntime?.is_mock, error: aiRuntimeError }">{{ runtimeLabel }}</span><small v-if="runtimeDetail">{{ runtimeDetail }}</small></div></div>
 
         <el-alert v-if="aiRuntime?.is_mock" title="当前为本地 Mock 演示模式，回答由固定规则生成，不是 DeepSeek 或其他真实大模型输出。" type="warning" :closable="false" show-icon class="runtime-alert" />
         <el-alert v-else-if="aiRuntimeError" :title="aiRuntimeError" type="error" :closable="false" show-icon class="runtime-alert"><template #default><el-button size="small" @click="loadAIRuntime">重新检查</el-button></template></el-alert>
@@ -365,7 +371,7 @@ watch(() => route.fullPath, () => {
             <div v-for="message in messages" :key="message.id" class="message" :class="message.role">
               <span class="message-avatar" :class="{ demo: message.role === 'assistant' && aiRuntime?.is_mock }"><el-icon v-if="message.role === 'user'"><User /></el-icon><template v-else>{{ assistantAvatar }}</template></span>
               <div class="message-block">
-                <div class="message-meta"><b>{{ message.role === 'user' ? '你' : assistantName }}</b><span>{{ formatTime(message.created_at) }}</span><em v-if="message.role === 'assistant'" :class="{ enough: message.sufficient_evidence !== false }">{{ message.sufficient_evidence === false ? '证据不足，请谨慎使用' : '已有资料依据' }}</em></div>
+                <div class="message-meta"><b>{{ message.role === 'user' ? '你' : assistantName }}</b><span>{{ formatTime(message.created_at) }}</span><em v-if="message.role === 'assistant'" :class="{ enough: message.sufficient_evidence !== false }">{{ answerModeLabel(message) }}</em></div>
                 <div class="bubble math-content" v-html="renderLatex(message.content)"></div>
                 <div v-if="message.citations.length" class="answer-tools"><button @click="showSources(message)"><el-icon><Document /></el-icon>查看 {{ message.citations.length }} 条原文依据</button></div>
               </div>

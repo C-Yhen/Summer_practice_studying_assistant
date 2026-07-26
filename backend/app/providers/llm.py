@@ -20,6 +20,34 @@ def text_terms(text: str) -> list[str]:
     return words
 
 
+def validate_embedding_vector(
+    vector: list[float], expected_dimension: int, *, context: str
+) -> list[float]:
+    if not isinstance(vector, list):
+        raise ValueError(f"EMBEDDING_INVALID_RESPONSE: {context} is not a vector")
+    if len(vector) != expected_dimension:
+        raise ValueError(
+            f"EMBEDDING_DIMENSION_MISMATCH: {context} returned {len(vector)}, expected {expected_dimension}"
+        )
+    try:
+        return [float(value) for value in vector]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"EMBEDDING_INVALID_RESPONSE: {context} contains non-numeric values") from exc
+
+
+def validate_embedding_batch(
+    vectors: list[list[float]], expected_dimension: int, *, expected_count: int | None = None
+) -> list[list[float]]:
+    if expected_count is not None and len(vectors) != expected_count:
+        raise ValueError(
+            f"EMBEDDING_ITEM_COUNT_MISMATCH: provider returned {len(vectors)}, expected {expected_count}"
+        )
+    return [
+        validate_embedding_vector(vector, expected_dimension, context=f"embedding item {index}")
+        for index, vector in enumerate(vectors)
+    ]
+
+
 class LLMProvider(ABC):
     @abstractmethod
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
@@ -94,14 +122,35 @@ class OpenAICompatibleProvider(LLMProvider):
                     json={
                         "model": self.settings.llm_embedding_model,
                         "input": texts[start : start + batch_size],
+                        "dimensions": self.settings.embedding_dimension,
+                        "encoding_format": "float",
                     },
                 )
                 response.raise_for_status()
-                batch = response.json()["data"]
-                if len(batch) != min(batch_size, len(texts) - start):
+                batch = response.json().get("data")
+                expected_count = min(batch_size, len(texts) - start)
+                if not isinstance(batch, list) or len(batch) != expected_count:
                     raise RuntimeError("embedding provider returned an unexpected item count")
-                embeddings.extend(item["embedding"] for item in batch)
-        return embeddings
+                if all(isinstance(item, dict) and isinstance(item.get("index"), int) for item in batch):
+                    batch = sorted(batch, key=lambda item: item["index"])
+                    if [item["index"] for item in batch] != list(range(expected_count)):
+                        raise RuntimeError("embedding provider returned invalid item indexes")
+                try:
+                    vectors = [item["embedding"] for item in batch]
+                except (KeyError, TypeError) as exc:
+                    raise RuntimeError("embedding provider returned an invalid payload") from exc
+                embeddings.extend(
+                    validate_embedding_batch(
+                        vectors,
+                        self.settings.embedding_dimension,
+                        expected_count=expected_count,
+                    )
+                )
+        return validate_embedding_batch(
+            embeddings,
+            self.settings.embedding_dimension,
+            expected_count=len(texts),
+        )
 
 
 def llm_runtime_status(settings: Settings) -> dict[str, str | bool]:

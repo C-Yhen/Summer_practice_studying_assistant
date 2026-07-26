@@ -8,7 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Document, DocumentChunk
-from backend.app.providers.llm import LLMProvider, text_terms
+from backend.app.providers.llm import (
+    LLMProvider,
+    MockLLMProvider,
+    text_terms,
+    validate_embedding_vector,
+)
 
 
 class RagProviderError(RuntimeError):
@@ -39,6 +44,7 @@ async def retrieve(
     query: str,
     document_ids: list[int] | None,
     top_k: int,
+    embedding_dimension: int = 1024,
 ) -> list[dict[str, Any]]:
     statement = (
         select(DocumentChunk, Document)
@@ -60,7 +66,9 @@ async def retrieve(
         embeddings = await provider.embed([query])
         if len(embeddings) != 1 or not embeddings[0]:
             raise ValueError("invalid embedding response")
-        query_embedding = embeddings[0]
+        query_embedding = validate_embedding_vector(
+            embeddings[0], embedding_dimension, context="query embedding"
+        )
     except Exception as exc:
         raise RagProviderError("embedding provider unavailable") from exc
     scored: list[dict[str, Any]] = []
@@ -147,6 +155,9 @@ async def answer_from_sources(
         )
         user_prompt = f"问题：{question}"
         context = ""
+
+    if not sufficient and isinstance(provider, MockLLMProvider):
+        return "当前课程资料中没有找到足够证据。离线演示模式不会使用通用模型知识补充。", False
 
     try:
         answer = await provider.chat(

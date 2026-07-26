@@ -356,3 +356,14 @@
 - `validate:acceptance` 现在除校验汇总一致性外，还强制 `BLOCKED=0`，并通过内存模拟非零 BLOCKED 验证失败分支。
 - 本次只运行 `learning-recommendations` 中 1 个推荐锁测试函数：desktop 1/1、mobile 1/1，共 `2 passed`；验收脚本在当前 `BLOCKED=0` 时通过、模拟非零时按预期退出 1；`npm run build` 通过。
 - 没有重新运行完整 Playwright 矩阵，也没有运行后端测试；未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。
+
+## AI integration handover verification and hardening (main: 3829651)
+
+- Baseline: `origin/main` commit `382965100e29dc7f476a5715d134843ce5b8dfa9`; validation is on a local repair branch only, without merging or pushing main.
+- Qwen: tracked templates and local non-sensitive `.env` values use `qwen`, `qwen3.7-plus`, `qwen3.7-text-embedding`, and `EMBEDDING_DIMENSION=1024`. `LLM_API_KEY` is deliberately blank; the user must rotate the exposed key and enter only the new key manually.
+- Embeddings: PostgreSQL uses `Vector(1024)`. Runtime configuration is constrained to 1024; the compatible API sends `dimensions` and `encoding_format=float`, validates item count/order/numeric values/dimension, and validates again before document writes and RAG retrieval.
+- Documents: PDF extraction uses PyMuPDF and weak pages use Tesseract OCR. Supported uploads are PDF, TXT, and Markdown; PPT/PPTX must be exported to PDF. Damaged-PDF errors no longer expose storage paths. Existing documents should be reparsed after changing provider; no local database was started in this verification.
+- Chat: grounded answers show course-material citations; remote insufficient-material answers use general knowledge without fabricated citations; offline Mock explicitly says it does not use general knowledge. The web page uses the RAG API; MCP remains a separate tool layer without verified web-agent invocation.
+- LaTeX: frontend uses the local `katex` package and bundled fonts, not jsDelivr/global `window.katex`; text is escaped and KaTeX trust is disabled.
+- Results: targeted SQLite/Mock AI tests `57 passed, 2 skipped`; full backend suite `tests/backend` `128 passed, 3 skipped`; `npm run build` passed with existing large-chunk warnings. Root `pytest -q` was blocked at MCP collection because that separate package was not installed.
+- Not run: Docker daemon was unavailable and `LLM_API_KEY` is blank, so no containers, remote Qwen calls, old-document reparse, or end-to-end AI smoke tests ran.

@@ -1,35 +1,41 @@
-declare const katex: {
-  renderToString(formula: string, options?: { displayMode?: boolean; throwOnError?: boolean }): string
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function renderFormula(formula: string, displayMode: boolean, original: string): string {
+  try {
+    return katex.renderToString(formula.trim(), {
+      displayMode,
+      throwOnError: false,
+      trust: false,
+    })
+  } catch {
+    return `<code>${escapeHtml(original)}</code>`
+  }
 }
 
 export function renderLatex(text: string): string {
   if (!text) return ''
-  // Escape HTML first (except for our LaTeX delimiters)
-  let html = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+  const pattern = /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g
+  let html = ''
+  let lastIndex = 0
+  let match: RegExpExecArray | null
 
-  // Block math: $$...$$
-  html = html.replace(/\$\$([\s\S]*?)\$\$/g, (_: string, formula: string) => {
-    try {
-      return katex.renderToString(formula.trim(), { displayMode: true, throwOnError: false })
-    } catch {
-      return `<code>$${formula}$</code>`
-    }
-  })
+  while ((match = pattern.exec(text)) !== null) {
+    html += escapeHtml(text.slice(lastIndex, match.index)).replace(/\n/g, '<br>')
+    const isBlock = match[1] !== undefined
+    const formula = (isBlock ? match[1] : match[2]) ?? ''
+    html += renderFormula(formula, isBlock, match[0])
+    lastIndex = pattern.lastIndex
+  }
 
-  // Inline math: $...$
-  html = html.replace(/\$([^\$]+?)\$/g, (_: string, formula: string) => {
-    try {
-      return katex.renderToString(formula.trim(), { displayMode: false, throwOnError: false })
-    } catch {
-      return `<code>$${formula}$</code>`
-    }
-  })
-
-  // Restore newlines as <br> for non-block-math content
-  html = html.replace(/\n/g, '<br>')
-
-  return html
+  return html + escapeHtml(text.slice(lastIndex)).replace(/\n/g, '<br>')
 }

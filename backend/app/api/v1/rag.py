@@ -135,6 +135,7 @@ async def ask_question(
             query=payload.question,
             document_ids=document_ids,
             top_k=payload.top_k,
+            embedding_dimension=settings.embedding_dimension,
         )
         mode = payload.mode or session.mode
         answer, sufficient = await answer_from_sources(provider, payload.question, sources, mode)
@@ -225,6 +226,7 @@ async def search_material(
             query=payload.query,
             document_ids=document_ids,
             top_k=payload.top_k,
+            embedding_dimension=settings.embedding_dimension,
         )
     except (RagProviderError, ValueError):
         raise HTTPException(status_code=503, detail="RAG_PROVIDER_UNAVAILABLE") from None

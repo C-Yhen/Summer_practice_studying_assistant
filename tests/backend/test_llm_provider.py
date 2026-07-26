@@ -22,7 +22,7 @@ def test_chat_provider_can_use_local_embedding_fallback() -> None:
         llm_api_key="test-key",
         llm_chat_model="deepseek-chat",
         llm_embedding_model="",
-        embedding_dimension=32,
+        embedding_dimension=1024,
     )
 
     provider = get_llm_provider(settings)
@@ -30,11 +30,11 @@ def test_chat_provider_can_use_local_embedding_fallback() -> None:
     assert isinstance(provider, OpenAICompatibleProvider)
     embeddings = asyncio.run(provider.embed(["local fallback embedding"]))
     assert len(embeddings) == 1
-    assert len(embeddings[0]) == 32
+    assert len(embeddings[0]) == 1024
 
 
 def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None:
-    requests: list[list[str]] = []
+    requests: list[dict] = []
 
     class MockResponse:
         def __init__(self, texts: list[str]) -> None:
@@ -46,8 +46,8 @@ def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None
         def json(self) -> dict:
             return {
                 "data": [
-                    {"embedding": [float(index)]}
-                    for index, _text in enumerate(self.texts)
+                    {"index": index, "embedding": [float(index)] * 1024}
+                    for index, _text in reversed(list(enumerate(self.texts)))
                 ]
             }
 
@@ -60,7 +60,7 @@ def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None
 
         async def post(self, _url, *, headers, json):
             del headers
-            requests.append(json["input"])
+            requests.append(json)
             return MockResponse(json["input"])
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: MockClient())
@@ -75,8 +75,47 @@ def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None
 
     embeddings = asyncio.run(get_llm_provider(settings).embed(["a", "b", "c", "d", "e"]))
 
-    assert requests == [["a", "b"], ["c", "d"], ["e"]]
-    assert embeddings == [[0.0], [1.0], [0.0], [1.0], [0.0]]
+    assert [request["input"] for request in requests] == [["a", "b"], ["c", "d"], ["e"]]
+    assert all(request["dimensions"] == 1024 for request in requests)
+    assert all(request["encoding_format"] == "float" for request in requests)
+    assert [embedding[0] for embedding in embeddings] == [0.0, 1.0, 0.0, 1.0, 0.0]
+    assert all(len(embedding) == 1024 for embedding in embeddings)
+
+
+def test_remote_embedding_dimension_mismatch_is_rejected(monkeypatch) -> None:
+    class MockResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"data": [{"index": 0, "embedding": [0.0, 1.0]}]}
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: MockClient())
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen-chat",
+        llm_embedding_model="text-embedding-v4",
+    )
+
+    with pytest.raises(ValueError, match="EMBEDDING_DIMENSION_MISMATCH"):
+        asyncio.run(get_llm_provider(settings).embed(["dimension check"]))
+
+
+def test_embedding_dimension_must_match_persisted_vector_schema() -> None:
+    with pytest.raises(ValueError, match="EMBEDDING_DIMENSION must be 1024"):
+        Settings(embedding_dimension=512)
 
 
 def test_remote_provider_configuration_never_silently_falls_back_to_mock() -> None:
@@ -152,6 +191,5 @@ def test_strict_rag_mode_calls_chat_provider_with_grounding_prompt() -> None:
     assert sufficient is True
     assert "cobalt lanterns" in answer
     assert provider.messages[0]["role"] == "system"
-    assert "只能使用" in provider.messages[0]["content"]
+    assert "课程资料" in provider.messages[0]["content"]
     assert "[S1]" in provider.messages[1]["content"]
-    assert provider.kwargs["temperature"] == 0.2

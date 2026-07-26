@@ -126,7 +126,7 @@ def test_persistent_rag_session_title_history_and_citations(
     insufficient_data = insufficient.json()["data"]
     assert insufficient_data["sufficient_evidence"] is False
     assert insufficient_data["citations"] == []
-    assert "没有找到足够证据" in insufficient_data["answer"]
+    assert "离线演示模式" in insufficient_data["answer"]
     refreshed_history = client.get(
         f"/api/v1/chat-sessions/{session_id}/messages", headers=auth_headers
     ).json()["data"]["items"]

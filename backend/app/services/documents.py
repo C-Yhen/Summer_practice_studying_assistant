@@ -14,12 +14,19 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings
 from backend.app.models import AsyncTask, Document, DocumentChunk, DocumentVersion, utcnow
-from backend.app.providers.llm import LLMProvider
+from backend.app.providers.llm import LLMProvider, validate_embedding_batch
 from backend.app.services.async_tasks import mark_task_cancelled
 
 
 class DocumentProcessingCancelled(Exception):
     pass
+
+
+def _safe_processing_error(exc: Exception) -> str:
+    """Expose stable task errors without leaking local paths or provider details."""
+    message = str(exc)
+    safe_prefixes = ("DOCUMENT_", "PDF_OCR_", "EMBEDDING_")
+    return message if message.startswith(safe_prefixes) else "DOCUMENT_PROCESSING_FAILED"
 
 
 @dataclass(frozen=True)
@@ -254,6 +261,12 @@ async def process_document(
         task.current_step = "embedding"
         db.commit()
         embeddings = await provider.embed([item[1] for item in pending]) if pending else []
+        expected_dimension = (settings or Settings()).embedding_dimension
+        embeddings = validate_embedding_batch(
+            embeddings,
+            expected_dimension,
+            expected_count=len(pending),
+        )
         _raise_if_cancelled(db, document, version, task)
 
         for index, ((page_number, content, chapter), embedding) in enumerate(
@@ -328,13 +341,13 @@ async def process_document(
                 )
             )
             managed_document.status = "ready" if has_ready_version else "failed"
-            managed_document.error_message = str(exc)
+            managed_document.error_message = _safe_processing_error(exc)
         if managed_version:
             managed_version.status = "failed"
-            managed_version.error_message = str(exc)
+            managed_version.error_message = _safe_processing_error(exc)
         if managed_task:
             managed_task.status = "failed"
-            managed_task.error_message = str(exc)
+            managed_task.error_message = _safe_processing_error(exc)
             managed_task.finished_at = utcnow()
         db.commit()
         raise

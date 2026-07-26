@@ -55,6 +55,15 @@ class Settings(BaseSettings):
             return "postgresql+psycopg://" + value.removeprefix("postgresql://")
         return value
 
+    @field_validator("embedding_dimension")
+    @classmethod
+    def require_supported_embedding_dimension(cls, value: int) -> int:
+        # The PostgreSQL pgvector column is Vector(1024). Keep runtime
+        # configuration aligned with that persisted schema.
+        if value != 1024:
+            raise ValueError("EMBEDDING_DIMENSION must be 1024 for the current database schema")
+        return value
+
 
 @lru_cache
 def get_settings() -> Settings:

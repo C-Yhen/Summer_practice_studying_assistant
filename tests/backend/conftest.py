@@ -17,6 +17,12 @@ def client(tmp_path) -> TestClient:
         cors_origins=[],
         sync_document_processing=True,
         upload_dir=tmp_path / "uploads",
+        # Tests must remain offline and must not inherit a developer's local key.
+        llm_provider="mock",
+        llm_base_url="",
+        llm_api_key="",
+        llm_chat_model="",
+        llm_embedding_model="",
     )
     database = Database(settings.database_url)
     app = create_app(settings=settings, database=database)

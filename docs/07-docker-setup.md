@@ -173,7 +173,7 @@ docker compose ps
 - Swagger API 文档：<http://localhost:8000/docs>
 - OpenAPI JSON：<http://localhost:8000/openapi.json>
 
-打开前端后先注册账号，再创建课程和上传 TXT、Markdown 或 PDF。Docker 模式的 `VITE_ENABLE_MOCK=false`，因此页面使用的是真实后端数据。
+打开前端后先注册账号，再创建课程和上传 TXT、Markdown 或 PDF。PPT/PPTX 当前不直接解析，请先从 PowerPoint 导出为 PDF 后上传。Docker 模式的 `VITE_ENABLE_MOCK=false`，因此页面使用的是真实后端数据。
 
 快速健康检查：
 
@@ -291,7 +291,7 @@ docker compose down -v
 
 重新执行 `docker compose up -d` 会创建全新的数据卷，并重新安装 `vector` 与 `pg_trgm` 扩展。
 
-## 10. 接入 DeepSeek Chat（可选）
+## 10. 接入 Qwen Chat 与 Embedding（可选）
 
 保持离线演示时不需要修改：
 
@@ -299,19 +299,21 @@ docker compose down -v
 LLM_PROVIDER=mock
 ```
 
-DeepSeek 的密钥只配置在项目根目录的 `.env`，不要写入前端变量或提交到 Git：
+Qwen 的新密钥只配置在项目根目录的 `.env`，不要写入前端变量或提交到 Git。已暴露的旧密钥必须先在阿里云控制台禁用并轮换：
 
 ```dotenv
-LLM_PROVIDER=deepseek
-LLM_BASE_URL=https://api.deepseek.com
-LLM_API_KEY=sk-替换为你的DeepSeek密钥
-LLM_CHAT_MODEL=deepseek-chat
-LLM_EMBEDDING_MODEL=
+EMBEDDING_DIMENSION=1024
+LLM_PROVIDER=qwen
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=在本地填入已轮换的新Key
+LLM_CHAT_MODEL=qwen3.7-plus
+LLM_EMBEDDING_MODEL=qwen3.7-text-embedding
+LLM_EMBEDDING_BATCH_SIZE=20
 ```
 
-此配置下，DeepSeek 负责生成课程问答内容，资料检索继续使用项目内置的 1024 维本地向量，因此已有文档和数据库结构不需要迁移。前端仍调用后端 `/api/v1/chat-sessions/{session_id}/messages`，API Key 不会暴露到浏览器。
+此配置下，Qwen 负责课程问答和 1024 维资料检索向量。向量模型或 Provider 从 Mock 切换为 Qwen 后，已有资料必须通过文档“重新解析”接口生成新的当前版本；旧版本会失活，不参与当前检索。前端仍调用后端 `/api/v1/chat-sessions/{session_id}/messages`，API Key 不会暴露到浏览器。
 
-如需改用同时兼容 `/chat/completions` 和 `/embeddings` 的其他服务，可以填写 `LLM_EMBEDDING_MODEL`。远程 Embedding 模型必须输出 1024 维向量；更换维度需要同步修改后端模型和数据库索引，并重新处理已上传文档。
+当前数据库 `document_chunks.embedding` 固定为 1024 维；Provider 会在请求中传递 `dimensions=1024`，并在响应和写入前校验长度。更换维度需要同步修改后端模型和数据库索引，并重新处理已上传文档。
 
 应用配置：
 
@@ -320,7 +322,7 @@ docker compose up -d --build --force-recreate backend worker
 docker compose logs --tail 100 backend
 ```
 
-打开 <http://localhost:8080/chat>，选择已有课程和已处理完成的资料后即可提问。聊天页固定由后端代理 DeepSeek 请求，无需修改前端配置。
+打开 <http://localhost:8080/chat>，选择已有课程和已处理完成的资料后即可提问。聊天页固定由后端代理 Qwen 请求，无需修改前端配置；资料不足时会明确标注为通用模型知识补充，且不会伪造资料引用。
 
 ## 11. 常见故障排查
 

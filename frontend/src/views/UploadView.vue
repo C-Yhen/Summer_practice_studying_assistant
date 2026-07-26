@@ -310,7 +310,7 @@ watch(() => route.query.courseId, () => void loadCourses(), { immediate: true })
           >
             <div class="upload-illustration"><el-icon><UploadFilled /></el-icon></div>
             <h3>{{ preparing ? '正在读取资料包…' : '拖拽文件到这里' }}</h3>
-            <p>或点击选择多份 PDF、TXT、Markdown 与 ZIP 文件</p>
+            <p>或点击选择多份 PDF、TXT、Markdown 与 ZIP 文件；PPT 请先导出为 PDF</p>
             <el-button type="primary" plain :loading="preparing">选择本地文件</el-button>
           </el-upload>
 

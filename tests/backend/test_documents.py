@@ -196,6 +196,27 @@ def test_failed_document_parse_records_consistent_error_state(
         assert version.error_message == "DOCUMENT_TEXT_EMPTY"
 
 
+def test_damaged_pdf_is_reported_without_leaking_its_storage_path(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    course_id = _course(client, auth_headers, "Damaged PDF")
+    uploaded = client.post(
+        f"/api/v1/courses/{course_id}/documents",
+        headers=auth_headers,
+        files={"file": ("damaged.pdf", b"not a valid PDF", "application/pdf")},
+    )
+    assert uploaded.status_code == 201
+    data = uploaded.json()["data"]
+    assert data["document"]["status"] == "failed"
+    assert data["document"]["error_message"] == "DOCUMENT_PROCESSING_FAILED"
+
+    task = client.get(
+        f"/api/v1/async-tasks/{data['async_task_id']}", headers=auth_headers
+    ).json()["data"]
+    assert task["status"] == "failed"
+    assert task["error_message"] == "DOCUMENT_PROCESSING_FAILED"
+
+
 def test_reparse_allocates_after_failed_version_without_reusing_its_number(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

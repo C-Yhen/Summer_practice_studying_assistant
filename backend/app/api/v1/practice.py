@@ -7,7 +7,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.app.api.v1.courses import _owned_course
-from backend.app.api.v1.plans import _seed_points
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     KnowledgeMastery,
@@ -22,7 +21,6 @@ from backend.app.schemas import PracticeAttemptCreate, WrongBookUpdate
 from backend.app.services.mastery import apply_mastery_evidence
 from backend.app.services.practice_gen import generate_question as ai_generate_question
 from backend.app.providers.llm import get_llm_provider
-from backend.app.dependencies import AppSettings
 
 router = APIRouter(tags=["practice"])
 
@@ -186,13 +184,20 @@ async def bootstrap(
         )
     )
     if not points:
-        points = _seed_points(db, course_id)
+        return ok({
+            "created_count": 0,
+            "existing_count": 0,
+            "total": 0,
+            "reason": "NO_KNOWLEDGE_POINTS",
+        })
 
     created = existing = 0
-    ai_generated = 0
+    is_mock = settings.llm_provider.strip().lower() == "mock"
+    llm_provider = get_llm_provider(settings) if not is_mock else None
 
     # ---- Try AI-powered question generation (replaces rule-based over time) ----
     if not is_mock:
+        assert llm_provider is not None
         for point in points[:3]:
             key = f"ai_gen:kp:{point.id}:v2"
             if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
@@ -221,7 +226,6 @@ async def bootstrap(
                         source_quote=question_data.get("source_quote"),
                     ))
                     created += 1
-                    ai_generated += 1
                     db.flush()
             except Exception:
                 continue
@@ -235,6 +239,7 @@ async def bootstrap(
             )
         )
         if has_any:
+            existing += 1
             continue
         key = f"rule_seed:kp:{point.id}"
         if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
@@ -257,7 +262,7 @@ async def bootstrap(
     db.commit()
     return ok({
         "created_count": created, "existing_count": existing,
-        "total": created + existing, "ai_generated": ai_generated,
+        "total": created + existing,
         "reason": "NO_KNOWLEDGE_POINTS" if not points else None,
     })
 
