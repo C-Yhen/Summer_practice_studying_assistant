@@ -36,6 +36,29 @@ def lexical_score(query: str, content: str) -> float:
     return overlap / sum(query_terms.values())
 
 
+_EVIDENCE_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "how", "in", "is", "it", "of", "on", "or", "that", "the", "to",
+    "what", "when", "where", "which", "who", "why", "with",
+}
+
+
+def has_lexical_evidence(question: str, source_text: str) -> bool:
+    """Require at least one meaningful shared term before citing a source.
+
+    Embedding similarity alone can retrieve a loosely related chunk for an
+    out-of-scope general-knowledge question.  A citation is only honest when
+    the question and the proposed course source share a content-bearing term.
+    """
+    question_terms = {
+        term for term in text_terms(question) if term not in _EVIDENCE_STOP_WORDS
+    }
+    if not question_terms:
+        return False
+    source_terms = set(text_terms(source_text))
+    return bool(question_terms & source_terms)
+
+
 async def retrieve(
     db: Session,
     provider: LLMProvider,
@@ -115,7 +138,11 @@ async def answer_from_sources(
     sources: list[dict[str, Any]],
     mode: str,
 ) -> tuple[str, bool]:
-    sufficient = bool(sources and sources[0]["score"] >= 0.025)
+    sufficient = bool(
+        sources
+        and sources[0]["score"] >= 0.025
+        and has_lexical_evidence(question, sources[0].get("quote", ""))
+    )
 
     # Even if score passes, check text quality — garbled OCR should be ignored
     if sufficient and sources:

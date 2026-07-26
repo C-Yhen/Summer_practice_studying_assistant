@@ -19,7 +19,10 @@ from backend.app.models import (
     UserPreference,
 )
 from backend.app.planning.engine import PlanInput, PlanningPoint, build_plan, reschedule
-from backend.app.planning.ai_planner import generate_plan_one_shot
+from backend.app.planning.ai_planner import (
+    extract_knowledge_points,
+    generate_plan_one_shot,
+)
 from backend.app.providers.llm import get_llm_provider
 from backend.app.responses import ok
 from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, TaskComplete
@@ -49,6 +52,42 @@ def _seed_points(db: DBSession, course_id: int) -> list[KnowledgePoint]:
         db.add(KnowledgePoint(course_id=course_id, name=name, importance=importance, difficulty=difficulty, estimated_minutes=minutes, prerequisite_ids=dependencies))
     db.flush()
     return list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
+
+
+def _persist_ai_points(
+    db: DBSession, course_id: int, raw_points: list[dict]
+) -> list[KnowledgePoint]:
+    """Persist validated AI-extracted points for downstream practice/mastery flows."""
+    existing = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
+    if existing:
+        return existing
+
+    points: list[KnowledgePoint] = []
+    for raw in raw_points:
+        name = str(raw.get("name", "")).strip()
+        if not name or len(name) > 160:
+            continue
+        difficulty = str(raw.get("difficulty", "basic")).strip()
+        if difficulty not in {"basic", "intermediate", "advanced"}:
+            difficulty = "basic"
+        try:
+            importance = min(1.0, max(0.0, float(raw.get("importance", 0.5))))
+            estimated_minutes = min(90, max(15, int(raw.get("estimated_minutes", 45))))
+        except (TypeError, ValueError):
+            continue
+        point = KnowledgePoint(
+            course_id=course_id,
+            name=name,
+            description=str(raw.get("description", "")).strip() or None,
+            importance=importance,
+            difficulty=difficulty,
+            estimated_minutes=estimated_minutes,
+            prerequisite_ids=[],
+        )
+        db.add(point)
+        points.append(point)
+    db.flush()
+    return points
 
 
 def _version_payload(version: StudyPlanVersion) -> dict:
@@ -141,8 +180,14 @@ async def generate_plan(
     # ---- Try AI-powered one-shot generation (single LLM call) ----
     llm_provider = get_llm_provider(settings)
     is_mock = settings.llm_provider.strip().lower() == "mock"
+    ai_kps: list[dict] = []
     if not is_mock:
         try:
+            ai_kps = await extract_knowledge_points(db, llm_provider, course_id=course_id)
+            if not _persist_ai_points(db, course_id, ai_kps):
+                # A malformed AI extraction must not leave an otherwise valid AI
+                # plan unusable by the practice and mastery flows.
+                _seed_points(db, course_id)
             ai_plan = await generate_plan_one_shot(
                 db, llm_provider, course_id=course_id,
                 goal=payload.goal,
