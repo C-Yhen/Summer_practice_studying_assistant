@@ -305,7 +305,7 @@ Qwen 的新密钥只配置在项目根目录的 `.env`，不要写入前端变�
 EMBEDDING_DIMENSION=1024
 LLM_PROVIDER=qwen
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_API_KEY=在本地填入已轮换的新Key
+LLM_API_KEY=
 LLM_CHAT_MODEL=qwen3.7-plus
 LLM_EMBEDDING_MODEL=qwen3.7-text-embedding
 LLM_EMBEDDING_BATCH_SIZE=20
