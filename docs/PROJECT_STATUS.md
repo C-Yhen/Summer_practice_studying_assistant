@@ -401,3 +401,11 @@
 - Corrected the guided Tour target audit: course management remains a sidebar target, while course materials now targets the separate Dashboard upload shortcut; settings replay remains unchanged.
 - Tests: Dashboard onboarding backend coverage passed (`5 passed`); complete SQLite backend suite passed (`133 passed, 3 skipped`); `frontend/npm run build` passed (existing large-chunk warning remains). Playwright discovers 8 focused desktop/mobile onboarding tests, but browser execution was not possible because Docker Desktop's Linux engine pipe was unavailable.
 - Remaining: Round 20 still needs final browser acceptance once Docker/system browser is available; this includes visible checklist interaction, user-switch isolation, and mobile overflow verification.
+
+### Final visual acceptance
+
+- Docker Desktop was started for this acceptance. PostgreSQL, Redis, backend, worker and frontend were healthy; the frontend returned HTTP 200 and `/health` returned `status=ok`.
+- The isolated SQLite Playwright backend ran the focused onboarding spec in system Chrome. Final result: desktop `5/5` passed, mobile `5/5` passed, total `10/10` passed. It covers welcome/Tour completion and settings replay, skip persistence, `0/5` and ready-document routing, real `5/5` completion plus A/B isolation, and mobile Tour fallback when the collapsed sidebar has no course target.
+- The first browser attempt exposed two overly broad test locators (`完成` also matched checklist task names) and a mobile assertion that incorrectly required a desktop-only sidebar target. No production behavior was changed: the test now selects the exact Tour completion button and explicitly verifies the intended centered mobile fallback can advance.
+- Regression: `tests/backend/test_dashboard.py tests/backend/test_preferences_and_personalized_plans.py` passed (`20 passed`); `frontend/npm run build` passed with the existing large-chunk warning. The full backend suite was not rerun because production code did not change.
+- KaTeX visual inspection remains unverified in this acceptance: the controlled in-app browser had no available binding and no safe pre-authenticated real chat session was available. No KaTeX result is claimed.

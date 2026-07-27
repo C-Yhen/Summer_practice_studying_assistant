@@ -13,7 +13,7 @@ test('first-use onboarding can complete, persist, and replay from settings', asy
     await page.getByRole('button', { name: '下一步' }).click()
   }
   await expect(page.getByText('5 / 5', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '完成' }).click()
+  await page.getByRole('button', { name: '完成', exact: true }).click()
   await expect(page.getByRole('dialog', { name: '新手引导完成' })).toBeVisible()
   await page.getByRole('button', { name: '进入首页' }).click()
 
@@ -65,15 +65,27 @@ test('real onboarding checklist uses server progress and safe course-aware navig
   await expect(page).toHaveURL(new RegExp(`/chat\\?courseId=${course.id}`))
 })
 
-test('onboarding tour keeps course and material targets distinct', async ({ page, request }) => {
+test('onboarding tour keeps course and material targets distinct', async ({ page, request }, testInfo) => {
   const { token } = await registerAndLogin(request, randomIdentity('target-audit'))
   await authenticatePage(page, token)
   await page.goto('/dashboard')
-  await expect(page.locator('[data-onboarding-target~="courses"]')).toHaveCount(1)
   await expect(page.locator('[data-onboarding-target~="documents"]')).toHaveCount(1)
-  const courseTarget = await page.locator('[data-onboarding-target~="courses"]').evaluate((element) => element.getAttribute('data-onboarding-target'))
-  const documentTarget = await page.locator('[data-onboarding-target~="documents"]').evaluate((element) => element.getAttribute('data-onboarding-target'))
-  expect(courseTarget).not.toBe(documentTarget)
+  if (testInfo.project.name === 'desktop-chrome') {
+    await expect(page.locator('[data-onboarding-target~="courses"]')).toHaveCount(1)
+    const courseTarget = await page.locator('[data-onboarding-target~="courses"]').evaluate((element) => element.getAttribute('data-onboarding-target'))
+    const documentTarget = await page.locator('[data-onboarding-target~="documents"]').evaluate((element) => element.getAttribute('data-onboarding-target'))
+    expect(courseTarget).not.toBe(documentTarget)
+    return
+  }
+
+  // The collapsed mobile sidebar deliberately has no course target.  The
+  // Element Plus Tour must fall back to its centered card and still advance.
+  await expect(page.locator('[data-onboarding-target~="courses"]')).toHaveCount(0)
+  await page.getByRole('button', { name: '开始引导' }).click()
+  await expect(page.getByText('1 / 5', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '下一步' }).click()
+  await expect(page.getByText('2 / 5', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '跳过引导' }).click()
 })
 
 test('checklist completion and progress remain isolated between users', async ({ page, request }) => {
