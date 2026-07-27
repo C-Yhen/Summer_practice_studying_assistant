@@ -231,7 +231,10 @@ async def generate_recommendations(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.5,
-            max_tokens=1500,
+            # This background job only needs a small JSON payload.  Do not
+            # spend Qwen's reasoning budget on deterministic presentation data.
+            enable_thinking=False,
+            max_tokens=700,
             _timeout=timeout_seconds,
         )
         return validate_recommendation_result(_extract_json(response))

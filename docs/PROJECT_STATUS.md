@@ -436,3 +436,10 @@
 - 计划增强传递 `unavailable_dates`；计划与练习页面对生成/bootstrap 请求保留 source course guard 并在进行中禁用课程切换。三页轮询在约 60 秒后只停止前端查询并诚实提示后台仍在运行，不伪造 failed。
 - 自动化：Round 21 专项 `24 passed`；完整后端 `157 passed, 3 skipped`；前端 `npm run build` 通过；定向 Playwright（结构化 AI 建议，无原始 JSON）desktop `1 passed`。Docker PostgreSQL、Redis、backend、worker、frontend 健康。
 - 真实 Qwen 验收：配置确认为 qwen/qwen3.7-plus。受控临时课程的推荐两次分别在约 13 秒 ReadTimeout，计划增强在约 20 秒失败；练习未执行，因前序计划失败而停止。该结果不视为通过，未通过延长超时掩盖。受控浏览器没有可用实例，因此三条网页人工验收、切课竞态人工检查与真实聊天 KaTeX 可视化仍未验证。
+
+## 最终真实 Qwen 轻量配置修正与封版记录
+
+- 推荐、计划和练习三类结构化后台增强请求现在显式传递 `enable_thinking=false`。`OpenAICompatibleProvider` 保持透传调用方参数；普通 RAG 问答不传递该字段，保留提供方的正常推理默认。输出上限分别收紧为推荐 700、计划 1400、练习 1800 tokens，未通过大幅调高 timeout 解决问题。
+- 受控实际 Qwen 运行环境使用 `qwen3.7-plus`。极短的非思考 JSON 请求成功返回 `{"ok":true}`。推荐后台任务 success，耗时 8.8 秒；计划后台任务 success，耗时 10.9 秒；练习任务实际获得 embedding 和 chat 200，耗时 7.0 秒，但模型返回的 source_quote 不通过现有严格溯源校验，因而按设计标记 `AI_RESPONSE_INVALID`。未切换为 flash 模型，也未继续无限重试。
+- 实际链路发现并修复了练习 RAG 调用漏传 `document_ids` 的问题；现在显式传递 `None`，避免在调用模型前由 TypeError 失败。
+- 验证：结构化 AI/Provider 专项 `34 passed`；完整后端 `159 passed, 3 skipped`；`frontend/npm run build` 通过。自动浏览器与真实聊天 KaTeX 可视化本次未执行。JWT HMAC 密钥长度和 Starlette TestClient 兼容性警告仍为已知非阻塞问题。

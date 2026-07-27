@@ -246,7 +246,10 @@ async def generate_plan_one_shot(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.4,
-            max_tokens=3000,
+            # Rule scheduling remains authoritative; this optional response
+            # only adds a compact summary and risks as JSON.
+            enable_thinking=False,
+            max_tokens=1400,
             _timeout=timeout_seconds,
         )
         return _extract_json(response)

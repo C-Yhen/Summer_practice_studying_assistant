@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,8 @@ from sqlalchemy import select
 from backend.app.models import AsyncTask, Course, KnowledgePoint, PracticeAttempt, PracticeQuestion, StudyPlanVersion
 from backend.app.providers.llm import LLMProvider
 from backend.app.services.ai_enrichment import process_ai_enhancement, queue_ai_enhancement
+from backend.app.services.ai_recommend import generate_recommendations
+from backend.app.planning.ai_planner import generate_plan_one_shot
 from backend.app.services.practice_gen import AIQuestionPayload, generate_questions_batch, persist_ai_questions
 
 
@@ -423,6 +426,61 @@ def test_plan_enhancement_preserves_unavailable_dates_from_rule_candidate(
         assert task is not None and task.input_data["unavailable_dates"] == ["2026-08-02"]
         asyncio.run(process_ai_enhancement(db, task, client.app.state.settings))
     assert {item.isoformat() for item in received["unavailable_dates"]} == {"2026-08-02"}
+
+
+def test_structured_ai_enhancements_disable_thinking_and_use_bounded_output(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recommendation, plan and practice JSON jobs should not consume Qwen thinking budget."""
+    course_id = _course(client, auth_headers, "Thinking disabled")
+    point_id = _point(client, course_id)
+    calls: list[dict[str, object]] = []
+
+    class RecorderProvider(LLMProvider):
+        async def chat(self, messages, **kwargs):
+            calls.append(kwargs)
+            prompt = messages[-1]["content"]
+            if "questions" in prompt:
+                return json.dumps({"questions": [{
+                    "knowledge_point_id": point_id, "stem": "Which statement is supported?",
+                    "options": [{"label": "A", "text": "A"}, {"label": "B", "text": "B"}, {"label": "C", "text": "C"}, {"label": "D", "text": "D"}],
+                    "correct_option": "A", "explanation": "Supported by the material.",
+                    "source_quote": "课程资料包含足够详细的内容以支持练习题验证和引用。", "difficulty": "basic",
+                }]})
+            if "available_days" in prompt or "可学习天数" in prompt:
+                return '{"summary":"concise plan","risks":[]}'
+            return '{"summary":"concise recommendation","recommendations":[]}'
+
+        async def embed(self, _texts):
+            return [[0.0] * 1024]
+
+    async def no_sources(*_args, **_kwargs):
+        return []
+
+    async def practice_sources(_db, _provider, *, course_id, query, document_ids, top_k):
+        assert isinstance(course_id, int)
+        assert query
+        assert document_ids is None
+        assert top_k == 12
+        return [{"document_name": "notes.txt", "quote": "课程资料包含足够详细的内容以支持练习题验证和引用。"}]
+
+    monkeypatch.setattr("backend.app.planning.ai_planner.retrieve", no_sources)
+    provider = RecorderProvider()
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        asyncio.run(generate_recommendations(
+            db, provider, user_id=owner_id, course_id=course_id, course_name="Thinking disabled",
+            exam_date=None, target_date=date(2026, 8, 1),
+        ))
+        asyncio.run(generate_plan_one_shot(
+            db, provider, course_id=course_id, goal="brief", start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 2), daily_minutes=30, session_minutes=30,
+        ))
+        monkeypatch.setattr("backend.app.services.practice_gen.retrieve", practice_sources)
+        asyncio.run(generate_questions_batch(db, provider, course_id=course_id, knowledge_point_ids=[point_id]))
+
+    assert [call["enable_thinking"] for call in calls] == [False, False, False]
+    assert [call["max_tokens"] for call in calls] == [700, 1400, 1800]
 
 
 def test_cancelled_enhancements_discard_plan_and_practice_writes(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:

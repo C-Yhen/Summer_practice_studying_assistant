@@ -162,6 +162,43 @@ def test_remote_runtime_status_exposes_model_without_secret() -> None:
     }
 
 
+def test_remote_chat_only_disables_thinking_when_callers_request_it(monkeypatch) -> None:
+    """Structured jobs opt out explicitly; ordinary chat keeps provider defaults."""
+    requests: list[dict] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    class Client:
+        async def post(self, _url, *, headers, json, timeout):
+            del headers, timeout
+            requests.append(json)
+            return Response()
+
+        @property
+        def is_closed(self) -> bool:
+            return False
+
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen3.7-plus",
+    )
+    provider = OpenAICompatibleProvider(settings)
+    monkeypatch.setattr(provider, "_http_client", lambda: Client())
+
+    asyncio.run(provider.chat([{"role": "user", "content": "json"}], enable_thinking=False, max_tokens=20))
+    asyncio.run(provider.chat([{"role": "user", "content": "ordinary chat"}], max_tokens=20))
+
+    assert requests[0]["enable_thinking"] is False
+    assert "enable_thinking" not in requests[1]
+
+
 def test_strict_rag_mode_calls_chat_provider_with_grounding_prompt() -> None:
     class RecordingProvider:
         messages: list[dict[str, str]] = []

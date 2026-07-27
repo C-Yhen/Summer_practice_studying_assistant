@@ -109,6 +109,7 @@ async def generate_questions_batch(
         provider,
         course_id=course_id,
         query=" ".join(point.name for point in points),
+        document_ids=None,
         top_k=12,
     )
     context = _context_from_sources(source_context)
@@ -128,7 +129,10 @@ async def generate_questions_batch(
     response = await provider.chat(
         [{"role": "system", "content": "Return only valid JSON matching the requested schema."}, {"role": "user", "content": prompt}],
         temperature=0.4,
-        max_tokens=3000,
+        # At most three four-option questions are requested, so a bounded JSON
+        # response is sufficient and avoids unnecessary thinking latency.
+        enable_thinking=False,
+        max_tokens=1800,
         _timeout=timeout_seconds,
     )
     payload = _extract_json(response)
