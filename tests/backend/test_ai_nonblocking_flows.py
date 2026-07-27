@@ -107,6 +107,46 @@ def test_eight_second_fake_llm_runs_only_in_background_task(client: TestClient, 
         assert result["summary"] == "background only"
 
 
+def test_slow_plan_and_practice_enhancements_do_not_delay_rule_routes(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan and practice use the same worker boundary as recommendations."""
+    course_id = _course(client, auth_headers, "Slow plan and practice AI")
+    _point(client, course_id)
+    _enable_remote_task_queue(client, monkeypatch)
+
+    started = time.perf_counter()
+    plan_response = client.post(
+        f"/api/v1/courses/{course_id}/study-plans/generate",
+        headers=auth_headers,
+        json={"goal": "rule candidate first", "start_date": "2026-08-01", "end_date": "2026-08-03"},
+    )
+    assert plan_response.status_code == 200 and time.perf_counter() - started < 2
+    started = time.perf_counter()
+    practice_response = client.post(f"/api/v1/courses/{course_id}/practice/questions/bootstrap", headers=auth_headers)
+    assert practice_response.status_code == 200 and time.perf_counter() - started < 2
+
+    async def slow_plan(*args, **kwargs):
+        await asyncio.sleep(8.1)
+        return {"summary": "background plan", "risks": [], "tasks": []}
+
+    async def slow_practice(*args, **kwargs):
+        await asyncio.sleep(8.1)
+        return []
+
+    monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda settings: object())
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_plan_one_shot", slow_plan)
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_questions_batch", slow_practice)
+    with client.app.state.database.session_factory() as db:
+        plan_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == plan_response.json()["data"]["ai_enhancement_task_id"]))
+        practice_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == practice_response.json()["data"]["ai_enhancement_task_id"]))
+        assert plan_task is not None and practice_task is not None
+        started = time.perf_counter()
+        assert asyncio.run(process_ai_enhancement(db, plan_task, client.app.state.settings))["summary"] == "background plan"
+        assert time.perf_counter() - started >= 8
+        started = time.perf_counter()
+        assert asyncio.run(process_ai_enhancement(db, practice_task, client.app.state.settings))["ai_created_count"] == 0
+        assert time.perf_counter() - started >= 8
+
+
 def test_rule_plan_remains_confirmable_when_ai_is_only_queued(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     course_id = _course(client, auth_headers, "Confirmable rule plan")
     _point(client, course_id)
