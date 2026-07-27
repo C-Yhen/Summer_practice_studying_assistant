@@ -92,20 +92,29 @@ test('checklist completion and progress remain isolated between users', async ({
   const userA = await registerAndLogin(request, randomIdentity('checklist-a'))
   const userB = await registerAndLogin(request, randomIdentity('checklist-b'))
   const course = await createCourse(request, userA.token, `Checklist complete ${Date.now()}`)
+  await authenticatePage(page, userA.token)
+  await page.goto('/dashboard')
+  await page.getByRole('button', { name: '暂时跳过' }).click()
+  await expect(page.getByText('1 / 5', { exact: true })).toBeVisible()
+
   const document = await uploadDocument(request, userA.token, course.id, 'checklist-complete.txt')
+  await page.goto('/dashboard')
+  await expect(page.getByText('2 / 5', { exact: true })).toBeVisible()
   const session = await apiData(request, userA.token, 'post', `/courses/${course.id}/chat-sessions`, {
     data: { title: 'Checklist session', mode: 'strict', document_ids: [document.document.id] },
   }) as { session_id: string }
   await apiData(request, userA.token, 'post', `/chat-sessions/${session.session_id}/messages`, {
     data: { question: '请帮我复习资料', mode: 'strict', document_ids: [document.document.id] },
   })
+  await page.goto('/dashboard')
+  await expect(page.getByText('3 / 5', { exact: true })).toBeVisible()
   await createActivePlan(request, userA.token, course.id)
+  await page.goto('/dashboard')
+  await expect(page.getByText('4 / 5', { exact: true })).toBeVisible()
   const today = await listTodayTasks(request, userA.token, course.id)
   await apiData(request, userA.token, 'post', `/study-tasks/${today.items[0].id}/complete`, { data: { actual_minutes: 10 } })
 
-  await authenticatePage(page, userA.token)
   await page.goto('/dashboard')
-  await page.getByRole('button', { name: '暂时跳过' }).click()
   await expect(page.getByRole('heading', { name: '新手任务已完成' })).toBeVisible()
   await expect(page.getByText('5 / 5', { exact: true })).toBeVisible()
 
