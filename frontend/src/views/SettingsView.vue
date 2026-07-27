@@ -1,23 +1,26 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Bell, Connection, Lock, Setting, User } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage } from '@/api/client'
 import { profileApi } from '@/api/services'
 import { useAuthStore } from '@/stores/auth'
+import { useOnboardingStore } from '@/stores/onboarding'
 import type { BackendUser, UserPreferences } from '@/types'
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
+const onboarding = useOnboardingStore()
 const tab = ref('profile')
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 const user = ref<BackendUser | null>(null)
 const profileDraft = reactive({ display_name: '', timezone: 'Asia/Shanghai' })
-const preferenceDraft = reactive<UserPreferences>({ foundation_level: 'basic', learning_order: 'explain_first', preferred_difficulty: 'adaptive', preferred_resource_types: [], session_minutes: 45, daily_minutes: 120, needs_exam_focus: true, needs_error_points: true, needs_derivation: false })
+const preferenceDraft = reactive<UserPreferences>({ foundation_level: 'basic', learning_order: 'explain_first', preferred_difficulty: 'adaptive', preferred_resource_types: [], session_minutes: 45, daily_minutes: 120, needs_exam_focus: true, needs_error_points: true, needs_derivation: false, onboarding_seen_version: 0, onboarding_completed_at: null })
 let savedProfile = ''
 let savedPreferences = ''
 
@@ -71,11 +74,17 @@ async function savePreferences() {
   if (preferenceDraft.session_minutes > preferenceDraft.daily_minutes) return ElMessage.warning('单次学习时长不能超过每日预算')
   saving.value = true
   try {
-    const updated = await profileApi.updatePreferences({ ...preferenceDraft })
+    const { onboarding_seen_version, onboarding_completed_at, ...editablePreferences } = preferenceDraft
+    const updated = await profileApi.updatePreferences(editablePreferences)
     Object.assign(preferenceDraft, updated)
     savedPreferences = JSON.stringify(preferenceDraft)
     ElMessage.success('学习偏好已保存')
   } catch (cause) { ElMessage.error(getApiErrorMessage(cause, '学习偏好保存失败')) } finally { saving.value = false }
+}
+
+async function replayOnboarding() {
+  await router.push('/dashboard')
+  onboarding.openManually()
 }
 
 watch(() => route.query.tab, (value) => { if (value === 'learning') tab.value = 'learning' }, { immediate: true })
@@ -99,6 +108,10 @@ onMounted(() => { void load() })
           <div class="section-title"><div><h2>个人资料</h2><p>仅保存当前账号的昵称和时区。</p></div><el-avatar :size="64" class="avatar">{{ avatarInitial }}</el-avatar></div>
           <el-form label-position="top" class="form-grid"><el-form-item label="昵称"><el-input v-model="profileDraft.display_name" maxlength="100" /></el-form-item><el-form-item label="邮箱"><el-input :model-value="user.email" disabled /></el-form-item><el-form-item label="时区"><el-select v-model="profileDraft.timezone" style="width:100%"><el-option v-for="zone in timezones" :key="zone" :label="zone" :value="zone" /></el-select></el-form-item><el-form-item label="注册时间"><el-input :model-value="createdAt" disabled /></el-form-item></el-form>
           <div class="actions"><el-button :disabled="saving || !profileDirty" @click="resetCurrent">恢复已保存值</el-button><el-button type="primary" :loading="saving" :disabled="saving || !profileDirty" @click="saveProfile">保存个人资料</el-button></div>
+          <section class="onboarding-help">
+            <div><h3>使用帮助</h3><p>想再次熟悉课程、资料、问答和学习计划入口？可随时重新查看新手引导。</p></div>
+            <el-button @click="replayOnboarding">重新查看新手引导</el-button>
+          </section>
         </template>
         <template v-else-if="tab === 'learning'">
           <div class="section-title"><div><h2>学习偏好</h2><p>只影响之后主动生成的候选计划，不会改写既有计划。</p></div></div>
@@ -114,5 +127,5 @@ onMounted(() => { void load() })
 </template>
 
 <style scoped>
-.page-alert{margin-bottom:16px}.settings-layout{display:grid;grid-template-columns:235px minmax(0,1fr);gap:17px}.settings-nav{height:max-content;padding:9px}.settings-nav button{width:100%;display:flex;align-items:center;gap:10px;padding:12px;border:0;border-radius:10px;background:transparent;color:#7d879b;text-align:left;cursor:pointer}.settings-nav button.active{background:#eef0ff;color:#5968df}.settings-nav span{display:flex;flex-direction:column}.settings-nav b{font-size:9px}.settings-nav small,.section-title p,.setting-row p,.resource-row p,.honest{color:#929bad;font-size:8px}.settings-content{min-height:500px}.section-title{display:flex;justify-content:space-between;align-items:center;padding-bottom:17px;margin-bottom:18px;border-bottom:1px solid #edf0f4}.section-title h2,h2{margin:0;color:#3c4762;font-size:15px}.section-title p{margin:6px 0 0}.avatar{background:linear-gradient(145deg,#6171ed,#9b6be2)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px}.setting-groups{display:grid;gap:18px}.setting-groups section{border:1px solid #e5e9f0;border-radius:12px;overflow:hidden}.setting-groups h3{padding:11px 14px;margin:0;background:#f8f9fc;color:#68738a;font-size:9px}.setting-row{display:flex;align-items:center;gap:10px;padding:13px 15px;border-top:1px solid #edf0f4}.setting-row>div{display:flex;flex:1;flex-direction:column}.setting-row b,.resource-row b{font-size:9px;color:#48536c}.setting-row p{margin:5px 0 0}.setting-row>span{color:#8e97aa;font-size:8px}.resource-row{padding:13px 15px;border-top:1px solid #edf0f4}.resource-row p{margin:5px 0 10px}.actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}.honest{margin:12px 0 18px;line-height:1.7}@media(max-width:800px){.settings-layout{grid-template-columns:1fr}.settings-nav{display:flex;overflow:auto}.settings-nav button{min-width:145px}.form-grid{grid-template-columns:1fr}}
+.page-alert{margin-bottom:16px}.settings-layout{display:grid;grid-template-columns:235px minmax(0,1fr);gap:17px}.settings-nav{height:max-content;padding:9px}.settings-nav button{width:100%;display:flex;align-items:center;gap:10px;padding:12px;border:0;border-radius:10px;background:transparent;color:#7d879b;text-align:left;cursor:pointer}.settings-nav button.active{background:#eef0ff;color:#5968df}.settings-nav span{display:flex;flex-direction:column}.settings-nav b{font-size:9px}.settings-nav small,.section-title p,.setting-row p,.resource-row p,.honest,.onboarding-help p{color:#929bad;font-size:8px}.settings-content{min-height:500px}.section-title{display:flex;justify-content:space-between;align-items:center;padding-bottom:17px;margin-bottom:18px;border-bottom:1px solid #edf0f4}.section-title h2,h2{margin:0;color:#3c4762;font-size:15px}.section-title p{margin:6px 0 0}.avatar{background:linear-gradient(145deg,#6171ed,#9b6be2)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px}.setting-groups{display:grid;gap:18px}.setting-groups section{border:1px solid #e5e9f0;border-radius:12px;overflow:hidden}.setting-groups h3{padding:11px 14px;margin:0;background:#f8f9fc;color:#68738a;font-size:9px}.setting-row{display:flex;align-items:center;gap:10px;padding:13px 15px;border-top:1px solid #edf0f4}.setting-row>div{display:flex;flex:1;flex-direction:column}.setting-row b,.resource-row b{font-size:9px;color:#48536c}.setting-row p{margin:5px 0 0}.setting-row>span{color:#8e97aa;font-size:8px}.resource-row{padding:13px 15px;border-top:1px solid #edf0f4}.resource-row p{margin:5px 0 10px}.actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}.onboarding-help{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:26px;padding-top:18px;border-top:1px solid #edf0f4}.onboarding-help h3{margin:0;color:#48536c;font-size:11px}.onboarding-help p{max-width:460px;margin:5px 0 0;line-height:1.6}.honest{margin:12px 0 18px;line-height:1.7}@media(max-width:800px){.settings-layout{grid-template-columns:1fr}.settings-nav{display:flex;overflow:auto}.settings-nav button{min-width:145px}.form-grid{grid-template-columns:1fr}.onboarding-help{align-items:flex-start;flex-direction:column}}
 </style>

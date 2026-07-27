@@ -59,12 +59,60 @@ def test_profile_and_preferences_are_partial_validated_and_user_scoped(client: T
     assert other_profile["preferences"]["daily_minutes"] == 120
 
 
+def test_onboarding_preferences_are_server_persisted_and_user_scoped(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    initial = client.get("/api/v1/users/me/profile", headers=auth_headers).json()["data"]
+    preferences = initial["preferences"]
+    assert preferences["onboarding_seen_version"] == 0
+    assert preferences["onboarding_completed_at"] is None
+
+    skipped = client.patch(
+        "/api/v1/users/me/preferences",
+        headers=auth_headers,
+        json={"onboarding_seen_version": 1},
+    )
+    assert skipped.status_code == 200
+    assert skipped.json()["data"]["onboarding_seen_version"] == 1
+    assert skipped.json()["data"]["onboarding_completed_at"] is None
+    assert skipped.json()["data"]["daily_minutes"] == preferences["daily_minutes"]
+
+    completed = client.patch(
+        "/api/v1/users/me/preferences",
+        headers=auth_headers,
+        json={"onboarding_seen_version": 1, "onboarding_completed": True},
+    )
+    assert completed.status_code == 200
+    completed_preferences = completed.json()["data"]
+    assert completed_preferences["onboarding_seen_version"] == 1
+    assert completed_preferences["onboarding_completed_at"] is not None
+    # A user who has seen the current version is not eligible for an automatic v1 prompt.
+    assert completed_preferences["onboarding_seen_version"] >= 1
+
+    other = _second_user(client)
+    other_preferences = client.get("/api/v1/users/me/profile", headers=other).json()["data"]["preferences"]
+    assert other_preferences["onboarding_seen_version"] == 0
+    assert other_preferences["onboarding_completed_at"] is None
+
+    assert client.patch(
+        "/api/v1/users/me/preferences",
+        headers=auth_headers,
+        json={"onboarding_seen_version": 2},
+    ).status_code == 422
+    assert client.patch(
+        "/api/v1/users/me/preferences",
+        headers=auth_headers,
+        json={"onboarding_completed": False},
+    ).status_code == 422
+
+
 @pytest.mark.parametrize(
     "field",
     [
         "foundation_level", "learning_order", "preferred_difficulty",
         "preferred_resource_types", "session_minutes", "daily_minutes",
         "needs_exam_focus", "needs_error_points", "needs_derivation",
+        "onboarding_seen_version", "onboarding_completed",
     ],
 )
 def test_patch_rejects_explicit_null_without_changing_saved_values(

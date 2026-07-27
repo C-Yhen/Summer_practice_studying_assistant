@@ -7,12 +7,15 @@ import { courseApi } from '@/api/services'
 import { navigationGroups, navigationItems } from '@/config/navigation'
 import AppLogo from '@/components/AppLogo.vue'
 import GlobalQuickSearch from '@/components/GlobalQuickSearch.vue'
+import OnboardingTour from '@/components/OnboardingTour.vue'
 import { useAuthStore } from '@/stores/auth'
+import { useOnboardingStore } from '@/stores/onboarding'
 import type { CourseListItem } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const onboarding = useOnboardingStore()
 const collapsed = ref(false)
 const mobile = ref(false)
 const drawerOpen = ref(false)
@@ -67,6 +70,7 @@ function syncViewport() {
 
 async function logout() {
   searchOpen.value = false
+  onboarding.reset()
   auth.logout()
   await router.replace('/login')
 }
@@ -117,6 +121,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 onMounted(() => {
   syncViewport()
   void loadCourses()
+  void onboarding.initialize()
   window.addEventListener('resize', syncViewport)
   window.addEventListener('keydown', handleGlobalKeydown)
 })
@@ -141,7 +146,7 @@ watch(() => route.query.courseId, (value) => {
         <el-menu :default-active="activeMenu" router :collapse="collapsed" :collapse-transition="false" class="sidebar-menu">
           <template v-for="group in navigationGroups" :key="group.label">
             <div v-if="!collapsed" class="nav-group-label">{{ group.label }}</div>
-            <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path">
+            <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path" :data-onboarding-target="item.onboardingTarget">
               <el-icon><component :is="item.icon" /></el-icon>
               <template #title><span>{{ item.label }}</span></template>
             </el-menu-item>
@@ -158,7 +163,7 @@ watch(() => route.query.courseId, (value) => {
       <el-menu :default-active="activeMenu" class="drawer-menu">
         <template v-for="group in navigationGroups" :key="group.label">
           <div class="nav-group-label">{{ group.label }}</div>
-          <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path" @click="go(item.path)">
+          <el-menu-item v-for="item in group.items" :key="item.path" :index="item.path" :data-onboarding-target="item.onboardingTarget" @click="go(item.path)">
             <el-icon><component :is="item.icon" /></el-icon><span>{{ item.label }}</span>
           </el-menu-item>
         </template>
@@ -216,6 +221,7 @@ watch(() => route.query.courseId, (value) => {
       @select-path="handleSearchSelection"
       @closed="restoreSearchFocus"
     />
+    <OnboardingTour />
   </div>
 </template>
 

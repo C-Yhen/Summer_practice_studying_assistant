@@ -624,6 +624,18 @@ export interface UserPreferences {
   needs_exam_focus: boolean
   needs_error_points: boolean
   needs_derivation: boolean
+  onboarding_seen_version: number
+  onboarding_completed_at: string | null
+}
+
+export type UserPreferencesUpdate = Partial<Omit<
+  UserPreferences,
+  'onboarding_seen_version' | 'onboarding_completed_at'
+>>
+
+export interface OnboardingProgressUpdate {
+  onboarding_seen_version: number
+  onboarding_completed?: true
 }
 
 export interface UserProfileResponse {

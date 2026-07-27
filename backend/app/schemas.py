@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+CURRENT_ONBOARDING_VERSION = 1
+
 
 class APIModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -95,6 +97,10 @@ class PreferenceUpdate(BaseModel):
     needs_exam_focus: bool | None = None
     needs_error_points: bool | None = None
     needs_derivation: bool | None = None
+    onboarding_seen_version: int | None = Field(
+        default=None, ge=0, le=CURRENT_ONBOARDING_VERSION
+    )
+    onboarding_completed: Literal[True] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -123,6 +129,8 @@ class PreferenceRead(APIModel):
     needs_exam_focus: bool
     needs_error_points: bool
     needs_derivation: bool
+    onboarding_seen_version: int
+    onboarding_completed_at: datetime | None
 
 
 class CourseBase(BaseModel):

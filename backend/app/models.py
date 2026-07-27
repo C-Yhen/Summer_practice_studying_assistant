@@ -77,6 +77,10 @@ class UserPreference(TimestampMixin, Base):
     needs_exam_focus: Mapped[bool] = mapped_column(Boolean, default=True)
     needs_error_points: Mapped[bool] = mapped_column(Boolean, default=True)
     needs_derivation: Mapped[bool] = mapped_column(Boolean, default=False)
+    onboarding_seen_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     user: Mapped[User] = relationship(back_populates="preferences")
 

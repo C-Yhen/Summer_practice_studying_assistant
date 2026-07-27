@@ -49,6 +49,8 @@ import type {
   TodayTaskListResponse,
   BackendUser,
   UserPreferences,
+  UserPreferencesUpdate,
+  OnboardingProgressUpdate,
   UserProfileResponse,
   UserProfileUpdate,
   PracticeQuestion,
@@ -153,7 +155,7 @@ function parsePreferences(value: unknown): UserPreferences {
   const orders = ['explain_first', 'weakness_first']
   const difficulties = ['basic', 'adaptive', 'advanced']
   const resourceTypes = ['pdf', 'ppt', 'markdown', 'text']
-  if (!isRecord(value) || !levels.includes(String(value.foundation_level)) || !orders.includes(String(value.learning_order)) || !difficulties.includes(String(value.preferred_difficulty)) || !Array.isArray(value.preferred_resource_types) || !value.preferred_resource_types.every((item) => resourceTypes.includes(String(item))) || !Number.isInteger(value.session_minutes) || !Number.isInteger(value.daily_minutes) || typeof value.needs_exam_focus !== 'boolean' || typeof value.needs_error_points !== 'boolean' || typeof value.needs_derivation !== 'boolean') {
+  if (!isRecord(value) || !levels.includes(String(value.foundation_level)) || !orders.includes(String(value.learning_order)) || !difficulties.includes(String(value.preferred_difficulty)) || !Array.isArray(value.preferred_resource_types) || !value.preferred_resource_types.every((item) => resourceTypes.includes(String(item))) || !Number.isInteger(value.session_minutes) || !Number.isInteger(value.daily_minutes) || typeof value.needs_exam_focus !== 'boolean' || typeof value.needs_error_points !== 'boolean' || typeof value.needs_derivation !== 'boolean' || !Number.isInteger(value.onboarding_seen_version) || Number(value.onboarding_seen_version) < 0 || Number(value.onboarding_seen_version) > 1 || (value.onboarding_completed_at !== null && typeof value.onboarding_completed_at !== 'string')) {
     throw new ApiEnvelopeError('后端返回的学习偏好不完整')
   }
   return value as unknown as UserPreferences
@@ -518,7 +520,7 @@ const mockPlans = new Map<number, CurrentStudyPlanResponse>()
 const mockTodayTaskItems: TodayTask[] = []
 const mockProfile: UserProfileResponse = {
   user: { id: 1, email: 'demo@example.com', display_name: '演示学习者', full_name: '演示学习者', timezone: 'Asia/Shanghai', is_active: true, created_at: now, updated_at: now },
-  preferences: { foundation_level: 'basic', learning_order: 'explain_first', preferred_difficulty: 'adaptive', preferred_resource_types: ['pdf', 'markdown'], session_minutes: 45, daily_minutes: 120, needs_exam_focus: true, needs_error_points: true, needs_derivation: false },
+  preferences: { foundation_level: 'basic', learning_order: 'explain_first', preferred_difficulty: 'adaptive', preferred_resource_types: ['pdf', 'markdown'], session_minutes: 45, daily_minutes: 120, needs_exam_focus: true, needs_error_points: true, needs_derivation: false, onboarding_seen_version: 0, onboarding_completed_at: null },
 }
 let mockPlanId = 2000
 let mockPlanTaskId = 3000
@@ -538,8 +540,17 @@ export const profileApi = {
     }
     return parseBackendUser(unwrapApiResponse<unknown>(await apiClient.patch('/users/me', payload)))
   },
-  async updatePreferences(payload: Partial<UserPreferences>): Promise<UserPreferences> {
+  async updatePreferences(payload: UserPreferencesUpdate): Promise<UserPreferences> {
     if (mockEnabled) { await mockDelay(); Object.assign(mockProfile.preferences, payload); return structuredClone(mockProfile.preferences) }
+    return parsePreferences(unwrapApiResponse<unknown>(await apiClient.patch('/users/me/preferences', payload)))
+  },
+  async updateOnboarding(payload: OnboardingProgressUpdate): Promise<UserPreferences> {
+    if (mockEnabled) {
+      await mockDelay()
+      mockProfile.preferences.onboarding_seen_version = payload.onboarding_seen_version
+      if (payload.onboarding_completed) mockProfile.preferences.onboarding_completed_at ??= new Date().toISOString()
+      return structuredClone(mockProfile.preferences)
+    }
     return parsePreferences(unwrapApiResponse<unknown>(await apiClient.patch('/users/me/preferences', payload)))
   },
 }

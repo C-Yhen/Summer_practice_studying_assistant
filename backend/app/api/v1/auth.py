@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, status
@@ -10,6 +11,7 @@ from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import LearningRecord, StudyTask, User, UserPreference
 from backend.app.responses import ok
 from backend.app.schemas import (
+    CURRENT_ONBOARDING_VERSION,
     LoginRequest,
     PreferenceRead,
     PreferenceUpdate,
@@ -111,12 +113,19 @@ def update_preferences(
 ) -> dict:
     preference = _preference_for_user(db, current_user.id)
     updates = payload.model_dump(exclude_unset=True)
+    onboarding_completed = updates.pop("onboarding_completed", False)
     session_minutes = updates.get("session_minutes", preference.session_minutes)
     daily_minutes = updates.get("daily_minutes", preference.daily_minutes)
     if session_minutes > daily_minutes:
         raise HTTPException(status_code=422, detail="SESSION_MINUTES_EXCEEDS_DAILY_MINUTES")
     for field, value in updates.items():
         setattr(preference, field, value)
+    if onboarding_completed:
+        preference.onboarding_seen_version = max(
+            preference.onboarding_seen_version, CURRENT_ONBOARDING_VERSION
+        )
+        if preference.onboarding_completed_at is None:
+            preference.onboarding_completed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(preference)
     return ok(_preference_payload(preference))
