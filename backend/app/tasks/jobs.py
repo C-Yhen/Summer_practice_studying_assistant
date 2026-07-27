@@ -13,6 +13,7 @@ from backend.app.providers.llm import get_llm_provider
 from backend.app.services.async_tasks import mark_dispatch_failed, mark_task_cancelled
 from backend.app.services.documents import process_document
 from backend.app.services.reports import generate_weekly_report
+from backend.app.services.ai_enrichment import process_ai_enhancement
 
 
 @shared_task(bind=True, autoretry_for=(ConnectionError, TimeoutError), retry_backoff=True, max_retries=3)
@@ -60,5 +61,22 @@ def generate_weekly_report_job(self, task_public_id: str) -> dict:
             db.refresh(task)
             set_task_progress(task.public_id, {"status": task.status, "progress": task.progress, "current_step": task.current_step})
             return result
+    finally:
+        database.engine.dispose()
+
+
+@shared_task(bind=True, max_retries=1)
+def process_ai_enhancement_job(self, task_public_id: str) -> dict:
+    """Run optional remote AI work outside request-serving Uvicorn workers."""
+    settings = get_settings()
+    database = Database(settings.database_url)
+    try:
+        with database.session_factory() as db:
+            task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == task_public_id))
+            if task is None:
+                raise ValueError("task no longer exists")
+            if task.status in {"success", "failed", "cancelled"}:
+                return task.result_data or {}
+            return asyncio.run(process_ai_enhancement(db, task, settings))
     finally:
         database.engine.dispose()

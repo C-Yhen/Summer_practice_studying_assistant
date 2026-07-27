@@ -75,7 +75,7 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
   if (!axios.isAxiosError(error)) return error instanceof Error ? error.message : fallback
 
   if (error.code === AxiosError.ETIMEDOUT || error.code === AxiosError.ECONNABORTED) {
-    return '连接后端超时，请确认服务已启动'
+    return '请求响应超时，后端可能暂时繁忙；请稍后重试。基础功能通常仍可继续使用。'
   }
   if (!error.response) return '无法连接后端服务，请确认后端和数据库正常运行'
 

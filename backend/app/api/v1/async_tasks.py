@@ -14,6 +14,7 @@ from backend.app.responses import ok
 from backend.app.schemas import AsyncTaskCreate, WeeklyReportInput
 from backend.app.security import decode_access_token
 from backend.app.services.async_tasks import (
+    AI_ENRICHMENT_TASK_TYPES,
     DOCUMENT_TASK_TYPES,
     dispatch_async_task,
     mark_task_cancelled,
@@ -23,7 +24,7 @@ from backend.app.services.reports import render_weekly_report_markdown
 
 router = APIRouter(tags=["async-tasks"])
 TASK_STATUSES = {"queued", "processing", "cancelling", "success", "failed", "cancelled"}
-TASK_TYPES = {"document_parse", "weekly_report", "plan_generation"}
+TASK_TYPES = {"document_parse", "weekly_report", "plan_generation", *AI_ENRICHMENT_TASK_TYPES}
 REPORT_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -71,6 +72,16 @@ def _retryable_resource_exists(db: DBSession, task: AsyncTask, user_id: int) -> 
             Document.id == document_id,
             Document.is_deleted.is_(False),
             Document.course.has(owner_id=user_id, archived=False),
+        )) is not None
+    if task.task_type in AI_ENRICHMENT_TASK_TYPES:
+        try:
+            course_id = int(task.resource_id or "")
+        except ValueError:
+            return False
+        return db.scalar(select(Course.id).where(
+            Course.id == course_id,
+            Course.owner_id == user_id,
+            Course.archived.is_(False),
         )) is not None
     return False
 

@@ -195,6 +195,7 @@ async def generate_plan_one_shot(
     needs_error_points: bool = True,
     unavailable_dates: list[date] | None = None,
     document_ids: list[int] | None = None,
+    timeout_seconds: int = 18,
 ) -> dict[str, Any]:
     """Single LLM call: retrieve context then generate plan directly."""
 
@@ -246,9 +247,9 @@ async def generate_plan_one_shot(
             ],
             temperature=0.4,
             max_tokens=3000,
+            _timeout=timeout_seconds,
         )
         return _extract_json(response)
     except Exception as e:
-        print(f"[AI Planner] One-shot plan failed: {e}")
-        return {"tasks": [], "risks": [], "summary": ""}
+        raise RuntimeError("AI_PLAN_ENHANCEMENT_FAILED") from e
 

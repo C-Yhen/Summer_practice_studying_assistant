@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     llm_chat_model: str = ""
     llm_embedding_model: str = ""
     llm_embedding_batch_size: int = 20
+    # Remote AI is optional enhancement work. These bounds protect a worker from
+    # a slow provider; interactive endpoints never wait for them.
+    ai_recommend_timeout_seconds: int = 12
+    ai_plan_timeout_seconds: int = 18
+    ai_practice_timeout_seconds: int = 18
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"

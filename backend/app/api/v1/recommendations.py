@@ -33,9 +33,8 @@ from backend.app.recommendation.engine import (
 )
 from backend.app.responses import ok
 from backend.app.schemas import CourseRecommendationFeedback, UserBehaviorTrack
-from backend.app.services.ai_recommend import generate_recommendations as ai_recommend
+from backend.app.services.ai_enrichment import ai_enhancement_payload, queue_ai_enhancement
 from backend.app.services.timezones import local_date_range_utc, resolve_user_timezone
-from backend.app.providers.llm import get_llm_provider
 
 router = APIRouter(tags=["recommendations"])
 
@@ -247,27 +246,18 @@ async def course_recommendations(
 ) -> dict:
     result = build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit, category)
 
-    # ---- Blend AI-powered suggestions ----
-    llm_provider = get_llm_provider(settings)
-    is_mock = settings.llm_provider.strip().lower() == "mock"
-    if not is_mock and result.get("items"):
-        try:
-            course = db.get(Course, course_id)
-            ai_result = await ai_recommend(
-                db, llm_provider,
-                user_id=current_user.id,
-                course_id=course_id,
-                course_name=course.name if course else "",
-                exam_date=course.exam_date if course else None,
-            )
-            ai_summary = ai_result.get("summary", "")
-            ai_items = ai_result.get("recommendations", [])
-            if ai_summary:
-                result["ai_summary"] = ai_summary
-            if ai_items:
-                result["ai_suggestions"] = ai_items[:3]
-        except Exception:
-            pass  # AI failure → keep rule-based only
+    # Rule recommendations are immediately usable. Remote AI is persisted as
+    # a background enhancement and never delays this GET response.
+    if result.get("items"):
+        task = await queue_ai_enhancement(
+            db,
+            settings,
+            task_type="ai_recommendation",
+            user_id=current_user.id,
+            course_id=course_id,
+            input_data={"target_date": result["target_date"]},
+        )
+        result["ai_enhancement"] = ai_enhancement_payload(task)
 
     return ok(result)
 

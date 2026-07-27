@@ -58,8 +58,9 @@ def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, _url, *, headers, json):
+        async def post(self, _url, *, headers, json, timeout=None):
             del headers
+            assert timeout is not None
             requests.append(json)
             return MockResponse(json["input"])
 

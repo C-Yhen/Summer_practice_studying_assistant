@@ -10,6 +10,7 @@ from backend.app.models import AsyncTask, utcnow
 ACTIVE_TASK_STATUSES = {"queued", "processing", "cancelling"}
 TERMINAL_TASK_STATUSES = {"success", "failed", "cancelled"}
 DOCUMENT_TASK_TYPES = {"document_parse", "document_process"}
+AI_ENRICHMENT_TASK_TYPES = {"ai_recommendation", "plan_ai_enhancement", "practice_ai_enhancement"}
 
 
 def iso_or_none(value: datetime | None) -> str | None:
@@ -107,6 +108,18 @@ async def dispatch_async_task(db: Session, task: AsyncTask, settings: Any) -> No
             generate_weekly_report_job.delay(task.public_id)
         except Exception:
             mark_dispatch_failed(db, task)
+        return
+
+    if task.task_type in AI_ENRICHMENT_TASK_TYPES:
+        # AI enhancement is intentionally never run inline, including the
+        # SQLite/synchronous-document test mode. Interactive routes must not
+        # inherit provider latency.
+        try:
+            from backend.app.tasks.jobs import process_ai_enhancement_job
+
+            process_ai_enhancement_job.delay(task.public_id)
+        except Exception:
+            mark_dispatch_failed(db, task, "AI_ENHANCEMENT_DISPATCH_FAILED")
         return
 
     mark_dispatch_failed(db, task, "TASK_TYPE_NOT_IMPLEMENTED")

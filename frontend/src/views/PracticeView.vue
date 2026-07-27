@@ -110,11 +110,14 @@ async function load() {
 }
 
 async function bootstrap() {
-  if (!courseId.value || submitting.value) return
+  if (!courseId.value || submitting.value || booting.value) return
   booting.value = true
   try {
-    await practiceApi.bootstrap(courseId.value)
+    const generated = await practiceApi.bootstrap(courseId.value)
     await load()
+    if (generated.ai_enhancement_task_id) {
+      ElMessage.success('基础自测题已可练习；AI 增强题正在后台生成。')
+    }
   } catch (bootstrapError) {
     ElMessage.error(getApiErrorMessage(bootstrapError, '生成基础自测题失败'))
   } finally {
@@ -294,7 +297,7 @@ onMounted(load)
                       { label: '课程练习', value: 'all' },
                       { label: '错题复习', value: 'wrong' },
                     ]"
-                    :disabled="submitting"
+                    :disabled="submitting || booting"
                     @change="switchMode"
                   />
                 </div>

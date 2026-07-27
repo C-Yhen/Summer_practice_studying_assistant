@@ -19,15 +19,11 @@ from backend.app.models import (
     UserPreference,
 )
 from backend.app.planning.engine import PlanInput, PlanningPoint, build_plan, reschedule
-from backend.app.planning.ai_planner import (
-    extract_knowledge_points,
-    generate_plan_one_shot,
-)
-from backend.app.providers.llm import get_llm_provider
 from backend.app.responses import ok
 from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, TaskComplete
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
 from backend.app.services.mastery import apply_mastery_evidence
+from backend.app.services.ai_enrichment import queue_ai_enhancement
 
 router = APIRouter(tags=["study-plans"])
 
@@ -174,73 +170,40 @@ async def generate_plan(
         "overrides": {"daily_minutes": daily_override, "session_minutes": session_override},
     }
 
-    skeleton: dict = {"tasks": [], "risks": [], "summary": ""}
-    plan_mode = "rule"
-
-    # ---- Try AI-powered one-shot generation (single LLM call) ----
-    llm_provider = get_llm_provider(settings)
-    is_mock = settings.llm_provider.strip().lower() == "mock"
-    ai_kps: list[dict] = []
-    if not is_mock:
-        try:
-            ai_kps = await extract_knowledge_points(db, llm_provider, course_id=course_id)
-            if not _persist_ai_points(db, course_id, ai_kps):
-                # A malformed AI extraction must not leave an otherwise valid AI
-                # plan unusable by the practice and mastery flows.
-                _seed_points(db, course_id)
-            ai_plan = await generate_plan_one_shot(
-                db, llm_provider, course_id=course_id,
-                goal=payload.goal,
-                start_date=payload.start_date, end_date=payload.end_date,
-                daily_minutes=daily_minutes, session_minutes=session_minutes,
-                foundation_level=preference.foundation_level,
-                learning_order=preference.learning_order,
-                preferred_difficulty=preference.preferred_difficulty,
-                needs_exam_focus=preference.needs_exam_focus,
-                needs_error_points=preference.needs_error_points,
-                unavailable_dates=list(payload.unavailable_dates),
+    # Candidate scheduling is always rule-first. Persisted knowledge points are
+    # reused; new courses receive safe seed points before any remote work.
+    points = _seed_points(db, course_id)
+    input_data = PlanInput(
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        default_daily_minutes=daily_minutes,
+        session_minutes=session_minutes,
+        unavailable_dates=set(payload.unavailable_dates),
+        daily_overrides={date.fromisoformat(key): value for key, value in payload.daily_availability.items() if key != "default_minutes"},
+        foundation_level=preference.foundation_level,
+        learning_order=preference.learning_order,
+        preferred_difficulty=preference.preferred_difficulty,
+        needs_exam_focus=preference.needs_exam_focus,
+        needs_error_points=preference.needs_error_points,
+        needs_derivation=preference.needs_derivation,
+    )
+    skeleton = build_plan(
+        input_data,
+        [
+            PlanningPoint(
+                id=point.id,
+                name=point.name,
+                importance=point.importance,
+                mastery=masteries[point.id].score if point.id in masteries else None,
+                has_mastery_record=point.id in masteries and masteries[point.id].attempts > 0,
+                estimated_minutes=point.estimated_minutes,
+                difficulty=point.difficulty,
+                prerequisite_ids=point.prerequisite_ids,
             )
-            if ai_plan.get("tasks"):
-                skeleton = ai_plan
-                plan_mode = "ai"
-                generation_context["ai_one_shot"] = True
-        except Exception:
-            pass
-
-    if not skeleton.get("tasks"):
-        # ---- Fallback: rule-based generation ----
-        points = _seed_points(db, course_id)
-        input_data = PlanInput(
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            default_daily_minutes=daily_minutes,
-            session_minutes=session_minutes,
-            unavailable_dates=set(payload.unavailable_dates),
-            daily_overrides={date.fromisoformat(key): value for key, value in payload.daily_availability.items() if key != "default_minutes"},
-            foundation_level=preference.foundation_level,
-            learning_order=preference.learning_order,
-            preferred_difficulty=preference.preferred_difficulty,
-            needs_exam_focus=preference.needs_exam_focus,
-            needs_error_points=preference.needs_error_points,
-            needs_derivation=preference.needs_derivation,
-        )
-        skeleton = build_plan(
-            input_data,
-            [
-                PlanningPoint(
-                    id=point.id,
-                    name=point.name,
-                    importance=point.importance,
-                    mastery=masteries[point.id].score if point.id in masteries else None,
-                    has_mastery_record=point.id in masteries and masteries[point.id].attempts > 0,
-                    estimated_minutes=point.estimated_minutes,
-                    difficulty=point.difficulty,
-                    prerequisite_ids=point.prerequisite_ids,
-                )
-                for point in points
-            ],
-        )
-        plan_mode = "rule"
+            for point in points
+        ],
+    )
+    plan_mode = "rule"
 
     # Refresh points for task mapping
     db_points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
@@ -256,12 +219,7 @@ async def generate_plan(
         db.flush()
         for item in skeleton["tasks"]:
             kp_id = None
-            if "knowledge_point_index" in item and ai_kps:
-                idx = item["knowledge_point_index"]
-                if 0 <= idx < len(ai_kps):
-                    kp_name = ai_kps[idx]["name"]
-                    kp_id = kp_name_to_id.get(kp_name)
-            elif item.get("knowledge_point_id"):
+            if item.get("knowledge_point_id"):
                 kp_id = item["knowledge_point_id"]
             db.add(StudyTask(plan_version_id=version.id, user_id=current_user.id, course_id=course_id, knowledge_point_id=kp_id, scheduled_date=date.fromisoformat(item["scheduled_date"]) if isinstance(item["scheduled_date"], str) else item["scheduled_date"], title=item["title"], task_type=item.get("task_type", "focused_study"), estimated_minutes=item["estimated_minutes"], priority=item.get("priority", 0.5), difficulty=item.get("difficulty", "basic")))
         task = AsyncTask(user_id=current_user.id, task_type="plan_generation", resource_type="study_plan", resource_id=str(plan.id), status="success", progress=100, current_step="completed", result_data={"plan_id": plan.id, "version": 1, "plan_mode": plan_mode})
@@ -271,8 +229,43 @@ async def generate_plan(
         db.rollback()
         raise HTTPException(status_code=500, detail="PLAN_GENERATION_FAILED") from None
     db.refresh(version)
+    ai_task = await queue_ai_enhancement(
+        db,
+        settings,
+        task_type="plan_ai_enhancement",
+        user_id=current_user.id,
+        course_id=course_id,
+        input_data={
+            "plan_id": plan.id,
+            "version": version.version,
+            "goal": plan.goal,
+            "start_date": plan.start_date.isoformat(),
+            "end_date": plan.end_date.isoformat(),
+            "daily_minutes": daily_minutes,
+            "session_minutes": session_minutes,
+            "foundation_level": preference.foundation_level,
+            "learning_order": preference.learning_order,
+            "preferred_difficulty": preference.preferred_difficulty,
+            "needs_exam_focus": preference.needs_exam_focus,
+            "needs_error_points": preference.needs_error_points,
+        },
+        dedupe_data={
+            "goal": plan.goal,
+            "start_date": plan.start_date.isoformat(),
+            "end_date": plan.end_date.isoformat(),
+            "daily_minutes": daily_minutes,
+            "session_minutes": session_minutes,
+            "foundation_level": preference.foundation_level,
+            "learning_order": preference.learning_order,
+            "preferred_difficulty": preference.preferred_difficulty,
+            "needs_exam_focus": preference.needs_exam_focus,
+            "needs_error_points": preference.needs_error_points,
+            "unavailable_dates": sorted(item.isoformat() for item in payload.unavailable_dates),
+            "daily_availability": payload.daily_availability,
+        },
+    )
     token = issue_confirmation(settings.jwt_secret, user_id=current_user.id, action="confirm_plan", resource_id=f"{plan.id}:1", payload={"base_version": 0})
-    return ok({"async_task_id": task.public_id, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
+    return ok({"async_task_id": task.public_id, "ai_enhancement_task_id": ai_task.public_id if ai_task else None, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
 
 
 @router.get("/courses/{course_id}/study-plans/current")

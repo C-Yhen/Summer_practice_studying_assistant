@@ -19,10 +19,20 @@ from backend.app.models import (
 from backend.app.responses import ok
 from backend.app.schemas import PracticeAttemptCreate, WrongBookUpdate
 from backend.app.services.mastery import apply_mastery_evidence
-from backend.app.services.practice_gen import generate_question as ai_generate_question
-from backend.app.providers.llm import get_llm_provider
+from backend.app.services.ai_enrichment import queue_ai_enhancement
 
 router = APIRouter(tags=["practice"])
+
+
+def _next_rule_seed(db: DBSession, course_id: int, point_id: int) -> str:
+    prefix = f"rule_seed:kp:{point_id}"
+    version = 1
+    while db.scalar(select(PracticeQuestion.id).where(
+        PracticeQuestion.course_id == course_id,
+        PracticeQuestion.seed_key == (prefix if version == 1 else f"{prefix}:v{version}"),
+    )) is not None:
+        version += 1
+    return prefix if version == 1 else f"{prefix}:v{version}"
 
 
 def _summary(db: DBSession, user_id: int, course_id: int) -> dict:
@@ -192,58 +202,20 @@ async def bootstrap(
         })
 
     created = existing = 0
-    is_mock = settings.llm_provider.strip().lower() == "mock"
-    llm_provider = get_llm_provider(settings) if not is_mock else None
-
-    # ---- Try AI-powered question generation (replaces rule-based over time) ----
-    if not is_mock:
-        assert llm_provider is not None
-        for point in points[:3]:
-            key = f"ai_gen:kp:{point.id}:v2"
-            if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
-                continue
-            try:
-                question_data = await ai_generate_question(
-                    db, llm_provider,
-                    course_id=course_id,
-                    knowledge_point=point.name,
-                    difficulty=point.difficulty,
-                )
-                if question_data and question_data.get("stem"):
-                    # Replace old rule-based question for this KP
-                    old_key = f"rule_seed:kp:{point.id}"
-                    old_q = db.scalar(select(PracticeQuestion).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == old_key))
-                    if old_q:
-                        db.delete(old_q)
-                        db.flush()
-                    db.add(PracticeQuestion(
-                        course_id=course.id, knowledge_point_id=point.id, seed_key=key,
-                        stem=question_data["stem"],
-                        options=[{"key": opt.get("label","A"), "text": opt.get("text","")} for opt in question_data.get("options",[])],
-                        correct_option=question_data.get("correct_option","A"),
-                        explanation=question_data.get("explanation",""),
-                        difficulty=point.difficulty, origin="ai_gen",
-                        source_quote=question_data.get("source_quote"),
-                    ))
-                    created += 1
-                    db.flush()
-            except Exception:
-                continue
-
-    # ---- Rule-based fallback for KPs without any question ----
+    # Rule questions are the interactive contract. AI is scheduled only after
+    # this commit and cannot replace/delete questions with answer history.
     for point in points:
         has_any = db.scalar(
             select(PracticeQuestion.id).where(
                 PracticeQuestion.course_id == course.id,
                 PracticeQuestion.knowledge_point_id == point.id,
+                PracticeQuestion.is_active.is_(True),
             )
         )
         if has_any:
             existing += 1
             continue
-        key = f"rule_seed:kp:{point.id}"
-        if db.scalar(select(PracticeQuestion.id).where(PracticeQuestion.course_id == course.id, PracticeQuestion.seed_key == key)):
-            continue
+        key = _next_rule_seed(db, course.id, point.id)
         name = point.name
         db.add(PracticeQuestion(
             course_id=course.id, knowledge_point_id=point.id, seed_key=key,
@@ -260,7 +232,20 @@ async def bootstrap(
         ))
         created += 1
     db.commit()
+    ai_task = await queue_ai_enhancement(
+        db,
+        settings,
+        task_type="practice_ai_enhancement",
+        user_id=current_user.id,
+        course_id=course.id,
+        input_data={"knowledge_point_ids": [point.id for point in points[:3]]},
+    )
     return ok({
+        "generation_mode": "rule_first",
+        "rule_created_count": created,
+        "ai_created_count": 0,
+        "failed_count": 0,
+        "ai_enhancement_task_id": ai_task.public_id if ai_task else None,
         "created_count": created, "existing_count": existing,
         "total": created + existing,
         "reason": "NO_KNOWLEDGE_POINTS" if not points else None,

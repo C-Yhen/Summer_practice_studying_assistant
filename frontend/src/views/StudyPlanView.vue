@@ -199,7 +199,9 @@ async function generatePlan() {
       confirmation_token: generated.confirmation_token,
       ...generated.candidate_version,
     }
-    ElMessage.success('候选学习计划已生成，确认前不会进入今日任务')
+    ElMessage.success(generated.ai_enhancement_task_id
+      ? '候选学习计划已生成；AI 摘要会在后台补充，当前计划可直接确认。'
+      : '候选学习计划已生成，确认前不会进入今日任务')
   } catch (error) {
     planError.value = pageError(error, '学习计划生成失败')
   } finally {

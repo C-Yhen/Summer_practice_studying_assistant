@@ -399,11 +399,13 @@ function parseGeneratedPlan(value: unknown): StudyPlanGenerateResponse {
     || typeof value.end_date !== 'string'
     || !Number.isInteger(value.expected_base_version)
     || typeof value.confirmation_token !== 'string'
+    || (value.ai_enhancement_task_id !== undefined && value.ai_enhancement_task_id !== null && typeof value.ai_enhancement_task_id !== 'string')
   ) {
     throw new ApiEnvelopeError('后端返回的候选计划信息不完整')
   }
   return {
     async_task_id: value.async_task_id,
+    ai_enhancement_task_id: typeof value.ai_enhancement_task_id === 'string' ? value.ai_enhancement_task_id : null,
     plan_id: value.plan_id as number,
     course_id: value.course_id as number,
     goal: value.goal,
@@ -1065,7 +1067,7 @@ export const planApi = {
       })
       return { async_task_id: `mock-plan-task-${planId}`, plan_id: planId, course_id: courseId, goal: payload.goal, start_date: payload.start_date, end_date: payload.end_date, expected_base_version: 0, candidate_version: version, confirmation_token: token }
     }
-    return parseGeneratedPlan(unwrapApiResponse<unknown>(await aiApiClient.post(`/courses/${courseId}/study-plans/generate`, payload)))
+    return parseGeneratedPlan(unwrapApiResponse<unknown>(await apiClient.post(`/courses/${courseId}/study-plans/generate`, payload)))
   },
 
   async confirm(planId: number, version: number, payload: PlanConfirmRequest): Promise<PlanConfirmResponse> {
@@ -1159,6 +1161,12 @@ function parseRecommendations(value: unknown): CourseRecommendationsResponse {
   if (items.some((item) => !item || typeof item.recommendation_key !== 'string' || !itemCategories.includes(item.category) || typeof item.category_label !== 'string' || !Number.isFinite(item.score) || !Array.isArray(item.signals) || !item.action)) {
     throw new ApiEnvelopeError('后端返回的推荐条目不完整')
   }
+  if (value.ai_enhancement !== undefined && value.ai_enhancement !== null) {
+    const enhancement = value.ai_enhancement
+    if (!isRecord(enhancement) || typeof enhancement.task_id !== 'string' || !['queued', 'processing', 'success', 'failed', 'cancelled'].includes(String(enhancement.status)) || (enhancement.current_step !== null && typeof enhancement.current_step !== 'string') || (enhancement.summary !== null && typeof enhancement.summary !== 'string') || !Array.isArray(enhancement.suggestions) || (enhancement.failure_type !== null && typeof enhancement.failure_type !== 'string')) {
+      throw new ApiEnvelopeError('后端返回的 AI 增强状态不完整')
+    }
+  }
   return value as unknown as CourseRecommendationsResponse
 }
 
@@ -1225,7 +1233,7 @@ export const practiceApi = {
       }
       return { created_count: 0, existing_count: existing.length, total: existing.length, reason: null }
     }
-    return unwrapApiResponse<{created_count:number;existing_count:number;total:number;reason:string|null}>(await aiApiClient.post(`/courses/${courseId}/practice/questions/bootstrap`))
+    return unwrapApiResponse<{generation_mode?:string;rule_created_count?:number;ai_created_count?:number;failed_count?:number;ai_enhancement_task_id?:string|null;created_count:number;existing_count:number;total:number;reason:string|null}>(await apiClient.post(`/courses/${courseId}/practice/questions/bootstrap`))
   },
   async questions(courseId: number, mode: 'all'|'wrong' = 'all') {
     if (mockEnabled) {

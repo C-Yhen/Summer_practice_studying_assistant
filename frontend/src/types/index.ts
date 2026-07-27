@@ -172,6 +172,14 @@ export interface CourseRecommendationsResponse {
   items: CourseRecommendationItem[]
   category_counts: Record<RecommendationCategory, number>
   selection: { mode: 'diverse' | 'category'; returned: number; candidate_total: number }
+  ai_enhancement?: {
+    task_id: string
+    status: 'queued' | 'processing' | 'success' | 'failed' | 'cancelled'
+    current_step: string | null
+    summary: string | null
+    suggestions: unknown[]
+    failure_type: string | null
+  } | null
 }
 
 export interface RecommendationHistoryItem {
@@ -407,6 +415,7 @@ export interface StudyPlanGenerateResponse {
   expected_base_version: number
   candidate_version: StudyPlanVersion
   confirmation_token: string
+  ai_enhancement_task_id?: string | null
 }
 
 export interface CurrentStudyPlanResponse extends StudyPlanVersion {

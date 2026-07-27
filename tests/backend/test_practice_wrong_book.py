@@ -154,13 +154,15 @@ def test_bootstrap_creates_course_questions_and_is_idempotent(
         headers=auth_headers,
     ).json()["data"]
 
-    assert first == {
+    assert {key: first[key] for key in ("created_count", "existing_count", "total", "reason")} == {
         "created_count": 2,
         "existing_count": 0,
         "total": 2,
         "reason": None,
     }
-    assert second == {
+    assert first["generation_mode"] == "rule_first"
+    assert first["rule_created_count"] == 2
+    assert {key: second[key] for key in ("created_count", "existing_count", "total", "reason")} == {
         "created_count": 0,
         "existing_count": 2,
         "total": 2,

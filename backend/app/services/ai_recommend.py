@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -21,6 +22,8 @@ from backend.app.models import (
 )
 from backend.app.providers.llm import LLMProvider
 from backend.app.services.rag import retrieve
+
+logger = logging.getLogger(__name__)
 
 RECOMMENDATION_PROMPT = """你是一位学习顾问。根据用户的学习数据，给出3-5条个性化学习建议。
 
@@ -71,6 +74,7 @@ async def generate_recommendations(
     course_id: int,
     course_name: str,
     exam_date: date | None,
+    timeout_seconds: int = 12,
 ) -> dict[str, Any]:
     """AI-powered recommendation generation with behavior weighting."""
 
@@ -178,8 +182,9 @@ async def generate_recommendations(
             ],
             temperature=0.5,
             max_tokens=1500,
+            _timeout=timeout_seconds,
         )
         return _extract_json(response)
     except Exception as e:
-        print(f"[AI Rec] Failed: {e}")
-        return {"recommendations": [], "summary": ""}
+        logger.warning("ai_recommendation_failed course_id=%s error_type=%s", course_id, type(e).__name__)
+        raise RuntimeError("AI_RECOMMENDATION_FAILED") from e
