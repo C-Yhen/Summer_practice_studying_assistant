@@ -67,13 +67,26 @@ def _context_from_sources(sources: list[dict[str, Any]]) -> str:
         if len(quote) < 20 or quote[:100] in seen:
             continue
         seen.add(quote[:100])
-        parts.append(f"[{source.get('document_name', 'course material')}] {quote[:700]}")
+        # Only returned course text is usable as a citation. Metadata such as
+        # document names and page labels must not make a fabricated quote pass.
+        parts.append(quote[:700])
     return "\n\n".join(parts[:10])[:8000]
 
 
 def _normalized_quote(value: str) -> str:
     """Allow formatting differences, but not invented material citations."""
     return re.sub(r"[\s\u3000\.,;:!?，。；：！？、'\"“”‘’()（）\[\]【】]+", "", value).lower()
+
+
+def _quote_is_usable(value: str) -> bool:
+    normalized = _normalized_quote(value)
+    if not normalized:
+        return False
+    cjk_count = len(re.findall(r"[\u3400-\u9fff]", normalized))
+    if cjk_count:
+        return cjk_count >= 6
+    words = re.findall(r"[a-z0-9]+", normalized)
+    return len(normalized) >= 12 and len(words) >= 3
 
 
 async def generate_questions_batch(
@@ -123,7 +136,7 @@ async def generate_questions_batch(
     if not isinstance(raw_questions, list):
         raise ValueError("AI_QUESTIONS_ARRAY_INVALID")
     valid_point_ids = {point.id for point in points}
-    normalized_context = _normalized_quote(context)
+    normalized_quotes = [_normalized_quote(str(item.get("quote") or "")) for item in source_context]
     questions: list[dict[str, Any]] = []
     rejected = 0
     for raw in raw_questions[: len(points)]:
@@ -137,7 +150,10 @@ async def generate_questions_batch(
             logger.warning("ai_practice_question_rejected reason=knowledge_point_scope")
             rejected += 1
             continue
-        if _normalized_quote(question.source_quote) not in normalized_context:
+        normalized_quote = _normalized_quote(question.source_quote)
+        if not _quote_is_usable(question.source_quote) or not any(
+            normalized_quote in source_quote for source_quote in normalized_quotes if source_quote
+        ):
             logger.warning("ai_practice_question_rejected reason=source_quote")
             rejected += 1
             continue

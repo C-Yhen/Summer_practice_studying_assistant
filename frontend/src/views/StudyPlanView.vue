@@ -25,6 +25,7 @@ const generating = ref(false)
 const confirming = ref(false)
 const confirmVisible = ref(false)
 const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
+const aiPollingTimedOut = ref(false)
 let initializationVersion = 0
 let internalRouteUpdate = false
 let aiPollTimer: ReturnType<typeof setTimeout> | null = null
@@ -35,6 +36,7 @@ function stopAiPolling() {
   if (aiPollTimer) clearTimeout(aiPollTimer)
   aiPollTimer = null
   aiEnhancementStatus.value = null
+  aiPollingTimedOut.value = false
 }
 
 function watchAiEnhancement(taskId: string, sourceCourseId: number, sourcePlanId: number, sourceVersion: number) {
@@ -57,14 +59,14 @@ function watchAiEnhancement(taskId: string, sourceCourseId: number, sourcePlanId
         return
       }
       if (attempts >= 40) {
-        aiEnhancementStatus.value = 'failed'
+        aiPollingTimedOut.value = true
         return
       }
       aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
       aiPollTimer = setTimeout(() => { void poll() }, 1500)
     } catch {
       if (version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
-      else aiEnhancementStatus.value = 'failed'
+      else aiPollingTimedOut.value = true
     }
   }
   void poll()
@@ -182,6 +184,7 @@ async function loadCurrentPlan() {
 }
 
 async function selectCourse(courseId: number) {
+  if (generating.value) return
   stopAiPolling()
   plan.value = null
   planError.value = ''
@@ -228,10 +231,12 @@ async function generatePlan() {
   }
   if (sessionMinutesOverride.value) payload.session_minutes = form.sessionMinutes
   generating.value = true
+  const sourceCourseId = selectedCourseId.value
   stopAiPolling()
   planError.value = ''
   try {
-    const generated = await planApi.generate(selectedCourseId.value, payload)
+    const generated = await planApi.generate(sourceCourseId, payload)
+    if (selectedCourseId.value !== sourceCourseId) return
     plan.value = {
       plan_id: generated.plan_id,
       course_id: generated.course_id,
@@ -324,7 +329,7 @@ onBeforeUnmount(stopAiPolling)
 <template>
   <div class="plan-page">
     <PageHeader title="学习计划" eyebrow="智能规划" description="结合课程目标、可用时间、学习偏好与掌握情况智能编排；确认前不会改动你的任务。">
-      <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" style="width:240px" @change="selectCourse">
+      <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" :disabled="generating" style="width:240px" @change="selectCourse">
         <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
       </el-select>
       <el-button v-if="plan" plain :loading="planLoading" @click="loadCurrentPlan"><el-icon><Refresh /></el-icon>刷新计划</el-button>
@@ -349,7 +354,7 @@ onBeforeUnmount(stopAiPolling)
       </section>
 
       <el-alert v-if="planError" :title="planError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadCurrentPlan">重新加载</el-button></template></el-alert>
-      <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" title="计划预览已可确认，AI 摘要与风险提示正在后台补充。" type="info" :closable="false" show-icon class="page-alert" />
+      <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '计划预览已可确认，AI 摘要与风险提示正在后台补充。'" type="info" :closable="false" show-icon class="page-alert" />
       <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 摘要未生成，当前规则计划仍可正常确认。" type="warning" :closable="false" show-icon class="page-alert" />
       <div v-if="planLoading" v-loading="true" class="plan-loading"></div>
       <el-empty v-else-if="!plan" description="当前课程还没有学习计划，请先生成候选计划" />

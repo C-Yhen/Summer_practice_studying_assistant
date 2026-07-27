@@ -18,10 +18,12 @@ from backend.app.models import (
     PracticeAttempt,
     StudyPlan,
     StudyTask,
+    User,
     UserBehavior,
 )
 from backend.app.providers.llm import LLMProvider
 from backend.app.services.rag import retrieve
+from backend.app.services.timezones import local_date_range_utc, resolve_user_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,49 @@ def _extract_json(text: str) -> dict[str, Any]:
     return json.loads(text[start:end + 1])
 
 
+_ALLOWED_RECOMMENDATION_TYPES = {
+    "study_task", "mastery_review", "course_chat", "create_plan", "upload_document", "weekly_report",
+}
+
+
+def validate_recommendation_result(value: Any) -> dict[str, Any]:
+    """Keep provider output in a small, presentation-safe recommendation contract."""
+    if not isinstance(value, dict) or not isinstance(value.get("recommendations"), list):
+        raise ValueError("AI_RECOMMENDATIONS_INVALID")
+    valid: list[dict[str, Any]] = []
+    rejected = 0
+    for raw in value["recommendations"][:5]:
+        if not isinstance(raw, dict):
+            rejected += 1
+            continue
+        title = str(raw.get("title", "")).strip()
+        reason = str(raw.get("reason", "")).strip()
+        item_type = str(raw.get("item_type", "")).strip()
+        try:
+            priority = float(raw.get("priority"))
+            estimated_minutes = int(raw.get("estimated_minutes"))
+        except (TypeError, ValueError):
+            rejected += 1
+            continue
+        if (
+            not title or not reason or len(title) > 160 or len(reason) > 1200
+            or item_type not in _ALLOWED_RECOMMENDATION_TYPES
+            or not 0 <= priority <= 1 or not 5 <= estimated_minutes <= 480
+        ):
+            rejected += 1
+            continue
+        valid.append({
+            "title": title,
+            "reason": reason,
+            "priority": priority,
+            "estimated_minutes": estimated_minutes,
+            "item_type": item_type,
+        })
+    summary = str(value.get("summary", "")).strip()[:1200]
+    warnings = ["AI_RECOMMENDATIONS_REJECTED"] if rejected else []
+    return {"summary": summary, "recommendations": valid, "warnings": warnings}
+
+
 async def generate_recommendations(
     db: Session,
     provider: LLMProvider,
@@ -74,11 +119,14 @@ async def generate_recommendations(
     course_id: int,
     course_name: str,
     exam_date: date | None,
+    target_date: date,
     timeout_seconds: int = 12,
 ) -> dict[str, Any]:
     """AI-powered recommendation generation with behavior weighting."""
 
-    today = date.today()
+    today = target_date
+    user = db.get(User, user_id)
+    zone, _ = resolve_user_timezone(user.timezone if user is not None else None)
 
     # --- Gather user behavior weights ---
     recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
@@ -101,12 +149,14 @@ async def generate_recommendations(
     behavior_weights = {k: round(v / total, 2) for k, v in behavior_weights.items()}
 
     # --- Learning records (7 days) ---
-    week_ago = today - timedelta(days=7)
+    week_ago = today - timedelta(days=6)
+    range_start_utc, range_end_utc = local_date_range_utc(week_ago, today, zone)
     records = list(db.scalars(
         select(LearningRecord).where(
             LearningRecord.user_id == user_id,
             LearningRecord.course_id == course_id,
-            LearningRecord.occurred_at >= week_ago,
+            LearningRecord.occurred_at >= range_start_utc,
+            LearningRecord.occurred_at < range_end_utc,
         ).order_by(LearningRecord.occurred_at.desc()).limit(20)
     ))
     recent_records = "\n".join(
@@ -184,7 +234,7 @@ async def generate_recommendations(
             max_tokens=1500,
             _timeout=timeout_seconds,
         )
-        return _extract_json(response)
+        return validate_recommendation_result(_extract_json(response))
     except Exception as e:
         logger.warning("ai_recommendation_failed course_id=%s error_type=%s", course_id, type(e).__name__)
         raise RuntimeError("AI_RECOMMENDATION_FAILED") from e

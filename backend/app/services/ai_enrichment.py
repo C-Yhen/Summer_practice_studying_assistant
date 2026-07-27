@@ -10,18 +10,17 @@ import asyncio
 import hashlib
 import json
 import logging
-import uuid
-from datetime import datetime
+from datetime import date, datetime
 from time import perf_counter
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.app.models import AsyncTask, Course, StudyPlanVersion, utcnow
 from backend.app.providers.llm import OpenAICompatibleProvider, get_llm_provider, llm_runtime_status
-from backend.app.services.ai_recommend import generate_recommendations
+from backend.app.services.ai_recommend import generate_recommendations, validate_recommendation_result
 from backend.app.services.async_tasks import dispatch_async_task, mark_task_cancelled
 from backend.app.services.practice_gen import generate_questions_batch, persist_ai_questions
 from backend.app.planning.ai_planner import generate_plan_one_shot
@@ -40,6 +39,38 @@ def stable_input_hash(prefix: str, payload: dict[str, Any]) -> str:
     return f"{prefix}:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
 
+def _tasks_for_base_key(db: Session, base_key: str, *, lock: bool = False) -> list[AsyncTask]:
+    statement = select(AsyncTask).where(or_(
+        AsyncTask.idempotency_key == base_key,
+        AsyncTask.idempotency_key.like(f"{base_key}:retry:%"),
+    )).order_by(AsyncTask.id.desc())
+    if lock:
+        statement = statement.with_for_update()
+    return list(db.scalars(statement))
+
+
+def _reusable_task(tasks: list[AsyncTask]) -> AsyncTask | None:
+    for task in tasks:
+        if task.status in {"queued", "processing", "cancelling"}:
+            return task
+    for task in tasks:
+        if task.status != "success":
+            continue
+        data = task.result_data if isinstance(task.result_data, dict) else {}
+        # Release historical all-invalid practice successes as well as newly
+        # produced ones: neither contains a usable enhancement result.
+        if (
+            task.task_type == "practice_ai_enhancement"
+            and int(data.get("requested_count", 0)) > 0
+            and int(data.get("validated_count", 0)) == 0
+            and int(data.get("ai_created_count", 0)) == 0
+            and int(data.get("rejected_count", 0)) > 0
+        ):
+            continue
+        return task
+    return None
+
+
 async def queue_ai_enhancement(
     db: Session,
     settings: Any,
@@ -54,49 +85,53 @@ async def queue_ai_enhancement(
         return None
     # The target resource is part of the key. A newly created candidate plan
     # must never reuse an AI task whose input points to an older candidate.
-    key = stable_input_hash(task_type, {"user_id": user_id, "course_id": course_id, **input_data})
-    task = db.scalar(select(AsyncTask).where(AsyncTask.idempotency_key == key))
-    # Queued/processing work is reusable for the exact same target. A success
-    # is also reusable so clients can read its persisted result. Failed and
-    # cancelled work gets a fresh round instead of permanently blocking it.
-    reusable = task is not None and task.status in {"queued", "processing", "success"}
-    created = not reusable
-    if task is not None and not reusable:
-        key = f"{key}:{uuid.uuid4().hex[:12]}"
-    if task is None:
+    base_key = stable_input_hash(task_type, {"user_id": user_id, "course_id": course_id, **input_data})
+    # The base row is protected by the existing unique key. On PostgreSQL the
+    # row lock serializes retry creation; initial concurrent inserts reconcile
+    # through IntegrityError below. Retry keys remain queryable by their base.
+    tasks = _tasks_for_base_key(db, base_key, lock=True)
+    reusable = _reusable_task(tasks)
+    if reusable is not None:
+        db.refresh(reusable)
+        return reusable
+
+    created = False
+    if not tasks:
         task = AsyncTask(
             user_id=user_id,
             task_type=task_type,
             resource_type="course",
             resource_id=str(course_id),
             input_data=input_data,
-            idempotency_key=key,
+            idempotency_key=base_key,
             current_step="queued_for_ai_enhancement",
         )
         db.add(task)
         try:
             db.commit()
+            created = True
         except IntegrityError:
             db.rollback()
-            task = db.scalar(select(AsyncTask).where(AsyncTask.idempotency_key == key))
+            tasks = _tasks_for_base_key(db, base_key, lock=True)
+            task = _reusable_task(tasks)
             if task is None:
                 raise
-            created = False
-    elif reusable:
-        db.refresh(task)
-        return task
+            db.refresh(task)
+            return task
     else:
+        retry_number = sum(1 for item in tasks if (item.idempotency_key or "").startswith(f"{base_key}:retry:")) + 1
         task = AsyncTask(
             user_id=user_id,
             task_type=task_type,
             resource_type="course",
             resource_id=str(course_id),
             input_data=input_data,
-            idempotency_key=key,
+            idempotency_key=f"{base_key}:retry:{retry_number}",
             current_step="queued_for_ai_enhancement",
         )
         db.add(task)
         db.commit()
+        created = True
     if created:
         await dispatch_async_task(db, task, settings)
     db.refresh(task)
@@ -118,17 +153,25 @@ def ai_enhancement_payload(task: AsyncTask | None) -> dict[str, Any] | None:
 
 
 def _start(db: Session, task: AsyncTask) -> bool:
-    if task.status in {"success", "failed", "cancelled"}:
-        return False
-    if task.cancel_requested:
+    claimed = db.execute(update(AsyncTask).where(
+        AsyncTask.id == task.id,
+        AsyncTask.status == "queued",
+        AsyncTask.cancel_requested.is_(False),
+    ).values(
+        status="processing",
+        progress=15,
+        current_step="running_ai_enhancement",
+        started_at=utcnow(),
+    )).rowcount
+    if claimed:
+        db.commit()
+        db.refresh(task)
+        return True
+    db.refresh(task)
+    if task.cancel_requested and task.status in {"queued", "cancelling"}:
         mark_task_cancelled(db, task, "cancelled_before_start")
         return False
-    task.status = "processing"
-    task.progress = 15
-    task.current_step = "running_ai_enhancement"
-    task.started_at = utcnow()
-    db.commit()
-    return True
+    return False
 
 
 def _safe_failure_type(exc: Exception) -> str:
@@ -175,15 +218,19 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
             raise ValueError("AI_RESOURCE_NOT_FOUND")
 
         if task.task_type == "ai_recommendation":
+            target_date = date.fromisoformat(str(task.input_data.get("target_date", "")))
             data = await generate_recommendations(
                 db, provider, user_id=task.user_id, course_id=course.id,
                 course_name=course.name, exam_date=course.exam_date,
+                target_date=target_date,
                 timeout_seconds=settings.ai_recommend_timeout_seconds,
             )
-            suggestions = data.get("recommendations", []) if isinstance(data, dict) else []
+            validated = validate_recommendation_result(data)
+            suggestions = validated["recommendations"]
             result = {
-                "summary": str(data.get("summary", "")).strip()[:1200] if isinstance(data, dict) else "",
-                "suggestions": suggestions[:3] if isinstance(suggestions, list) else [],
+                "summary": validated["summary"],
+                "suggestions": suggestions[:3],
+                "warnings": validated["warnings"],
             }
         elif task.task_type == "plan_ai_enhancement":
             if _cancel_if_requested(db, task, step="cancelled_before_plan_update"):
@@ -204,7 +251,7 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
                 preferred_difficulty=str(task.input_data.get("preferred_difficulty", "adaptive")),
                 needs_exam_focus=bool(task.input_data.get("needs_exam_focus", True)),
                 needs_error_points=bool(task.input_data.get("needs_error_points", True)),
-                unavailable_dates=[],
+                unavailable_dates={date.fromisoformat(str(item)) for item in task.input_data.get("unavailable_dates", [])},
                 timeout_seconds=settings.ai_plan_timeout_seconds,
             )
             if _cancel_if_requested(db, task, step="cancelled_before_plan_write"):
@@ -242,6 +289,13 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
                 **persisted,
                 "warnings": warnings,
             }
+            if (
+                result["requested_count"] > 0
+                and result["validated_count"] == 0
+                and result["ai_created_count"] == 0
+                and result["rejected_count"] > 0
+            ):
+                raise ValueError("AI_RESPONSE_INVALID")
 
         if _cancel_if_requested(db, task, step="cancelled_before_commit"):
             return {"cancelled": True}

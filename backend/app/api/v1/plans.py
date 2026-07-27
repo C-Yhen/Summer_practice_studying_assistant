@@ -241,6 +241,7 @@ async def generate_plan(
             "goal": plan.goal,
             "start_date": plan.start_date.isoformat(),
             "end_date": plan.end_date.isoformat(),
+            "unavailable_dates": [item.isoformat() for item in payload.unavailable_dates],
             "daily_minutes": daily_minutes,
             "session_minutes": session_minutes,
             "foundation_level": preference.foundation_level,

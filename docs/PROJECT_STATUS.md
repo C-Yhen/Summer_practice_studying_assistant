@@ -427,3 +427,12 @@
 - AI practice source quotes must normalize to text actually present in the RAG context. Validation/persistence rejections now contribute requested, validated, rejected, created, skipped-existing, and failed counts, with warning data for an all-invalid result.
 - Verification: Round 21 specialist tests `14 passed`; related flows `44 passed, 2 skipped`; full backend suite `147 passed, 3 skipped`; `frontend/npm run build` passed (existing chunk-size warnings only). A controlled real Redis/Celery fake-provider run created an API task, had the worker execute it, and observed `queued -> success`; a controlled broker-dispatch failure returned the rule recommendation in under one second. Docker backend/PostgreSQL/Redis/frontend/worker were healthy after restoring the original worker.
 - Real Qwen was not invoked. Browser interaction testing was not run for this repair; frontend behavior is covered by type/build validation and bounded polling guards rather than a claimed browser result.
+
+## 最终封版补修与验收
+
+- AI 增强任务以稳定 base idempotency key 分组；查询会同时识别 base 与可查询的 `:retry:n` 任务。每组只复用一个 queued/processing/cancelling 任务，成功的有效结果可复用，failed/cancelled 或历史全无效练习结果可开始一轮新的 retry。worker 以条件 UPDATE 原子领取 queued 任务，重复 worker 调用不会再次调用模型。
+- 推荐 worker 读取并校验任务保存的 `target_date`，推荐数据、任务逾期、考试距离与提示日期不再退回服务器 `date.today()`；AI 建议经过 title/reason/priority/minutes/item_type 白名单验证。前端按结构化字段展示对象建议，不渲染 JSON。
+- 练习题引用仅比对 RAG 原始 quote 正文；空白、标点、短引用和非上下文引用被拒绝。全部无效的 AI 练习输出成为 `failed / AI_RESPONSE_INVALID`，可由后续请求重新触发；部分有效输出保留 success + warnings。
+- 计划增强传递 `unavailable_dates`；计划与练习页面对生成/bootstrap 请求保留 source course guard 并在进行中禁用课程切换。三页轮询在约 60 秒后只停止前端查询并诚实提示后台仍在运行，不伪造 failed。
+- 自动化：Round 21 专项 `24 passed`；完整后端 `157 passed, 3 skipped`；前端 `npm run build` 通过；定向 Playwright（结构化 AI 建议，无原始 JSON）desktop `1 passed`。Docker PostgreSQL、Redis、backend、worker、frontend 健康。
+- 真实 Qwen 验收：配置确认为 qwen/qwen3.7-plus。受控临时课程的推荐两次分别在约 13 秒 ReadTimeout，计划增强在约 20 秒失败；练习未执行，因前序计划失败而停止。该结果不视为通过，未通过延长超时掩盖。受控浏览器没有可用实例，因此三条网页人工验收、切课竞态人工检查与真实聊天 KaTeX 可视化仍未验证。

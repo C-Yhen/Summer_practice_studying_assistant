@@ -303,3 +303,41 @@ test('recommendation feedback locks are per card, history refreshes, and primary
   expect(actionNavigations).toBe(1)
   expect(writes.filter((item) => item.action === 'clicked')).toHaveLength(2)
 })
+
+test('AI recommendation objects render as structured fields instead of raw JSON', async ({ page, request }) => {
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Structured AI recommendation ${Date.now()}`)
+  await authenticatePage(page, token)
+  await page.route(`**/api/v1/courses/${course.id}/recommendations?**`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: {
+          course: { id: course.id, name: course.name },
+          target_date: localDate(),
+          algorithm_version: 'v1',
+          strategy_summary: 'Rule recommendations remain available.',
+          items: [],
+          category_counts: { all: 0, task: 0, mastery: 0, resource: 0, plan: 0, report: 0 },
+          selection: { mode: 'diverse', returned: 0, candidate_total: 0 },
+          ai_enhancement: {
+            task_id: 'structured-ai-task', status: 'success', current_step: 'completed',
+            summary: 'A safe AI summary.',
+            suggestions: [{ title: 'Structured title', reason: 'Structured reason', estimated_minutes: 25, priority: 0.8, item_type: 'study_task' }],
+            failure_type: null,
+          },
+        },
+        request_id: 'structured-ai-test',
+      }),
+    })
+  })
+  await page.goto(`/recommendations?courseId=${course.id}`)
+  const panel = page.locator('.ai-result')
+  await expect(panel).toContainText('Structured title')
+  await expect(panel).toContainText('Structured reason')
+  await expect(panel).toContainText('25 分钟')
+  await expect(panel).not.toContainText('{"title"')
+})

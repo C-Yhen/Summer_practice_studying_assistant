@@ -34,6 +34,7 @@ const pendingSubmission = ref<PendingSubmission | null>(null)
 const loading = ref(false)
 const booting = ref(false)
 const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
+const aiPollingTimedOut = ref(false)
 const submitting = ref(false)
 const error = ref('')
 const started = ref<number | null>(null)
@@ -60,6 +61,7 @@ function stopAiPolling() {
   if (aiPollTimer) clearTimeout(aiPollTimer)
   aiPollTimer = null
   aiEnhancementStatus.value = null
+  aiPollingTimedOut.value = false
 }
 
 async function refreshQuestionsAfterAI() {
@@ -104,14 +106,14 @@ function watchAiEnhancement(taskId: string, sourceCourseId: number) {
         return
       }
       if (attempts >= 40) {
-        aiEnhancementStatus.value = 'failed'
+        aiPollingTimedOut.value = true
         return
       }
       aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
       aiPollTimer = setTimeout(() => { void poll() }, 1500)
     } catch {
       if (version === aiPollVersion && courseId.value === sourceCourseId && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
-      else aiEnhancementStatus.value = 'failed'
+      else aiPollingTimedOut.value = true
     }
   }
   void poll()
@@ -177,12 +179,14 @@ async function load() {
 
 async function bootstrap() {
   if (!courseId.value || submitting.value || booting.value) return
+  const sourceCourseId = courseId.value
   booting.value = true
   try {
-    const generated = await practiceApi.bootstrap(courseId.value)
+    const generated = await practiceApi.bootstrap(sourceCourseId)
     await load()
+    if (courseId.value !== sourceCourseId) return
     if (generated.ai_enhancement_task_id) {
-      watchAiEnhancement(generated.ai_enhancement_task_id, courseId.value)
+      watchAiEnhancement(generated.ai_enhancement_task_id, sourceCourseId)
       ElMessage.success('基础自测题已可练习；AI 增强题正在后台生成。')
     }
   } catch (bootstrapError) {
@@ -332,7 +336,7 @@ onBeforeUnmount(stopAiPolling)
       <el-select
         v-model="courseId"
         class="course-select"
-        :disabled="submitting || wrongUpdating || loading"
+        :disabled="submitting || wrongUpdating || loading || booting"
         @change="changeCourse"
       >
         <el-option
@@ -349,7 +353,7 @@ onBeforeUnmount(stopAiPolling)
         <el-tab-pane label="开始练习" name="practice">
           <div class="tab-body">
             <el-alert v-if="error" :title="error" type="error" show-icon />
-            <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" title="基础题已可用，AI 增强题正在后台生成。" type="info" :closable="false" show-icon />
+            <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '基础题已可用，AI 增强题正在后台生成。'" type="info" :closable="false" show-icon />
             <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 增强题未生成，现有基础题仍可正常练习。" type="warning" :closable="false" show-icon />
             <div v-if="!error" v-loading="loading">
               <el-empty v-if="!courseId" description="还没有课程，请先创建课程并上传资料">

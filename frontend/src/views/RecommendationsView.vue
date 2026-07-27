@@ -38,6 +38,7 @@ let historyRequestVersion = 0
 let viewActive = true
 let aiPollTimer: ReturnType<typeof setTimeout> | null = null
 let aiPollVersion = 0
+const aiPollingTimedOut = ref(false)
 
 const categoryOptions: { value: RecommendationCategory; label: string; empty: string }[] = [
   { value: 'all', label: '综合', empty: '当前没有可执行的下一步建议' },
@@ -50,11 +51,26 @@ const categoryOptions: { value: RecommendationCategory; label: string; empty: st
 const selectedCourse = computed(() => courses.value.find((course) => course.id === courseId.value) || null)
 const selectedCategory = computed(() => categoryOptions.find((item) => item.value === category.value) || categoryOptions[0])
 const items = computed(() => result.value?.items || [])
+const aiSuggestions = computed(() => (result.value?.ai_enhancement?.suggestions || []).flatMap((value) => {
+  if (typeof value === 'string' && value.trim()) return [{ title: value.trim(), reason: '', estimatedMinutes: null as number | null, priority: null as number | null }]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  const item = value as Record<string, unknown>
+  const title = typeof item.title === 'string' ? item.title.trim() : ''
+  const reason = typeof item.reason === 'string' ? item.reason.trim() : ''
+  if (!title || !reason) return []
+  return [{
+    title,
+    reason,
+    estimatedMinutes: typeof item.estimated_minutes === 'number' ? item.estimated_minutes : null,
+    priority: typeof item.priority === 'number' ? item.priority : null,
+  }]
+}))
 
 function stopAiPolling() {
   aiPollVersion += 1
   if (aiPollTimer) clearTimeout(aiPollTimer)
   aiPollTimer = null
+  aiPollingTimedOut.value = false
 }
 
 function watchAiEnhancement(taskId: string, sourceCourseId: number, sourceCategory: RecommendationCategory) {
@@ -78,16 +94,13 @@ function watchAiEnhancement(taskId: string, sourceCourseId: number, sourceCatego
         return
       }
       if (attempts >= 40) {
-        if (result.value?.ai_enhancement?.task_id === taskId) {
-          result.value.ai_enhancement.status = 'failed'
-          result.value.ai_enhancement.failure_type = 'TASK_STATUS_TIMEOUT'
-        }
+        aiPollingTimedOut.value = true
         return
       }
       aiPollTimer = setTimeout(() => { void poll() }, 1500)
     } catch {
       if (viewActive && version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
-      else if (result.value?.ai_enhancement?.task_id === taskId) result.value.ai_enhancement.status = 'failed'
+      else aiPollingTimedOut.value = true
     }
   }
   void poll()
@@ -375,9 +388,9 @@ onBeforeUnmount(() => {
       <el-alert v-if="routeError" type="error" show-icon :closable="false" :title="routeError" class="page-alert"><template #default><el-button text @click="selectCourse(courses[0]?.id || null)">切换到可用课程</el-button></template></el-alert>
       <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text :loading="loading" :disabled="loading" @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
       <section v-if="result" class="recommend-hero"><div><span>当前课程</span><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>为你筛选 {{ result.selection.returned }} 条<small>从 {{ result.selection.candidate_total }} 个可执行动作中排序</small></strong></section>
-      <el-alert v-if="result?.ai_enhancement?.status === 'queued' || result?.ai_enhancement?.status === 'processing'" type="info" show-icon :closable="false" title="AI 增强建议正在后台生成，当前规则推荐已可正常使用。" class="page-alert" />
+      <el-alert v-if="result?.ai_enhancement?.status === 'queued' || result?.ai_enhancement?.status === 'processing'" type="info" show-icon :closable="false" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : 'AI 增强建议正在后台生成，当前规则推荐已可正常使用。'" class="page-alert" />
       <el-alert v-else-if="result?.ai_enhancement?.status === 'failed' || result?.ai_enhancement?.status === 'cancelled'" type="warning" show-icon :closable="false" title="AI 增强暂时不可用，当前规则推荐和反馈功能仍可正常使用。" class="page-alert"><template #default><el-button text @click="loadRecommendations">重新触发增强</el-button><el-button text @click="router.push({ name: 'tasks' })">查看任务中心</el-button></template></el-alert>
-      <section v-if="result?.ai_enhancement?.status === 'success' && (result.ai_enhancement.summary || result.ai_enhancement.suggestions.length)" class="ai-result content-card"><b>AI 增强建议</b><p v-if="result.ai_enhancement.summary">{{ result.ai_enhancement.summary }}</p><ul v-if="result.ai_enhancement.suggestions.length"><li v-for="(suggestion, index) in result.ai_enhancement.suggestions.slice(0, 3)" :key="index">{{ typeof suggestion === 'string' ? suggestion : JSON.stringify(suggestion) }}</li></ul></section>
+      <section v-if="result?.ai_enhancement?.status === 'success' && (result.ai_enhancement.summary || aiSuggestions.length)" class="ai-result content-card"><b>AI 增强建议</b><p v-if="result.ai_enhancement.summary">{{ result.ai_enhancement.summary }}</p><ul v-if="aiSuggestions.length"><li v-for="(suggestion, index) in aiSuggestions.slice(0, 3)" :key="index"><b>{{ suggestion.title }}</b><p v-if="suggestion.reason">{{ suggestion.reason }}</p><small v-if="suggestion.estimatedMinutes !== null || suggestion.priority !== null">{{ suggestion.estimatedMinutes !== null ? `${suggestion.estimatedMinutes} 分钟` : '' }}{{ suggestion.estimatedMinutes !== null && suggestion.priority !== null ? ' · ' : '' }}{{ suggestion.priority !== null ? `优先级 ${Math.round(suggestion.priority * 100)}%` : '' }}</small></li></ul></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
       <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />
       <section v-else-if="result" class="recommend-grid"><article v-for="(item, index) in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ index === 0 && category === 'all' ? '首要建议' : item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><div class="reason"><b>为什么推荐给你</b><p>{{ item.reason }}</p><details v-if="item.signals.length"><summary>查看判断信号</summary><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} · {{ signal.contribution.toFixed(1) }}</el-tag></div></details></div><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" :loading="actionBusyKey === item.recommendation_key" :disabled="actionBusyKey !== null" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -246,6 +247,182 @@ def test_terminal_ai_task_allows_a_new_enhancement_round(client: TestClient, aut
             input_data={"target_date": "2026-08-01"},
         ))
         assert after_cancel is not None and after_cancel.id not in {first.id, renewed.id}
+
+
+def test_retry_task_remains_the_single_reusable_active_task(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    course_id = _course(client, auth_headers, "Current retry task")
+    dispatched = _enable_remote_task_queue(client, monkeypatch)
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        first = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-01"},
+        ))
+        assert first is not None
+        first.status = "failed"
+        db.commit()
+        retry = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-01"},
+        ))
+        assert retry is not None and retry.id != first.id
+        third = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-01"},
+        ))
+        retry.status = "processing"
+        db.commit()
+        fourth = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-01"},
+        ))
+        assert third is not None and third.id == retry.id
+        assert fourth is not None and fourth.id == retry.id
+        assert dispatched.count("ai_recommendation") == 2
+
+
+def test_worker_claims_one_queued_task_only_once(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    course_id = _course(client, auth_headers, "One worker claim")
+    _enable_remote_task_queue(client, monkeypatch)
+    calls = 0
+
+    async def generated(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"summary": "one execution", "recommendations": []}
+
+    monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda _settings: object())
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_recommendations", generated)
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        task = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-01"},
+        ))
+        assert task is not None
+        asyncio.run(process_ai_enhancement(db, task, client.app.state.settings))
+        asyncio.run(process_ai_enhancement(db, db.get(AsyncTask, task.id), client.app.state.settings))
+        assert calls == 1
+
+
+def test_recommendation_task_uses_its_requested_target_date_and_filters_invalid_items(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    course_id = _course(client, auth_headers, "Recommendation target date")
+    _enable_remote_task_queue(client, monkeypatch)
+    received: dict[str, object] = {}
+
+    async def generated(*_args, **kwargs):
+        received.update(kwargs)
+        return {
+            "summary": "safe summary",
+            "recommendations": [
+                {"title": "", "reason": "invalid", "priority": 0.4, "estimated_minutes": 30, "item_type": "study_task"},
+                {"title": "Safe item", "reason": "valid reason", "priority": 0.7, "estimated_minutes": 25, "item_type": "study_task"},
+                {"title": "Wrong type", "reason": "invalid", "priority": 2, "estimated_minutes": 9999, "item_type": "unknown"},
+            ],
+        }
+
+    monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda _settings: object())
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_recommendations", generated)
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        task = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="ai_recommendation", user_id=owner_id, course_id=course_id,
+            input_data={"target_date": "2026-08-21"},
+        ))
+        assert task is not None
+        result = asyncio.run(process_ai_enhancement(db, task, client.app.state.settings))
+    assert str(received["target_date"]) == "2026-08-21"
+    assert result["suggestions"] == [{"title": "Safe item", "reason": "valid reason", "priority": 0.7, "estimated_minutes": 25, "item_type": "study_task"}]
+    assert "AI_RECOMMENDATIONS_REJECTED" in result["warnings"]
+
+
+@pytest.mark.parametrize("source_quote", ["……", "，，，", "()", " \n\t ", "课程"])
+def test_ai_question_rejects_empty_or_too_short_source_quotes(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch, source_quote: str
+) -> None:
+    course_id = _course(client, auth_headers, "Quote validation")
+    point_id = _point(client, course_id)
+
+    async def source_context(*_args, **_kwargs):
+        return [{"document_name": "Course Notes", "quote": "课程资料包含足够详细的内容以支持练习题验证和引用。"}]
+
+    class QuoteProvider(LLMProvider):
+        async def chat(self, _messages, **_kwargs):
+            return json.dumps({"questions": [{
+                "knowledge_point_id": point_id, "stem": "Which statement is correct?",
+                "options": [{"label": "A", "text": "A"}, {"label": "B", "text": "B"}, {"label": "C", "text": "C"}, {"label": "D", "text": "D"}],
+                "correct_option": "A", "explanation": "Explanation", "source_quote": source_quote, "difficulty": "basic",
+            }]})
+
+        async def embed(self, _texts):
+            return [[0.0] * 1024]
+
+    monkeypatch.setattr("backend.app.services.practice_gen.retrieve", source_context)
+    with client.app.state.database.session_factory() as db:
+        generated = asyncio.run(generate_questions_batch(db, QuoteProvider(), course_id=course_id, knowledge_point_ids=[point_id]))
+    assert generated["questions"] == []
+    assert generated["stats"] == {"requested_count": 1, "validated_count": 0, "rejected_count": 1}
+
+
+def test_all_invalid_ai_practice_output_fails_and_can_be_retried(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    course_id = _course(client, auth_headers, "Invalid AI practice")
+    point_id = _point(client, course_id)
+    _enable_remote_task_queue(client, monkeypatch)
+
+    async def all_invalid(*_args, **_kwargs):
+        return {"questions": [], "stats": {"requested_count": 1, "validated_count": 0, "rejected_count": 1}}
+
+    monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda _settings: object())
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_questions_batch", all_invalid)
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        task = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="practice_ai_enhancement", user_id=owner_id, course_id=course_id,
+            input_data={"knowledge_point_ids": [point_id]},
+        ))
+        assert task is not None
+        asyncio.run(process_ai_enhancement(db, task, client.app.state.settings))
+        db.refresh(task)
+        assert task.status == "failed"
+        assert task.error_message == "AI_RESPONSE_INVALID"
+        retry = asyncio.run(queue_ai_enhancement(
+            db, client.app.state.settings, task_type="practice_ai_enhancement", user_id=owner_id, course_id=course_id,
+            input_data={"knowledge_point_ids": [point_id]},
+        ))
+        assert retry is not None and retry.id != task.id
+
+
+def test_plan_enhancement_preserves_unavailable_dates_from_rule_candidate(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    course_id = _course(client, auth_headers, "Plan unavailable days")
+    _point(client, course_id)
+    _enable_remote_task_queue(client, monkeypatch)
+    response = client.post(
+        f"/api/v1/courses/{course_id}/study-plans/generate",
+        headers=auth_headers,
+        json={
+            "goal": "respect unavailable date", "start_date": "2026-08-01", "end_date": "2026-08-03",
+            "unavailable_dates": ["2026-08-02"],
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    received: dict[str, object] = {}
+
+    async def generated(*_args, **kwargs):
+        received.update(kwargs)
+        return {"summary": "date preserved", "risks": [], "tasks": []}
+
+    monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda _settings: object())
+    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_plan_one_shot", generated)
+    with client.app.state.database.session_factory() as db:
+        task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == data["ai_enhancement_task_id"]))
+        assert task is not None and task.input_data["unavailable_dates"] == ["2026-08-02"]
+        asyncio.run(process_ai_enhancement(db, task, client.app.state.settings))
+    assert {item.isoformat() for item in received["unavailable_dates"]} == {"2026-08-02"}
 
 
 def test_cancelled_enhancements_discard_plan_and_practice_writes(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
