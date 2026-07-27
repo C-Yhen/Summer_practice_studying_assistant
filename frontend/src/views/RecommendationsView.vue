@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 import { Refresh, Star } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { courseApi, recommendationApi } from '@/api/services'
+import { asyncTaskApi, courseApi, recommendationApi } from '@/api/services'
 import type {
   CourseListItem,
   CourseRecommendationItem,
@@ -36,6 +36,8 @@ const historyRefreshing = ref(false)
 let requestVersion = 0
 let historyRequestVersion = 0
 let viewActive = true
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
 
 const categoryOptions: { value: RecommendationCategory; label: string; empty: string }[] = [
   { value: 'all', label: '综合', empty: '当前没有可执行的下一步建议' },
@@ -48,6 +50,48 @@ const categoryOptions: { value: RecommendationCategory; label: string; empty: st
 const selectedCourse = computed(() => courses.value.find((course) => course.id === courseId.value) || null)
 const selectedCategory = computed(() => categoryOptions.find((item) => item.value === category.value) || categoryOptions[0])
 const items = computed(() => result.value?.items || [])
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number, sourceCategory: RecommendationCategory) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (!viewActive || version !== aiPollVersion || courseId.value !== sourceCourseId || category.value !== sourceCategory) return
+      if (task.status === 'success') {
+        await loadRecommendations()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        if (result.value?.ai_enhancement?.task_id === taskId) {
+          result.value.ai_enhancement.status = task.status
+          result.value.ai_enhancement.failure_type = task.error_message
+        }
+        return
+      }
+      if (attempts >= 40) {
+        if (result.value?.ai_enhancement?.task_id === taskId) {
+          result.value.ai_enhancement.status = 'failed'
+          result.value.ai_enhancement.failure_type = 'TASK_STATUS_TIMEOUT'
+        }
+        return
+      }
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (viewActive && version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else if (result.value?.ai_enhancement?.task_id === taskId) result.value.ai_enhancement.status = 'failed'
+    }
+  }
+  void poll()
+}
 
 function pageError(value: unknown, fallback: string) {
   return isUnauthorizedError(value) ? '登录状态已失效，请重新登录' : getApiErrorMessage(value, fallback)
@@ -102,7 +146,15 @@ async function loadRecommendations() {
   loading.value = true
   try {
     const loaded = await recommendationApi.list(id, { category: requestedCategory, limit: 6 })
-    if (version === requestVersion && courseId.value === id && category.value === requestedCategory) result.value = loaded
+    if (version === requestVersion && courseId.value === id && category.value === requestedCategory) {
+      result.value = loaded
+      const enhancement = loaded.ai_enhancement
+      if (enhancement && (enhancement.status === 'queued' || enhancement.status === 'processing')) {
+        watchAiEnhancement(enhancement.task_id, id, requestedCategory)
+      } else {
+        stopAiPolling()
+      }
+    }
   } catch (value) {
     if (version === requestVersion) recommendationError.value = pageError(value, '推荐加载失败')
   } finally {
@@ -142,6 +194,7 @@ async function synchronizeRoute() {
   category.value = requestedFilter.value
   routeError.value = ''
   if (courseChanged) {
+    stopAiPolling()
     feedbackState.value = {}
     feedbackBusyKeys.value = new Set()
     actionBusyKey.value = null
@@ -292,6 +345,7 @@ onMounted(async () => {
 watch([() => route.query.courseId, () => route.query.category], () => { void synchronizeRoute() })
 onBeforeUnmount(() => {
   viewActive = false
+  stopAiPolling()
   requestVersion += 1
   historyRequestVersion += 1
   feedbackBusyKeys.value = new Set()
@@ -322,7 +376,8 @@ onBeforeUnmount(() => {
       <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text :loading="loading" :disabled="loading" @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
       <section v-if="result" class="recommend-hero"><div><span>当前课程</span><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>为你筛选 {{ result.selection.returned }} 条<small>从 {{ result.selection.candidate_total }} 个可执行动作中排序</small></strong></section>
       <el-alert v-if="result?.ai_enhancement?.status === 'queued' || result?.ai_enhancement?.status === 'processing'" type="info" show-icon :closable="false" title="AI 增强建议正在后台生成，当前规则推荐已可正常使用。" class="page-alert" />
-      <el-alert v-else-if="result?.ai_enhancement?.status === 'failed'" type="warning" show-icon :closable="false" title="AI 增强暂时较慢或不可用，当前规则推荐和反馈功能仍可正常使用。" class="page-alert" />
+      <el-alert v-else-if="result?.ai_enhancement?.status === 'failed' || result?.ai_enhancement?.status === 'cancelled'" type="warning" show-icon :closable="false" title="AI 增强暂时不可用，当前规则推荐和反馈功能仍可正常使用。" class="page-alert"><template #default><el-button text @click="loadRecommendations">重新触发增强</el-button><el-button text @click="router.push({ name: 'tasks' })">查看任务中心</el-button></template></el-alert>
+      <section v-if="result?.ai_enhancement?.status === 'success' && (result.ai_enhancement.summary || result.ai_enhancement.suggestions.length)" class="ai-result content-card"><b>AI 增强建议</b><p v-if="result.ai_enhancement.summary">{{ result.ai_enhancement.summary }}</p><ul v-if="result.ai_enhancement.suggestions.length"><li v-for="(suggestion, index) in result.ai_enhancement.suggestions.slice(0, 3)" :key="index">{{ typeof suggestion === 'string' ? suggestion : JSON.stringify(suggestion) }}</li></ul></section>
       <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
       <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />
       <section v-else-if="result" class="recommend-grid"><article v-for="(item, index) in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ index === 0 && category === 'all' ? '首要建议' : item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><div class="reason"><b>为什么推荐给你</b><p>{{ item.reason }}</p><details v-if="item.signals.length"><summary>查看判断信号</summary><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} · {{ signal.contribution.toFixed(1) }}</el-tag></div></details></div><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" :loading="actionBusyKey === item.recommendation_key" :disabled="actionBusyKey !== null" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
@@ -333,5 +388,5 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.page-alert{margin-bottom:16px}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}.toolbar .el-select{width:220px}.category-tabs{display:flex;flex-wrap:wrap;justify-content:flex-end}.category-tabs small{margin-left:3px;color:#74809a}.recommend-hero{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:25px 30px;margin-bottom:18px;border-radius:18px;background:linear-gradient(115deg,#17264e,#394a94);color:#fff;box-shadow:0 15px 34px rgba(25,40,83,.16)}.recommend-hero span{color:#aeb9e9;font-size:11px;font-weight:750}.recommend-hero h2{margin:5px 0 7px;font-size:22px}.recommend-hero p{max-width:680px;margin:0;color:#dce1f0;font-size:13px;line-height:1.6}.recommend-hero strong{font-size:19px;text-align:right}.recommend-hero small{display:block;margin-top:5px;color:#c7cfe8;font-size:11px;font-weight:400}.recommend-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.recommend-card{display:flex;min-height:280px;flex-direction:column;padding:20px}.card-top{display:flex;justify-content:space-between;color:#5267dd;font-size:12px;font-weight:750}.card-top b{color:#53806c}.card-top b.urgent{color:#d5683d}.recommend-card h2{margin:16px 0 8px;color:#34415b;font-size:17px}.recommend-card>p{min-height:40px;margin:0 0 14px;color:#758096;font-size:12px;line-height:1.6}.reason{padding:14px;border:1px solid #e9ecf4;border-radius:11px;background:#f8f9fc;font-size:12px}.reason>b{color:#45516c}.reason summary{margin-top:10px;color:#6572d4;cursor:pointer;font-weight:700}.reason p{margin:7px 0 0;color:#69758d;line-height:1.6}.reason div,.card-actions,.history-metrics{display:flex;gap:6px;flex-wrap:wrap}.reason details div{margin-top:9px}.card-actions{margin-top:auto;padding-top:16px}.history-metrics{margin-bottom:15px}.rules-note{margin:20px 0 0;color:#7f8aa1;font-size:11px;text-align:right}@media(max-width:900px){.toolbar{align-items:stretch;flex-direction:column}.toolbar .el-select{width:100%}.category-tabs{justify-content:flex-start}.recommend-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.recommend-hero{align-items:flex-start;flex-direction:column}.recommend-hero strong{text-align:left}.recommend-grid{grid-template-columns:1fr}}
+.page-alert{margin-bottom:16px}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}.toolbar .el-select{width:220px}.category-tabs{display:flex;flex-wrap:wrap;justify-content:flex-end}.category-tabs small{margin-left:3px;color:#74809a}.recommend-hero{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:25px 30px;margin-bottom:18px;border-radius:18px;background:linear-gradient(115deg,#17264e,#394a94);color:#fff;box-shadow:0 15px 34px rgba(25,40,83,.16)}.recommend-hero span{color:#aeb9e9;font-size:11px;font-weight:750}.recommend-hero h2{margin:5px 0 7px;font-size:22px}.recommend-hero p{max-width:680px;margin:0;color:#dce1f0;font-size:13px;line-height:1.6}.recommend-hero strong{font-size:19px;text-align:right}.recommend-hero small{display:block;margin-top:5px;color:#c7cfe8;font-size:11px;font-weight:400}.ai-result{margin-bottom:16px;padding:18px}.ai-result p,.ai-result ul{margin:8px 0 0;color:#58647c;font-size:12px;line-height:1.6}.recommend-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.recommend-card{display:flex;min-height:280px;flex-direction:column;padding:20px}.card-top{display:flex;justify-content:space-between;color:#5267dd;font-size:12px;font-weight:750}.card-top b{color:#53806c}.card-top b.urgent{color:#d5683d}.recommend-card h2{margin:16px 0 8px;color:#34415b;font-size:17px}.recommend-card>p{min-height:40px;margin:0 0 14px;color:#758096;font-size:12px;line-height:1.6}.reason{padding:14px;border:1px solid #e9ecf4;border-radius:11px;background:#f8f9fc;font-size:12px}.reason>b{color:#45516c}.reason summary{margin-top:10px;color:#6572d4;cursor:pointer;font-weight:700}.reason p{margin:7px 0 0;color:#69758d;line-height:1.6}.reason div,.card-actions,.history-metrics{display:flex;gap:6px;flex-wrap:wrap}.reason details div{margin-top:9px}.card-actions{margin-top:auto;padding-top:16px}.history-metrics{margin-bottom:15px}.rules-note{margin:20px 0 0;color:#7f8aa1;font-size:11px;text-align:right}@media(max-width:900px){.toolbar{align-items:stretch;flex-direction:column}.toolbar .el-select{width:100%}.category-tabs{justify-content:flex-start}.recommend-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.recommend-hero{align-items:flex-start;flex-direction:column}.recommend-hero strong{text-align:left}.recommend-grid{grid-template-columns:1fr}}
 </style>

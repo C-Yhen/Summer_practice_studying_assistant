@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime
 from time import perf_counter
 from typing import Any
@@ -47,18 +48,21 @@ async def queue_ai_enhancement(
     user_id: int,
     course_id: int,
     input_data: dict[str, Any],
-    dedupe_data: dict[str, Any] | None = None,
 ) -> AsyncTask | None:
     """Create/reuse one persistent AI task without delaying an API response."""
     if settings.llm_provider.strip().lower() == "mock":
         return None
-    # Some jobs (notably candidate plans) need a transient resource id to
-    # write their enhancement, but that id must not defeat deduplication of an
-    # otherwise identical user request.
-    hash_data = dedupe_data if dedupe_data is not None else input_data
-    key = stable_input_hash(task_type, {"user_id": user_id, "course_id": course_id, **hash_data})
+    # The target resource is part of the key. A newly created candidate plan
+    # must never reuse an AI task whose input points to an older candidate.
+    key = stable_input_hash(task_type, {"user_id": user_id, "course_id": course_id, **input_data})
     task = db.scalar(select(AsyncTask).where(AsyncTask.idempotency_key == key))
-    created = task is None
+    # Queued/processing work is reusable for the exact same target. A success
+    # is also reusable so clients can read its persisted result. Failed and
+    # cancelled work gets a fresh round instead of permanently blocking it.
+    reusable = task is not None and task.status in {"queued", "processing", "success"}
+    created = not reusable
+    if task is not None and not reusable:
+        key = f"{key}:{uuid.uuid4().hex[:12]}"
     if task is None:
         task = AsyncTask(
             user_id=user_id,
@@ -78,6 +82,21 @@ async def queue_ai_enhancement(
             if task is None:
                 raise
             created = False
+    elif reusable:
+        db.refresh(task)
+        return task
+    else:
+        task = AsyncTask(
+            user_id=user_id,
+            task_type=task_type,
+            resource_type="course",
+            resource_id=str(course_id),
+            input_data=input_data,
+            idempotency_key=key,
+            current_step="queued_for_ai_enhancement",
+        )
+        db.add(task)
+        db.commit()
     if created:
         await dispatch_async_task(db, task, settings)
     db.refresh(task)
@@ -123,6 +142,22 @@ def _safe_failure_type(exc: Exception) -> str:
     return "AI_ENHANCEMENT_FAILED"
 
 
+def _cancel_if_requested(db: Session, task: AsyncTask, *, step: str) -> bool:
+    """Discard pending business writes before committing a cancellation."""
+    with db.no_autoflush:
+        db.refresh(task, attribute_names=["cancel_requested", "status"])
+    if not task.cancel_requested and task.status != "cancelling":
+        return False
+    # A cancellation may arrive after plan/question objects were flushed but
+    # before the final task result commit. Roll those writes back first.
+    task_id = task.id
+    db.rollback()
+    managed = db.get(AsyncTask, task_id)
+    if managed is not None:
+        mark_task_cancelled(db, managed, step)
+    return True
+
+
 async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) -> dict[str, Any]:
     """Run one enhancement in a worker. Rule data is never rolled back here."""
     if task.task_type not in AI_ENRICHMENT_TASK_TYPES:
@@ -151,6 +186,8 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
                 "suggestions": suggestions[:3] if isinstance(suggestions, list) else [],
             }
         elif task.task_type == "plan_ai_enhancement":
+            if _cancel_if_requested(db, task, step="cancelled_before_plan_update"):
+                return {"cancelled": True}
             plan_id = int(task.input_data.get("plan_id", 0))
             version_number = int(task.input_data.get("version", 0))
             version = db.scalar(select(StudyPlanVersion).where(StudyPlanVersion.plan_id == plan_id, StudyPlanVersion.version == version_number))
@@ -170,6 +207,8 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
                 unavailable_dates=[],
                 timeout_seconds=settings.ai_plan_timeout_seconds,
             )
+            if _cancel_if_requested(db, task, step="cancelled_before_plan_write"):
+                return {"cancelled": True}
             summary = str(data.get("summary", "")).strip()[:1200] if isinstance(data, dict) else ""
             risks = data.get("risks", []) if isinstance(data, dict) else []
             # Candidate task scheduling remains rule-authoritative. Only enrich
@@ -185,11 +224,26 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
                 db, provider, course_id=course.id, knowledge_point_ids=point_ids,
                 timeout_seconds=settings.ai_practice_timeout_seconds,
             )
-            persisted = persist_ai_questions(db, course_id=course.id, questions=generated)
-            result = {"summary": "", "suggestions": [], **persisted}
+            if _cancel_if_requested(db, task, step="cancelled_before_practice_write"):
+                return {"cancelled": True}
+            generated_questions = generated.get("questions", []) if isinstance(generated, dict) else generated
+            generated_stats = generated.get("stats", {}) if isinstance(generated, dict) else {}
+            persisted = persist_ai_questions(db, course_id=course.id, questions=generated_questions)
+            rejected = int(generated_stats.get("rejected_count", 0)) + int(persisted.get("persistence_rejected_count", 0))
+            warnings = list(persisted.get("warnings", []))
+            if rejected and "AI_QUESTIONS_REJECTED" not in warnings:
+                warnings.append("AI_QUESTIONS_REJECTED")
+            result = {
+                "summary": "",
+                "suggestions": [],
+                "requested_count": int(generated_stats.get("requested_count", len(generated_questions))),
+                "validated_count": int(generated_stats.get("validated_count", len(generated_questions))),
+                "rejected_count": rejected,
+                **persisted,
+                "warnings": warnings,
+            }
 
-        if task.cancel_requested:
-            mark_task_cancelled(db, task, "cancelled_before_commit")
+        if _cancel_if_requested(db, task, step="cancelled_before_commit"):
             return {"cancelled": True}
         elapsed_ms = round((perf_counter() - started) * 1000, 1)
         task.status = "success"

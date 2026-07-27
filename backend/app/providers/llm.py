@@ -168,11 +168,11 @@ class OpenAICompatibleProvider(LLMProvider):
 
 def llm_runtime_status(settings: Settings) -> dict[str, str | bool]:
     provider = settings.llm_provider.strip().lower()
-    is_mock = provider == "mock"
+    is_mock = provider in {"mock", "fake"}
     return {
         "provider": provider,
         "chat_model": settings.llm_chat_model if not is_mock else "",
-        "chat_mode": "mock" if is_mock else "remote",
+        "chat_mode": "fake" if provider == "fake" else ("mock" if is_mock else "remote"),
         "embedding_mode": "local" if is_mock or not settings.llm_embedding_model else "remote",
         "is_mock": is_mock,
     }
@@ -181,7 +181,9 @@ def llm_runtime_status(settings: Settings) -> dict[str, str | bool]:
 def get_llm_provider(settings: Settings) -> LLMProvider:
     fallback = MockLLMProvider(settings.embedding_dimension)
     provider = settings.llm_provider.strip().lower()
-    if provider == "mock":
+    # ``fake`` is an explicit test-only worker mode: unlike ``mock`` it still
+    # queues AsyncTask/Celery work, but never contacts an external provider.
+    if provider in {"mock", "fake"}:
         return fallback
     if not provider:
         raise ValueError("LLM_PROVIDER must be configured explicitly")

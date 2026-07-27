@@ -71,6 +71,11 @@ def _context_from_sources(sources: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts[:10])[:8000]
 
 
+def _normalized_quote(value: str) -> str:
+    """Allow formatting differences, but not invented material citations."""
+    return re.sub(r"[\s\u3000\.,;:!?，。；：！？、'\"“”‘’()（）\[\]【】]+", "", value).lower()
+
+
 async def generate_questions_batch(
     db: Session,
     provider: LLMProvider,
@@ -78,14 +83,14 @@ async def generate_questions_batch(
     course_id: int,
     knowledge_point_ids: list[int],
     timeout_seconds: int = 18,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """One retrieval plus one LLM call for a bounded collection of questions."""
     points = list(db.scalars(select(KnowledgePoint).where(
         KnowledgePoint.course_id == course_id,
         KnowledgePoint.id.in_(knowledge_point_ids[:3]),
     ).order_by(KnowledgePoint.id)))
     if not points:
-        return []
+        return {"questions": [], "stats": {"requested_count": 0, "validated_count": 0, "rejected_count": 0}}
     source_context = await retrieve(
         db,
         provider,
@@ -95,7 +100,7 @@ async def generate_questions_batch(
     )
     context = _context_from_sources(source_context)
     if not context:
-        return []
+        return {"questions": [], "stats": {"requested_count": len(points), "validated_count": 0, "rejected_count": len(points)}}
     expected = [
         {"knowledge_point_id": point.id, "knowledge_point": point.name, "difficulty": point.difficulty}
         for point in points
@@ -118,18 +123,35 @@ async def generate_questions_batch(
     if not isinstance(raw_questions, list):
         raise ValueError("AI_QUESTIONS_ARRAY_INVALID")
     valid_point_ids = {point.id for point in points}
+    normalized_context = _normalized_quote(context)
     questions: list[dict[str, Any]] = []
+    rejected = 0
     for raw in raw_questions[: len(points)]:
         try:
             question = AIQuestionPayload.model_validate(raw)
         except ValidationError as exc:
             logger.warning("ai_practice_question_rejected reason=validation")
+            rejected += 1
             continue
         if question.knowledge_point_id not in valid_point_ids:
             logger.warning("ai_practice_question_rejected reason=knowledge_point_scope")
+            rejected += 1
+            continue
+        if _normalized_quote(question.source_quote) not in normalized_context:
+            logger.warning("ai_practice_question_rejected reason=source_quote")
+            rejected += 1
             continue
         questions.append(question.model_dump())
-    return questions
+    # Missing question slots are also rejected outputs from the requested batch.
+    rejected += max(0, len(points) - len(raw_questions[: len(points)]))
+    return {
+        "questions": questions,
+        "stats": {
+            "requested_count": len(points),
+            "validated_count": len(questions),
+            "rejected_count": rejected,
+        },
+    }
 
 
 def _next_seed_key(db: Session, course_id: int, prefix: str) -> str:
@@ -142,9 +164,9 @@ def _next_seed_key(db: Session, course_id: int, prefix: str) -> str:
     return f"{prefix}:v{version}"
 
 
-def persist_ai_questions(db: Session, *, course_id: int, questions: list[dict[str, Any]]) -> dict[str, int | str]:
+def persist_ai_questions(db: Session, *, course_id: int, questions: list[dict[str, Any]]) -> dict[str, int | str | list[str]]:
     """Persist each validated question in a savepoint; never delete history."""
-    created = failed = 0
+    created = failed = rejected = skipped_existing = 0
     for raw in questions:
         try:
             question = AIQuestionPayload.model_validate(raw)
@@ -161,6 +183,7 @@ def persist_ai_questions(db: Session, *, course_id: int, questions: list[dict[st
                 PracticeQuestion.is_active.is_(True),
             ))
             if active is not None:
+                skipped_existing += 1
                 continue
             with db.begin_nested():
                 db.add(PracticeQuestion(
@@ -179,6 +202,17 @@ def persist_ai_questions(db: Session, *, course_id: int, questions: list[dict[st
                 db.flush()
             created += 1
         except Exception as exc:
-            failed += 1
+            if isinstance(exc, (ValidationError, ValueError)):
+                rejected += 1
+            else:
+                failed += 1
             logger.warning("ai_practice_question_persist_failed error_type=%s", type(exc).__name__)
-    return {"generation_mode": "ai_background", "ai_created_count": created, "failed_count": failed}
+    warnings = ["AI_QUESTIONS_REJECTED"] if rejected else []
+    return {
+        "generation_mode": "ai_background",
+        "ai_created_count": created,
+        "skipped_existing_count": skipped_existing,
+        "failed_count": failed + rejected,
+        "persistence_rejected_count": rejected,
+        "warnings": warnings,
+    }

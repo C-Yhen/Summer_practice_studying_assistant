@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
-import { courseApi, practiceApi } from '@/api/services'
+import { asyncTaskApi, courseApi, practiceApi } from '@/api/services'
 import { getApiErrorMessage } from '@/api/client'
 import type {
   CourseListItem,
@@ -33,6 +33,7 @@ const result = ref<PracticeAttemptResult | null>(null)
 const pendingSubmission = ref<PendingSubmission | null>(null)
 const loading = ref(false)
 const booting = ref(false)
+const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
 const submitting = ref(false)
 const error = ref('')
 const started = ref<number | null>(null)
@@ -43,6 +44,9 @@ const wrongQuery = ref('')
 const wrongUpdating = ref(false)
 const expandedWrongId = ref<number | null>(null)
 let requestVersion = 0
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
+let refreshAfterSubmit = false
 
 const activeTab = computed<'practice' | 'wrong'>(() => route.query.tab === 'wrong' ? 'wrong' : 'practice')
 const mode = computed<'all' | 'wrong'>(() => route.query.mode === 'wrong' ? 'wrong' : 'all')
@@ -50,6 +54,68 @@ const question = computed(() => questions.value[index.value])
 const progress = computed(() => questions.value.length
   ? Math.round((index.value + 1) / questions.value.length * 100)
   : 0)
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+  aiEnhancementStatus.value = null
+}
+
+async function refreshQuestionsAfterAI() {
+  const currentCourseId = courseId.value
+  if (!currentCourseId || activeTab.value !== 'practice' || submitting.value) return
+  const currentQuestionId = question.value?.id ?? null
+  const currentSelection = selected.value
+  const currentResult = result.value
+  const data = await practiceApi.questions(currentCourseId, mode.value)
+  if (courseId.value !== currentCourseId || activeTab.value !== 'practice') return
+  questions.value = data.items
+  summary.value = data.summary
+  const nextIndex = currentQuestionId === null ? -1 : data.items.findIndex((item) => item.id === currentQuestionId)
+  if (nextIndex >= 0) {
+    index.value = nextIndex
+    selected.value = currentSelection
+    result.value = currentResult
+  } else {
+    index.value = 0
+    resetAnswer(true)
+  }
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  aiEnhancementStatus.value = 'queued'
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (version !== aiPollVersion || courseId.value !== sourceCourseId) return
+      if (task.status === 'success') {
+        stopAiPolling()
+        if (submitting.value) refreshAfterSubmit = true
+        else await refreshQuestionsAfterAI()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        aiEnhancementStatus.value = task.status
+        return
+      }
+      if (attempts >= 40) {
+        aiEnhancementStatus.value = 'failed'
+        return
+      }
+      aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (version === aiPollVersion && courseId.value === sourceCourseId && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else aiEnhancementStatus.value = 'failed'
+    }
+  }
+  void poll()
+}
 
 function resetAnswer(startTimer = true) {
   selected.value = ''
@@ -116,6 +182,7 @@ async function bootstrap() {
     const generated = await practiceApi.bootstrap(courseId.value)
     await load()
     if (generated.ai_enhancement_task_id) {
+      watchAiEnhancement(generated.ai_enhancement_task_id, courseId.value)
       ElMessage.success('基础自测题已可练习；AI 增强题正在后台生成。')
     }
   } catch (bootstrapError) {
@@ -169,6 +236,10 @@ async function submit() {
     ElMessage.error(getApiErrorMessage(submitError, '提交失败，请使用原提交重试'))
   } finally {
     submitting.value = false
+    if (refreshAfterSubmit) {
+      refreshAfterSubmit = false
+      void refreshQuestionsAfterAI()
+    }
   }
 }
 
@@ -243,10 +314,12 @@ function reviewWrongQuestions() {
 watch(
   () => [route.query.courseId, route.query.tab, route.query.mode],
   () => {
+    stopAiPolling()
     if (!submitting.value && !wrongUpdating.value) void load()
   },
 )
 onMounted(load)
+onBeforeUnmount(stopAiPolling)
 </script>
 
 <template>
@@ -276,7 +349,9 @@ onMounted(load)
         <el-tab-pane label="开始练习" name="practice">
           <div class="tab-body">
             <el-alert v-if="error" :title="error" type="error" show-icon />
-            <div v-else v-loading="loading">
+            <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" title="基础题已可用，AI 增强题正在后台生成。" type="info" :closable="false" show-icon />
+            <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 增强题未生成，现有基础题仍可正常练习。" type="warning" :closable="false" show-icon />
+            <div v-if="!error" v-loading="loading">
               <el-empty v-if="!courseId" description="还没有课程，请先创建课程并上传资料">
                 <el-button type="primary" @click="router.push('/courses')">去创建课程</el-button>
               </el-empty>

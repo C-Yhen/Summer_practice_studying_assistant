@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Calendar, Check, Clock, Refresh, Warning } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { courseApi, planApi, profileApi } from '@/api/services'
+import { asyncTaskApi, courseApi, planApi, profileApi } from '@/api/services'
 import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask, UserPreferences } from '@/types'
 
 const route = useRoute()
@@ -24,8 +24,51 @@ const planError = ref('')
 const generating = ref(false)
 const confirming = ref(false)
 const confirmVisible = ref(false)
+const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
 let initializationVersion = 0
 let internalRouteUpdate = false
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+  aiEnhancementStatus.value = null
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number, sourcePlanId: number, sourceVersion: number) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  aiEnhancementStatus.value = 'queued'
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (version !== aiPollVersion || selectedCourseId.value !== sourceCourseId || plan.value?.plan_id !== sourcePlanId || plan.value?.version !== sourceVersion) return
+      if (task.status === 'success') {
+        stopAiPolling()
+        await loadCurrentPlan()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        aiEnhancementStatus.value = task.status
+        return
+      }
+      if (attempts >= 40) {
+        aiEnhancementStatus.value = 'failed'
+        return
+      }
+      aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else aiEnhancementStatus.value = 'failed'
+    }
+  }
+  void poll()
+}
 
 function localDate(offset = 0) {
   const date = new Date()
@@ -139,6 +182,7 @@ async function loadCurrentPlan() {
 }
 
 async function selectCourse(courseId: number) {
+  stopAiPolling()
   plan.value = null
   planError.value = ''
   confirmVisible.value = false
@@ -184,6 +228,7 @@ async function generatePlan() {
   }
   if (sessionMinutesOverride.value) payload.session_minutes = form.sessionMinutes
   generating.value = true
+  stopAiPolling()
   planError.value = ''
   try {
     const generated = await planApi.generate(selectedCourseId.value, payload)
@@ -198,6 +243,9 @@ async function generatePlan() {
       expected_base_version: generated.expected_base_version,
       confirmation_token: generated.confirmation_token,
       ...generated.candidate_version,
+    }
+    if (generated.ai_enhancement_task_id) {
+      watchAiEnhancement(generated.ai_enhancement_task_id, generated.course_id, generated.plan_id, generated.candidate_version.version)
     }
     ElMessage.success(generated.ai_enhancement_task_id
       ? '候选学习计划已生成；AI 摘要会在后台补充，当前计划可直接确认。'
@@ -270,6 +318,7 @@ function contextLabel(value: unknown, kind: 'foundation' | 'order' | 'difficulty
 watch(() => route.query.courseId, () => {
   if (!internalRouteUpdate) void initialize()
 }, { immediate: true })
+onBeforeUnmount(stopAiPolling)
 </script>
 
 <template>
@@ -289,7 +338,7 @@ watch(() => route.query.courseId, () => {
 
     <template v-else-if="selectedCourseId && preferences">
       <section class="content-card form-card">
-          <div class="section-head"><div><span>第 1 步 · 告诉我你的目标</span><h2>{{ plan ? '重新规划学习节奏' : '创建一份可执行的学习计划' }}</h2><p>时长默认采用个人偏好，你可以只为本次计划临时调整。系统会先生成预览，由你确认后再生效。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复默认时长</el-button><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '正在智能编排…' : '生成计划预览' }}</el-button></div></div>
+          <div class="section-head"><div><span>第 1 步 · 告诉我你的目标</span><h2>{{ plan ? '重新规划学习节奏' : '创建一份可执行的学习计划' }}</h2><p>时长默认采用个人偏好，你可以只为本次计划临时调整。系统会先生成预览，由你确认后再生效。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复默认时长</el-button><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '正在生成计划预览…' : '生成计划预览' }}</el-button></div></div>
         <el-form label-position="top" class="plan-form">
           <el-form-item label="学习目标"><el-input v-model="form.goal" maxlength="500" show-word-limit /></el-form-item>
           <el-form-item label="开始日期"><el-input v-model="form.startDate" type="date" /></el-form-item>
@@ -300,6 +349,8 @@ watch(() => route.query.courseId, () => {
       </section>
 
       <el-alert v-if="planError" :title="planError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadCurrentPlan">重新加载</el-button></template></el-alert>
+      <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" title="计划预览已可确认，AI 摘要与风险提示正在后台补充。" type="info" :closable="false" show-icon class="page-alert" />
+      <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 摘要未生成，当前规则计划仍可正常确认。" type="warning" :closable="false" show-icon class="page-alert" />
       <div v-if="planLoading" v-loading="true" class="plan-loading"></div>
       <el-empty v-else-if="!plan" description="当前课程还没有学习计划，请先生成候选计划" />
 

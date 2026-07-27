@@ -249,20 +249,6 @@ async def generate_plan(
             "needs_exam_focus": preference.needs_exam_focus,
             "needs_error_points": preference.needs_error_points,
         },
-        dedupe_data={
-            "goal": plan.goal,
-            "start_date": plan.start_date.isoformat(),
-            "end_date": plan.end_date.isoformat(),
-            "daily_minutes": daily_minutes,
-            "session_minutes": session_minutes,
-            "foundation_level": preference.foundation_level,
-            "learning_order": preference.learning_order,
-            "preferred_difficulty": preference.preferred_difficulty,
-            "needs_exam_focus": preference.needs_exam_focus,
-            "needs_error_points": preference.needs_error_points,
-            "unavailable_dates": sorted(item.isoformat() for item in payload.unavailable_dates),
-            "daily_availability": payload.daily_availability,
-        },
     )
     token = issue_confirmation(settings.jwt_secret, user_id=current_user.id, action="confirm_plan", resource_id=f"{plan.id}:1", payload={"base_version": 0})
     return ok({"async_task_id": task.public_id, "ai_enhancement_task_id": ai_task.public_id if ai_task else None, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
