@@ -13,6 +13,8 @@ from sqlalchemy import func, select
 from backend.app.database import Database
 from backend.app.models import (
     Course,
+    Document,
+    DocumentChunk,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
@@ -44,10 +46,15 @@ def _other_user(client: TestClient) -> dict:
 
 def _point(client: TestClient, course_id: int, name: str = "Gradient descent") -> int:
     with client.app.state.database.session_factory() as db:
+        document = Document(course_id=course_id, title=f"{name} source", file_type="txt", file_path=f"{name}.txt", status="ready")
+        db.add(document)
+        db.flush()
+        source = f"{name} is a concrete course topic. Its definition, conditions, and practical role must be understood."
+        db.add(DocumentChunk(document_id=document.id, course_id=course_id, document_version=1, chunk_index=0, content=source, page_number=1, embedding=[]))
         point = KnowledgePoint(
             course_id=course_id,
             name=name,
-            description=f"Description for {name}",
+            description=f"Description for {name}. 来源：{document.title} 第1页。依据：{source}",
             difficulty="intermediate",
         )
         db.add(point)
@@ -160,7 +167,7 @@ def test_bootstrap_creates_course_questions_and_is_idempotent(
         "total": 2,
         "reason": None,
     }
-    assert first["generation_mode"] == "rule_first"
+    assert first["generation_mode"] == "source_grounded_rule_first"
     assert first["rule_created_count"] == 2
     assert {key: second[key] for key in ("created_count", "existing_count", "total", "reason")} == {
         "created_count": 0,
@@ -186,12 +193,9 @@ def test_bootstrap_without_points_does_not_create_fake_questions(
         headers=auth_headers,
     )
     assert result.status_code == 200
-    assert result.json()["data"] == {
-        "created_count": 0,
-        "existing_count": 0,
-        "total": 0,
-        "reason": "NO_KNOWLEDGE_POINTS",
-    }
+    data = result.json()["data"]
+    assert data["created_count"] == data["existing_count"] == data["total"] == 0
+    assert data["reason"] == "NO_SOURCE_GROUNDED_KNOWLEDGE_POINTS"
     assert client.get(
         f"/api/v1/courses/{course_id}/practice/questions", headers=auth_headers
     ).json()["data"]["total"] == 0

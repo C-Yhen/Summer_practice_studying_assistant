@@ -16,6 +16,7 @@ class PlanningPoint:
     difficulty: str = "basic"
     prerequisite_ids: list[int] = field(default_factory=list)
     days_since_review: int = 30
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,24 @@ def _initial_task(plan: PlanInput, point: PlanningPoint) -> tuple[str, str]:
     return "focused_study", f"重点学习：{point.name}"
 
 
+def _source_hint(point: PlanningPoint) -> str:
+    """Use the persisted source locator when present, without inventing one."""
+    text = point.description.replace("\n", " ").strip()
+    marker = text.find("来源：")
+    if marker < 0:
+        return "课程资料相关章节"
+    return text[marker:].split("依据：", 1)[0].rstrip("。 ")
+
+
+def _initial_task(plan: PlanInput, point: PlanningPoint) -> tuple[str, str]:
+    source = _source_hint(point)
+    if plan.needs_derivation:
+        return "concept_derivation", f"梳理“{point.name}”：依据{source}写出定义、组成和因果关系"
+    if plan.foundation_level == "advanced":
+        return "integrated_application", f"应用“{point.name}”：结合{source}说明它的作用与适用条件"
+    return "focused_study", f"学习“{point.name}”：阅读{source}并整理三个关键要点"
+
+
 def build_plan(plan: PlanInput, points: list[PlanningPoint]) -> dict[str, Any]:
     dates: list[date] = []
     cursor = plan.start_date
@@ -131,7 +150,14 @@ def build_plan(plan: PlanInput, points: list[PlanningPoint]) -> dict[str, Any]:
             risks.append(f"时间不足，未能安排知识点“{point.name}”。")
             continue
         review_minutes = min(30, max(15, minutes // 2), plan.session_minutes)
-        allocate(point, "spaced_review", f"间隔复习：{point.name}", review_minutes, learned_index + 2, _difficulty(point, plan.preferred_difficulty))
+        allocate(
+            point,
+            "spaced_review",
+            f"复习“{point.name}”：不看资料复述定义、作用和适用条件",
+            review_minutes,
+            learned_index + 2,
+            _difficulty(point, plan.preferred_difficulty),
+        )
 
     if tasks and plan.needs_exam_focus:
         final_day = dates[-1]
@@ -147,6 +173,68 @@ def build_plan(plan: PlanInput, points: list[PlanningPoint]) -> dict[str, Any]:
             risks.append("最后一天容量不足，阶段测试需要手动安排。")
     tasks.sort(key=lambda item: (item["scheduled_date"], -item["priority"], item["knowledge_point_id"] or 0))
     return {"tasks": tasks, "risks": risks, "total_minutes": sum(item["estimated_minutes"] for item in tasks), "remaining_capacity": sum(capacity.values())}
+
+
+def build_plan(plan: PlanInput, points: list[PlanningPoint]) -> dict[str, Any]:
+    """Build a fast rule plan whose every task names a real knowledge point."""
+    dates: list[date] = []
+    cursor = plan.start_date
+    while cursor <= plan.end_date:
+        if cursor not in plan.unavailable_dates and plan.daily_overrides.get(cursor, plan.default_daily_minutes) > 0:
+            dates.append(cursor)
+        cursor += timedelta(days=1)
+    if not dates:
+        return {"tasks": [], "risks": ["没有可学习日期，无法安排任务。"], "total_minutes": 0}
+
+    capacity = {day: plan.daily_overrides.get(day, plan.default_daily_minutes) for day in dates}
+    tasks: list[dict[str, Any]] = []
+    risks: list[str] = []
+    urgency = min(1.5, 1 + max(0, 14 - len(dates)) / 28)
+
+    def allocate(point: PlanningPoint, task_type: str, title: str, minutes: int, earliest: int) -> int | None:
+        for index in range(max(0, earliest), len(dates)):
+            if capacity[dates[index]] >= minutes:
+                capacity[dates[index]] -= minutes
+                tasks.append({
+                    "scheduled_date": dates[index],
+                    "knowledge_point_id": point.id,
+                    "knowledge_point": point.name,
+                    "title": title,
+                    "task_type": task_type,
+                    "estimated_minutes": minutes,
+                    "priority": _priority(point, plan, urgency),
+                    "difficulty": _difficulty(point, plan.preferred_difficulty),
+                })
+                return index
+        return None
+
+    for point in _topological(points, plan):
+        if point.has_mastery_record and point.mastery is not None and point.mastery >= 0.9:
+            continue
+        minutes = min(max(15, point.estimated_minutes), plan.session_minutes)
+        task_type, title = _initial_task(plan, point)
+        learned_index = allocate(point, task_type, title, minutes, 0)
+        if learned_index is None:
+            risks.append(f"时间不足，未能安排“{point.name}”。")
+            continue
+        review_minutes = min(30, max(15, minutes // 2), plan.session_minutes)
+        allocate(
+            point,
+            "spaced_review",
+            f"复习“{point.name}”：不看资料复述定义、作用和适用条件",
+            review_minutes,
+            learned_index + 2,
+        )
+
+    # A capacity-only generic "final test" is intentionally not added.  It
+    # cannot be sourced to a point and would reintroduce meaningless content.
+    tasks.sort(key=lambda item: (item["scheduled_date"], -item["priority"], item["knowledge_point_id"]))
+    return {
+        "tasks": tasks,
+        "risks": risks,
+        "total_minutes": sum(item["estimated_minutes"] for item in tasks),
+        "remaining_capacity": sum(capacity.values()),
+    }
 
 
 def reschedule(tasks: list[dict[str, Any]], *, start_date: date, end_date: date, daily_minutes: int) -> dict[str, Any]:

@@ -10,7 +10,12 @@ from backend.app.models import AsyncTask, utcnow
 ACTIVE_TASK_STATUSES = {"queued", "processing", "cancelling"}
 TERMINAL_TASK_STATUSES = {"success", "failed", "cancelled"}
 DOCUMENT_TASK_TYPES = {"document_parse", "document_process"}
-AI_ENRICHMENT_TASK_TYPES = {"ai_recommendation", "plan_ai_enhancement", "practice_ai_enhancement"}
+AI_ENRICHMENT_TASK_TYPES = {
+    "ai_recommendation",
+    "plan_ai_enhancement",
+    "practice_ai_enhancement",
+    "knowledge_point_extraction",
+}
 
 
 def iso_or_none(value: datetime | None) -> str | None:

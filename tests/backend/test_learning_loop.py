@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from backend.app.models import KnowledgePoint
 
 
 def _course(client: TestClient, headers: dict[str, str]) -> int:
@@ -83,6 +84,9 @@ def test_plan_confirmation_mastery_and_recommendations(
         headers=auth_headers,
         files={"file": ("db.txt", b"Database keys and normalization review.", "text/plain")},
     )
+    with client.app.state.database.session_factory() as db:
+        db.add(KnowledgePoint(course_id=course_id, name="第三范式", description="Third normal form removes transitive dependencies. 来源：db.txt 第1页。", estimated_minutes=30))
+        db.commit()
     generated = client.post(
         f"/api/v1/courses/{course_id}/study-plans/generate",
         headers=auth_headers,

@@ -134,13 +134,37 @@ async def extract_knowledge_points(
         response = await provider.chat(
             [
                 {"role": "system", "content": "你是一位课程分析专家，擅长从教材和讲义中提取结构化的知识点。请严格按JSON格式回复。"},
+                {
+                    "role": "system",
+                    "content": (
+                        "只提取可从资料原文核验的具体术语。每项必须返回 source_index（从 0 开始）"
+                        "和连续的 source_quote；提取 6 到 15 项。禁止泛化标签：核心概念、重点原理、综合应用。"
+                    ),
+                },
                 {"role": "user", "content": KNOWLEDGE_POINT_EXTRACTION_PROMPT.format(context=context[:12000])},
             ],
             temperature=0.3,
-            max_tokens=4000,
+            enable_thinking=False,
+            max_tokens=1800,
         )
         data = _extract_json(response)
-        return data.get("knowledge_points", [])
+        extracted: list[dict[str, Any]] = []
+        for raw in data.get("knowledge_points", []):
+            if not isinstance(raw, dict):
+                continue
+            try:
+                source = sources[int(raw.get("source_index", -1))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            item = dict(raw)
+            item.update({
+                "source_document_id": source.get("document_id"),
+                "source_document_name": source.get("document_name"),
+                "source_page_number": source.get("page_number"),
+                "source_text": source.get("quote", ""),
+            })
+            extracted.append(item)
+        return extracted
     except (json.JSONDecodeError, ValueError, KeyError) as e:
         # Fallback: return empty, caller should use rule-based
         print(f"[AI Planner] Knowledge point extraction failed: {e}")
@@ -176,6 +200,21 @@ ONE_SHOT_PLAN_PROMPT = """你是一位学习规划专家。请根据课程资料
 }}
 
 要求：先基础后进阶，每个知识点主学习+间隔复习，最后一天综合测试，时间不足则优先高重要性内容。"""
+
+
+PLAN_ENHANCEMENT_PROMPT = """你负责为已经由规则引擎排好的学习计划补充说明，而不是重新安排任务。
+
+课程目标：{goal}
+日期范围：{start_date} 至 {end_date}，可学习 {available_days} 天；每天 {daily_minutes} 分钟，每次 {session_minutes} 分钟。
+学习偏好：基础 {foundation_level}，顺序 {learning_order}，难度 {preferred_difficulty}。
+不可学习日期已经从可学习天数中扣除。请严格依据下面课程资料写 2-3 句摘要和最多 5 条风险提示。
+
+课程资料：
+{context}
+
+只返回 JSON，且只能包含：
+{{"summary": "具体说明将学习哪些资料内容", "risks": ["基于资料或时间安排的具体风险"]}}
+不要返回 tasks、scheduled_date、任务标题或任何新的排程；日期和任务由规则引擎负责。"""
 
 
 async def generate_plan_one_shot(
@@ -224,7 +263,7 @@ async def generate_plan_one_shot(
     available_days = sum(1 for i in range(total_days) if (start_date + timedelta(days=i)) not in unavailable)
 
     # Step 3: Single LLM call
-    prompt = ONE_SHOT_PLAN_PROMPT.format(
+    prompt = PLAN_ENHANCEMENT_PROMPT.format(
         goal=goal,
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),

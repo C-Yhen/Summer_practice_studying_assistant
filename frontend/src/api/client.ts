@@ -80,6 +80,9 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
   if (!error.response) return '无法连接后端服务，请确认后端和数据库正常运行'
 
   const detail = readErrorDetail(error.response.data)
+  if (detail?.startsWith('KNOWLEDGE_POINTS_PROCESSING')) {
+    return '课程资料正在提取可用知识点，请稍后重新生成；也可在任务中心查看进度。'
+  }
   const knownDetails: Record<string, string> = {
     'Email is already registered': '该邮箱已注册',
     FILE_EMPTY: '文件不能为空',
@@ -95,6 +98,7 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
     PLAN_VERSION_CONFLICT: '计划版本已变化，请刷新后重新确认',
     TASK_NOT_ACTIVE: '该任务所属计划尚未生效或已经失效',
     PLAN_GENERATION_FAILED: '学习计划生成失败，请稍后重试',
+    COURSE_CONTENT_NOT_READY: '课程资料尚未提取出可用知识点，请先上传或重新解析资料。',
     TASK_COMPLETION_FAILED: '任务完成状态保存失败，请重试',
     IDEMPOTENCY_KEY_REUSED: '本次提交标识已被其他答案使用，请刷新题目后重试',
     PRACTICE_ATTEMPT_FAILED: '答题结果保存失败，请使用原提交重试',

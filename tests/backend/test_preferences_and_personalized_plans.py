@@ -10,7 +10,11 @@ from backend.app.models import KnowledgeMastery, KnowledgePoint, StudyPlanVersio
 def _course(client: TestClient, headers: dict[str, str], name: str = "Personalized course") -> int:
     response = client.post("/api/v1/courses", headers=headers, json={"name": name})
     assert response.status_code == 201
-    return response.json()["data"]["id"]
+    course_id = response.json()["data"]["id"]
+    with client.app.state.database.session_factory() as db:
+        db.add(KnowledgePoint(course_id=course_id, name=f"{name} material", description=f"{name} concrete material。来源：测试资料 第1页。", estimated_minutes=30))
+        db.commit()
+    return course_id
 
 
 def _second_user(client: TestClient) -> dict[str, str]:
@@ -147,7 +151,7 @@ def test_plan_uses_preferences_overrides_and_preserves_generation_snapshot(clien
     tasks = first["candidate_version"]["tasks"]
     assert all(task["estimated_minutes"] <= 30 for task in tasks if task["task_type"] != "exam_review")
     assert all(task["task_type"] != "exam_review" for task in tasks)
-    assert any(task["title"].startswith("概念推导：") for task in tasks)
+    assert any(task["title"].startswith("梳理“") for task in tasks)
     assert all(task["difficulty"] in {"intermediate", "advanced", "mixed"} for task in tasks)
     by_day: dict[str, int] = {}
     for task in tasks: by_day[task["scheduled_date"]] = by_day.get(task["scheduled_date"], 0) + task["estimated_minutes"]

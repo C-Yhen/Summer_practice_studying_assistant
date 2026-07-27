@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from backend.app.models import AsyncTask, Course, KnowledgePoint, PracticeAttempt, PracticeQuestion, StudyPlanVersion
+from backend.app.models import AsyncTask, Course, Document, DocumentChunk, KnowledgePoint, PracticeAttempt, PracticeQuestion, StudyPlanVersion
 from backend.app.providers.llm import LLMProvider
 from backend.app.services.ai_enrichment import process_ai_enhancement, queue_ai_enhancement
 from backend.app.services.ai_recommend import generate_recommendations
@@ -26,7 +26,12 @@ def _course(client: TestClient, headers: dict[str, str], name: str = "AI nonbloc
 
 def _point(client: TestClient, course_id: int, name: str = "Point") -> int:
     with client.app.state.database.session_factory() as db:
-        point = KnowledgePoint(course_id=course_id, name=name, difficulty="basic", estimated_minutes=30)
+        document = Document(course_id=course_id, title=f"{name} source", file_type="txt", file_path=f"{name}.txt", status="ready")
+        db.add(document)
+        db.flush()
+        source = f"{name} is a concrete source-backed concept used in this test course."
+        db.add(DocumentChunk(document_id=document.id, course_id=course_id, document_version=1, chunk_index=0, content=source, page_number=1, embedding=[]))
+        point = KnowledgePoint(course_id=course_id, name=name, description=f"{source}\n来源：{document.title} 第1页。依据：{source}", difficulty="basic", estimated_minutes=30)
         db.add(point)
         db.commit()
         return point.id
@@ -76,7 +81,7 @@ def test_rule_endpoints_return_without_waiting_for_slow_remote_ai(client: TestCl
     assert practice.status_code == 200
     assert elapsed_practice < 2
     body = practice.json()["data"]
-    assert body["generation_mode"] == "rule_first"
+    assert body["generation_mode"] == "source_grounded_rule_first"
     assert body["rule_created_count"] >= 1
     assert body["ai_enhancement_task_id"]
     listed = client.get(f"/api/v1/courses/{course_id}/practice/questions", headers=auth_headers).json()["data"]

@@ -185,6 +185,14 @@ async function bootstrap() {
     const generated = await practiceApi.bootstrap(sourceCourseId)
     await load()
     if (courseId.value !== sourceCourseId) return
+    if (generated.reason === 'KNOWLEDGE_POINTS_PROCESSING') {
+      ElMessage.info('课程资料正在提取可用知识点，完成后请重新生成练习题；可在任务中心查看进度。')
+      return
+    }
+    if (generated.reason === 'NO_SOURCE_GROUNDED_KNOWLEDGE_POINTS' || generated.reason === 'NO_SOURCE_GROUNDED_QUESTIONS') {
+      ElMessage.warning('课程资料尚未提取出可用知识点，暂不生成模板题；请重新解析或补充课程资料。')
+      return
+    }
     if (generated.ai_enhancement_task_id) {
       watchAiEnhancement(generated.ai_enhancement_task_id, sourceCourseId)
       ElMessage.success('基础自测题已可练习；AI 增强题正在后台生成。')

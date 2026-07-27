@@ -27,7 +27,11 @@ from backend.app.security import hash_password
 def _course(client: TestClient, headers: dict[str, str], name: str) -> int:
     response = client.post("/api/v1/courses", headers=headers, json={"name": name})
     assert response.status_code == 201
-    return response.json()["data"]["id"]
+    course_id = response.json()["data"]["id"]
+    with client.app.state.database.session_factory() as db:
+        db.add(KnowledgePoint(course_id=course_id, name=f"{name} material", description=f"{name} source-backed test material。来源：测试资料 第1页。", estimated_minutes=30))
+        db.commit()
+    return course_id
 
 
 def _generate(

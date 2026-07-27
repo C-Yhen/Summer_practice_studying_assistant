@@ -35,6 +35,7 @@ from backend.app.responses import ok
 from backend.app.schemas import CourseRecommendationFeedback, UserBehaviorTrack
 from backend.app.services.ai_enrichment import ai_enhancement_payload, queue_ai_enhancement
 from backend.app.services.timezones import local_date_range_utc, resolve_user_timezone
+from backend.app.services.course_content import is_legacy_placeholder_point, usable_knowledge_points
 
 router = APIRouter(tags=["recommendations"])
 
@@ -161,6 +162,10 @@ def build_course_recommendations(
         )
     ))
     for task, point in task_rows:
+        # Old plans may retain placeholder-linked tasks as historical records,
+        # but they are not meaningful recommendations for a new study action.
+        if point is None or is_legacy_placeholder_point(point):
+            continue
         mastery = masteries.get(task.knowledge_point_id)
         signals = _task_signals(task, target_date, course, mastery)
         due = "逾期任务" if task.scheduled_date < target_date else ("今日任务" if task.scheduled_date == target_date else "近期任务")
@@ -183,6 +188,8 @@ def build_course_recommendations(
         .order_by(KnowledgeMastery.score, KnowledgeMastery.knowledge_point_id)
         .limit(3)
     ):
+        if is_legacy_placeholder_point(point):
+            continue
         weakness = 1 - mastery.score
         signals = [base_signal("mastery_review"), Signal("low_mastery", "掌握度偏低", weakness, 40 * weakness), Signal("learning_attempts", "已有学习记录", min(1.0, mastery.attempts / 5), min(10.0, mastery.attempts * 2.0))]
         items.append(_item(
@@ -192,12 +199,30 @@ def build_course_recommendations(
             signals=signals, action=ACTION_MAP["mastery_review"],
             knowledge_point={"id": point.id, "name": point.name, "score": round(mastery.score, 4), "attempts": mastery.attempts},
         ))
-    if not has_active_plan:
+    # With no active task or mastery evidence, recommend a concrete, extracted
+    # topic first.  Do not fill the main recommendation area with app shortcuts.
+    if not items:
+        for point in usable_knowledge_points(db, course_id)[:3]:
+            source_hint = (point.description or "课程资料相关章节").split("来源：", 1)[-1][:90]
+            items.append(_item(
+                course_id=course_id,
+                item_type="mastery_review",
+                item_id=point.id,
+                title=f"学习：{point.name}",
+                subtitle=f"资料依据：{source_hint}",
+                reason=f"“{point.name}”已从课程资料提取，尚无学习尝试；建议先阅读来源内容并完成一次自测。",
+                signals=[base_signal("mastery_review"), Signal("unstarted_source_topic", "有可用课程资料但暂无学习记录", 1.0, 50.0)],
+                action=ACTION_MAP["mastery_review"],
+                estimated_minutes=point.estimated_minutes,
+                knowledge_point={"id": point.id, "name": point.name, "score": None, "attempts": 0},
+            ))
+    meaningful_items = bool(items)
+    if not meaningful_items and not has_active_plan:
         items.append(_item(course_id=course_id, item_type="create_plan", item_id=course_id, title="创建学习计划", subtitle="当前课程尚无生效学习计划", reason="当前课程尚无生效学习计划，建议先生成一份学习计划。", signals=[base_signal("create_plan")], action=ACTION_MAP["create_plan"]))
     if ready_documents:
         count = len(ready_documents)
         items.append(_item(course_id=course_id, item_type="course_chat", item_id=course_id, title="使用课程问答复习", subtitle=f"已有 {count} 份就绪资料可用于问答", reason=f"当前课程已有 {count} 份就绪资料，可使用课程问答进行复习。", signals=[base_signal("course_chat"), Signal("ready_documents", "可用资料", min(1.0, count / 3), min(15.0, count * 5.0))], action=ACTION_MAP["course_chat"]))
-    else:
+    elif not meaningful_items or category == "resource":
         items.append(_item(course_id=course_id, item_type="upload_document", item_id=course_id, title="上传学习资料", subtitle="当前课程没有就绪资料", reason="当前课程尚无可用于问答的已就绪资料，建议先上传资料。", signals=[base_signal("upload_document")], action=ACTION_MAP["upload_document"]))
     from backend.app.models import User
     user = db.get(User, user_id)
@@ -245,6 +270,27 @@ async def course_recommendations(
     category: RecommendationQueryCategory = "all",
 ) -> dict:
     result = build_course_recommendations(db, current_user.id, course_id, target_date or _today_for_user(current_user), limit, category)
+
+    if not usable_knowledge_points(db, course_id):
+        document_ids = list(
+            db.scalars(
+                select(Document.id).where(
+                    Document.course_id == course_id,
+                    Document.status == "ready",
+                    Document.is_deleted.is_(False),
+                )
+            )
+        )
+        if document_ids:
+            extraction_task = await queue_ai_enhancement(
+                db,
+                settings,
+                task_type="knowledge_point_extraction",
+                user_id=current_user.id,
+                course_id=course_id,
+                input_data={"document_ids": document_ids},
+            )
+            result["knowledge_point_extraction"] = ai_enhancement_payload(extraction_task)
 
     # Rule recommendations are immediately usable. Remote AI is persisted as
     # a background enhancement and never delays this GET response.

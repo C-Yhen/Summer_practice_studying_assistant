@@ -23,7 +23,11 @@ from backend.app.providers.llm import OpenAICompatibleProvider, get_llm_provider
 from backend.app.services.ai_recommend import generate_recommendations, validate_recommendation_result
 from backend.app.services.async_tasks import dispatch_async_task, mark_task_cancelled
 from backend.app.services.practice_gen import generate_questions_batch, persist_ai_questions
-from backend.app.planning.ai_planner import generate_plan_one_shot
+from backend.app.planning.ai_planner import extract_knowledge_points, generate_plan_one_shot
+from backend.app.services.course_content import (
+    deactivate_legacy_placeholder_questions,
+    persist_extracted_knowledge_points,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,7 @@ AI_ENRICHMENT_TASK_TYPES = {
     "ai_recommendation",
     "plan_ai_enhancement",
     "practice_ai_enhancement",
+    "knowledge_point_extraction",
 }
 
 
@@ -217,7 +222,29 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
         if course is None:
             raise ValueError("AI_RESOURCE_NOT_FOUND")
 
-        if task.task_type == "ai_recommendation":
+        if task.task_type == "knowledge_point_extraction":
+            document_ids = [int(item) for item in task.input_data.get("document_ids", [])]
+            raw_points = await extract_knowledge_points(
+                db, provider, course.id, document_ids=document_ids or None
+            )
+            if _cancel_if_requested(db, task, step="cancelled_before_knowledge_point_write"):
+                return {"cancelled": True}
+            points = persist_extracted_knowledge_points(db, course.id, raw_points)
+            # Keep old plan/attempt history but make stale placeholder questions
+            # invisible to all future practice sessions.
+            deactivated = deactivate_legacy_placeholder_questions(db, course.id)
+            if not points:
+                raise ValueError("AI_RESPONSE_INVALID")
+            result = {
+                "summary": f"已从课程资料提取 {len(points)} 个可用知识点。",
+                "suggestions": [],
+                "knowledge_points": [
+                    {"id": point.id, "name": point.name, "description": point.description}
+                    for point in points
+                ],
+                "deactivated_legacy_questions": deactivated,
+            }
+        elif task.task_type == "ai_recommendation":
             target_date = date.fromisoformat(str(task.input_data.get("target_date", "")))
             data = await generate_recommendations(
                 db, provider, user_id=task.user_id, course_id=course.id,

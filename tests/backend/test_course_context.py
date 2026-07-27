@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
+from backend.app.models import KnowledgePoint
 
 
 def _course(
@@ -17,7 +18,11 @@ def _course(
         },
     )
     assert response.status_code == 201
-    return response.json()["data"]
+    course = response.json()["data"]
+    with client.app.state.database.session_factory() as db:
+        db.add(KnowledgePoint(course_id=course["id"], name=f"{name} material", description=f"{name} concrete material。来源：测试资料 第1页。", estimated_minutes=30))
+        db.commit()
+    return course
 
 
 def _second_user(client: TestClient) -> dict[str, str]:

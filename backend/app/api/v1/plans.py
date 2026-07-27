@@ -10,6 +10,7 @@ from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     AsyncTask,
+    Document,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
@@ -24,6 +25,7 @@ from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, Tas
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
 from backend.app.services.mastery import apply_mastery_evidence
 from backend.app.services.ai_enrichment import queue_ai_enhancement
+from backend.app.services.course_content import persist_extracted_knowledge_points, usable_knowledge_points
 
 router = APIRouter(tags=["study-plans"])
 
@@ -36,6 +38,9 @@ def _owned_plan(db: DBSession, plan_id: int, user_id: int) -> StudyPlan:
 
 
 def _seed_points(db: DBSession, course_id: int) -> list[KnowledgePoint]:
+    """Compatibility name: never create generic points without source material."""
+    return usable_knowledge_points(db, course_id)
+
     points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
     if points:
         return points
@@ -54,6 +59,8 @@ def _persist_ai_points(
     db: DBSession, course_id: int, raw_points: list[dict]
 ) -> list[KnowledgePoint]:
     """Persist validated AI-extracted points for downstream practice/mastery flows."""
+    return persist_extracted_knowledge_points(db, course_id, raw_points)
+
     existing = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
     if existing:
         return existing
@@ -170,9 +177,33 @@ async def generate_plan(
         "overrides": {"daily_minutes": daily_override, "session_minutes": session_override},
     }
 
-    # Candidate scheduling is always rule-first. Persisted knowledge points are
-    # reused; new courses receive safe seed points before any remote work.
+    # Candidate scheduling is always rule-first, but only with points that can
+    # be traced to ready course material; never invent generic seed labels.
     points = _seed_points(db, course_id)
+    if not points:
+        ready_document_ids = list(
+            db.scalars(
+                select(Document.id).where(
+                    Document.course_id == course_id,
+                    Document.status == "ready",
+                    Document.is_deleted.is_(False),
+                )
+            )
+        )
+        if not ready_document_ids:
+            raise HTTPException(status_code=422, detail="COURSE_CONTENT_NOT_READY")
+        extraction_task = await queue_ai_enhancement(
+            db,
+            settings,
+            task_type="knowledge_point_extraction",
+            user_id=current_user.id,
+            course_id=course_id,
+            input_data={"document_ids": ready_document_ids},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"KNOWLEDGE_POINTS_PROCESSING:{extraction_task.public_id if extraction_task else ''}",
+        )
     input_data = PlanInput(
         start_date=payload.start_date,
         end_date=payload.end_date,
@@ -199,6 +230,7 @@ async def generate_plan(
                 estimated_minutes=point.estimated_minutes,
                 difficulty=point.difficulty,
                 prerequisite_ids=point.prerequisite_ids,
+                description=point.description or "",
             )
             for point in points
         ],
