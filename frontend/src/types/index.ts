@@ -543,6 +543,24 @@ export interface DashboardAsyncTask {
   finished_at: string | null
 }
 
+export interface DashboardOnboardingItems {
+  course_created: boolean
+  document_ready: boolean
+  question_asked: boolean
+  plan_activated: boolean
+  task_completed: boolean
+}
+
+export interface DashboardOnboardingProgress {
+  version: number
+  completed_count: number
+  total_count: number
+  is_complete: boolean
+  items: DashboardOnboardingItems
+  available_course_id: number | null
+  ready_document_course_id: number | null
+}
+
 export interface DashboardOverview {
   target_date: string
   range_start: string
@@ -557,6 +575,7 @@ export interface DashboardOverview {
   weak_points: DashboardWeakPoint[]
   next_action: DashboardNextAction
   recent_async_tasks: DashboardAsyncTask[]
+  onboarding_progress: DashboardOnboardingProgress
 }
 
 export type TaskStatus = 'todo' | 'doing' | 'done'

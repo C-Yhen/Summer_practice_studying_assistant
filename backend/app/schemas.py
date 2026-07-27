@@ -412,6 +412,24 @@ class DashboardAsyncTask(BaseModel):
     finished_at: datetime | None
 
 
+class DashboardOnboardingItems(BaseModel):
+    course_created: bool
+    document_ready: bool
+    question_asked: bool
+    plan_activated: bool
+    task_completed: bool
+
+
+class DashboardOnboardingProgress(BaseModel):
+    version: int
+    completed_count: int
+    total_count: int
+    is_complete: bool
+    items: DashboardOnboardingItems
+    available_course_id: int | None
+    ready_document_course_id: int | None
+
+
 class DashboardOverview(BaseModel):
     target_date: date
     range_start: date
@@ -426,6 +444,7 @@ class DashboardOverview(BaseModel):
     weak_points: list[DashboardWeakPoint]
     next_action: DashboardNextAction
     recent_async_tasks: list[DashboardAsyncTask]
+    onboarding_progress: DashboardOnboardingProgress
 
 
 class LearningRecordCreate(BaseModel):

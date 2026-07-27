@@ -39,6 +39,7 @@ function parseDashboardOverview(value: unknown): DashboardOverview {
     || !Array.isArray(value.weak_points)
     || !isRecord(value.next_action)
     || !Array.isArray(value.recent_async_tasks)
+    || !isRecord(value.onboarding_progress)
   ) {
     throw new ApiEnvelopeError('后端返回了无法识别的首页概览结构')
   }
@@ -126,6 +127,20 @@ function parseDashboardOverview(value: unknown): DashboardOverview {
     throw new ApiEnvelopeError('后端返回的异步任务信息不完整')
   }
 
+  const onboarding = value.onboarding_progress
+  const onboardingItems = onboarding.items
+  if (
+    !isInteger(onboarding.version)
+    || !isInteger(onboarding.completed_count)
+    || !isInteger(onboarding.total_count)
+    || typeof onboarding.is_complete !== 'boolean'
+    || !isRecord(onboardingItems)
+    || !['course_created', 'document_ready', 'question_asked', 'plan_activated', 'task_completed']
+      .every((key) => typeof onboardingItems[key] === 'boolean')
+    || (onboarding.available_course_id !== null && !isInteger(onboarding.available_course_id))
+    || (onboarding.ready_document_course_id !== null && !isInteger(onboarding.ready_document_course_id))
+  ) throw new ApiEnvelopeError('后端返回的新手任务进度不完整')
+
   return value as unknown as DashboardOverview
 }
 
@@ -176,6 +191,21 @@ function mockOverview(
     weak_points: [{ knowledge_point_id: 1, knowledge_point: '演示知识点', course_id: selectedCourse?.id ?? 1, course_name: selectedCourse?.name ?? '演示课程', score: 0.42, attempts: 1, confidence: 0.5 }],
     next_action: { type: 'today_task', title: '继续完成：完成演示复习任务', reason: '这是今天优先级最高的未完成任务', route: `/today?courseId=${selectedCourse?.id ?? 1}` },
     recent_async_tasks: [],
+    onboarding_progress: {
+      version: 1,
+      completed_count: 2,
+      total_count: 5,
+      is_complete: false,
+      items: {
+        course_created: true,
+        document_ready: true,
+        question_asked: false,
+        plan_activated: false,
+        task_completed: false,
+      },
+      available_course_id: selectedCourse?.id ?? 1,
+      ready_document_course_id: selectedCourse?.id ?? 1,
+    },
   }
 }
 

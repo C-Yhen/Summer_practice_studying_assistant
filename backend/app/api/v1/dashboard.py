@@ -11,6 +11,9 @@ from backend.app.models import (
     AsyncTask,
     Course,
     Document,
+    DocumentVersion,
+    ChatMessage,
+    ChatSession,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
@@ -92,6 +95,71 @@ def dashboard_overview(
             )
             .group_by(Document.course_id)
         )
+    }
+
+    # This is deliberately a compact, read-only aggregate.  The checklist is
+    # based on persisted user activity, never on a client-side dismissal.
+    course_created = bool(
+        db.scalar(select(Course.id).where(Course.owner_id == current_user.id).limit(1))
+    )
+    ready_document_course_id = db.scalar(
+        select(Document.course_id)
+        .join(Course, Course.id == Document.course_id)
+        .join(
+            DocumentVersion,
+            (DocumentVersion.document_id == Document.id)
+            & (DocumentVersion.version_no == Document.current_version),
+        )
+        .where(
+            Course.owner_id == current_user.id,
+            Course.archived.is_(False),
+            Document.is_deleted.is_(False),
+            DocumentVersion.status == "ready",
+        )
+        .order_by(Document.updated_at.desc(), Document.id.desc())
+        .limit(1)
+    )
+    document_ready = ready_document_course_id is not None
+    question_asked = bool(
+        db.scalar(
+            select(ChatMessage.id)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(ChatSession.user_id == current_user.id, ChatMessage.role == "user")
+            .limit(1)
+        )
+    )
+    plan_activated = bool(
+        db.scalar(
+            select(StudyPlanVersion.id)
+            .join(StudyPlan, StudyPlan.id == StudyPlanVersion.plan_id)
+            .where(
+                StudyPlan.user_id == current_user.id,
+                StudyPlan.status == "active",
+                StudyPlanVersion.status == "active",
+                StudyPlan.active_version == StudyPlanVersion.version,
+            )
+            .limit(1)
+        )
+    )
+    task_completed = bool(
+        db.scalar(
+            select(StudyTask.id)
+            .where(StudyTask.user_id == current_user.id, StudyTask.status == "completed")
+            .limit(1)
+        )
+    ) or bool(
+        db.scalar(
+            select(LearningRecord.id)
+            .where(LearningRecord.user_id == current_user.id, LearningRecord.completed.is_(True))
+            .limit(1)
+        )
+    )
+    onboarding_items = {
+        "course_created": course_created,
+        "document_ready": document_ready,
+        "question_asked": question_asked,
+        "plan_activated": plan_activated,
+        "task_completed": task_completed,
     }
     ready_document_count = (
         ready_counts.get(focus.id, 0)
@@ -313,5 +381,14 @@ def dashboard_overview(
             }
             for task in recent_async_tasks
         ],
+        onboarding_progress={
+            "version": 1,
+            "completed_count": sum(onboarding_items.values()),
+            "total_count": len(onboarding_items),
+            "is_complete": all(onboarding_items.values()),
+            "items": onboarding_items,
+            "available_course_id": courses[0].id if courses else None,
+            "ready_document_course_id": ready_document_course_id,
+        },
     )
     return ok(response.model_dump(mode="json"))

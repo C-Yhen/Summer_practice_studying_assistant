@@ -2,15 +2,17 @@
 import { computed, onMounted, ref } from 'vue'
 import type { EChartsOption } from 'echarts'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { ArrowRight, Calendar, ChatDotRound, Clock, DocumentAdd, Reading, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import MetricCard from '@/components/MetricCard.vue'
 import EChart from '@/components/EChart.vue'
 import StatusPill from '@/components/StatusPill.vue'
+import OnboardingChecklist from '@/components/OnboardingChecklist.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
 import { dashboardApi } from '@/api/dashboard'
 import { useAuthStore } from '@/stores/auth'
-import type { DashboardAsyncTask, DashboardOverview, DashboardTodayTask } from '@/types'
+import type { DashboardAsyncTask, DashboardOnboardingProgress, DashboardOverview, DashboardTodayTask } from '@/types'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -47,19 +49,26 @@ const focus = computed(() => overview.value?.focus_course ?? null)
 const completionPercent = computed(() => Math.round((overview.value?.today.completion_rate ?? 0) * 100))
 const averageMastery = computed(() => overview.value?.metrics.average_mastery ?? null)
 const hasTrend = computed(() => overview.value?.trend.some((item) => item.learning_minutes > 0 || item.scheduled_tasks > 0) ?? false)
-const onboardingSteps = computed(() => {
-  const hasCourse = Boolean(focus.value)
-  const hasDocument = (overview.value?.metrics.ready_document_count ?? 0) > 0
-  const hasPlan = Boolean(focus.value?.has_active_plan)
-  const hasLearning = (overview.value?.metrics.study_days_in_range ?? 0) > 0 || (overview.value?.today.completed_count ?? 0) > 0
-  return [
-    { title: '创建课程', description: '设置学习目标与考试日期', done: hasCourse, route: '/courses' },
-    { title: '添加资料', description: '上传讲义、笔记或教材', done: hasDocument, route: withCourse('/upload') },
-    { title: '生成计划', description: '由 AI 生成可确认的学习安排', done: hasPlan, route: withCourse('/plan') },
-    { title: '开始学习', description: '完成任务、练习并获得反馈', done: hasLearning, route: withCourse('/today') },
-  ]
-})
-const onboardingComplete = computed(() => onboardingSteps.value.every((step) => step.done))
+type OnboardingTaskKey = keyof DashboardOnboardingProgress['items']
+
+async function navigateOnboardingTask(key: OnboardingTaskKey) {
+  const progress = overview.value?.onboarding_progress
+  if (!progress) return
+  if (key === 'course_created') return router.push('/courses')
+  if (key === 'plan_activated') return router.push('/plan')
+  if (key === 'task_completed') return router.push('/today')
+
+  const courseId = key === 'question_asked'
+    ? progress.ready_document_course_id
+    : progress.available_course_id
+  if (key === 'question_asked' && courseId) return router.push({ path: '/chat', query: { courseId: String(courseId) } })
+  if (courseId) {
+    if (key === 'question_asked') ElMessage.info('请先上传资料并等待处理完成，再开始课程问答')
+    return router.push({ path: '/upload', query: { courseId: String(courseId) } })
+  }
+  ElMessage.info('需要先创建课程')
+  return router.push('/courses')
+}
 const trendOption = computed<EChartsOption>(() => ({
   color: ['#5a6aec', '#16ae94'], tooltip: { trigger: 'axis', backgroundColor: '#17213e', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
   grid: { top: 25, left: 10, right: 12, bottom: 5, containLabel: true }, legend: { right: 0, top: 0, itemWidth: 8, itemHeight: 8, textStyle: { color: '#7a849b', fontSize: 10 }, data: ['学习时长', '完成率'] },
@@ -101,24 +110,10 @@ onMounted(loadOverview)
       <el-button type="primary" @click="router.push(withCourse('/today'))"><el-icon><Reading /></el-icon>今日学习</el-button>
     </PageHeader>
     <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadOverview"><el-icon><Refresh /></el-icon>重新加载</el-button></template></el-alert>
+    <OnboardingChecklist :progress="overview?.onboarding_progress ?? null" :loading="loading" @navigate="navigateOnboardingTask" />
     <div v-if="loading" v-loading="true" class="dashboard-loading"></div>
 
     <template v-else-if="overview">
-      <section v-if="!onboardingComplete" class="onboarding-panel">
-        <div class="onboarding-copy">
-          <span>首次使用指南</span>
-          <h2>四步建立你的 AI 学习空间</h2>
-          <p>先准备课程与资料，再让 AI 生成计划。每完成一步，后续能力会自动解锁。</p>
-        </div>
-        <div class="onboarding-steps">
-          <button v-for="(step, index) in onboardingSteps" :key="step.title" :class="{ done: step.done }" @click="router.push(step.route)">
-            <i>{{ step.done ? '✓' : index + 1 }}</i>
-            <span><b>{{ step.title }}</b><small>{{ step.description }}</small></span>
-            <el-icon><ArrowRight /></el-icon>
-          </button>
-        </div>
-      </section>
-
       <section class="primary-workspace">
         <article v-if="focus" class="command-deck">
           <div class="deck-main">
@@ -153,7 +148,7 @@ onMounted(loadOverview)
           <div v-if="overview.weak_points.length" class="mastery-list"><div v-for="item in overview.weak_points" :key="item.knowledge_point_id"><div><b>{{ item.knowledge_point }}</b><span>{{ Math.round(item.score * 100) }}%</span></div><el-progress :percentage="Math.round(item.score * 100)" :show-text="false" :stroke-width="7" :color="item.score < 0.5 ? '#ee8b4a' : '#6978ef'" /><small>{{ item.course_name }} · 已练习 {{ item.attempts }} 次</small></div></div><el-empty v-else description="暂无掌握度记录" :image-size="62" />
         </article>
         <article class="content-card next-card"><div class="advice-label"><span>AI</span> 下一步建议</div><h2>{{ overview.next_action.title }}</h2><p>{{ overview.next_action.reason }}</p><button @click="router.push(overview.next_action.route)">现在去做 <el-icon><ArrowRight /></el-icon></button></article>
-        <article class="content-card card-pad shortcut-card"><div class="card-header"><div><h2>常用操作</h2><p>围绕当前课程继续学习</p></div></div><div class="shortcut-grid"><button @click="router.push(withCourse('/upload'))"><el-icon><UploadFilled /></el-icon><span>添加资料</span></button><button @click="router.push(withCourse('/chat'))"><el-icon><ChatDotRound /></el-icon><span>问 AI</span></button><button @click="router.push(withCourse('/practice'))"><el-icon><DocumentAdd /></el-icon><span>开始练习</span></button><button @click="router.push(withCourse('/plan'))"><el-icon><Clock /></el-icon><span>调整计划</span></button></div></article>
+        <article class="content-card card-pad shortcut-card"><div class="card-header"><div><h2>常用操作</h2><p>围绕当前课程继续学习</p></div></div><div class="shortcut-grid"><button data-onboarding-target="documents" @click="router.push(withCourse('/upload'))"><el-icon><UploadFilled /></el-icon><span>添加资料</span></button><button @click="router.push(withCourse('/chat'))"><el-icon><ChatDotRound /></el-icon><span>问 AI</span></button><button @click="router.push(withCourse('/practice'))"><el-icon><DocumentAdd /></el-icon><span>开始练习</span></button><button @click="router.push(withCourse('/plan'))"><el-icon><Clock /></el-icon><span>调整计划</span></button></div></article>
         <article class="content-card card-pad jobs-card">
           <div class="card-header"><div><h2>最近处理任务</h2><p>仅展示当前账号最近 3 项真实异步任务</p></div><button class="card-link" @click="router.push('/tasks')">任务中心 →</button></div>
           <div v-if="overview.recent_async_tasks.length" class="job-list"><button v-for="job in overview.recent_async_tasks" :key="job.task_id" class="job-row" @click="router.push({ name: 'tasks', query: { taskId: job.task_id } })"><span class="job-icon"><el-icon><Clock /></el-icon></span><div class="job-main"><b>{{ asyncTaskName(job) }}</b><small>{{ job.current_step || job.task_type }}</small><el-progress v-if="!['success', 'succeeded', 'failed', 'cancelled'].includes(job.status)" :percentage="job.progress" :show-text="false" :stroke-width="5" /></div><StatusPill :status="job.status" /></button></div><el-empty v-else description="暂无异步处理任务" :image-size="62" />

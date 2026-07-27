@@ -44,7 +44,7 @@ export const navigationGroups: NavigationGroup[] = [
   {
     label: '我的空间',
     items: [
-      { path: '/courses', label: '课程与资料', group: '我的空间', keywords: ['课程', '资料', '文档', '上传', 'course'], icon: Reading, onboardingTarget: 'courses documents' },
+      { path: '/courses', label: '课程与资料', group: '我的空间', keywords: ['课程', '资料', '文档', '上传', 'course'], icon: Reading, onboardingTarget: 'courses' },
       { path: '/statistics', label: '学习进度', group: '我的空间', keywords: ['统计', '掌握度', '知识点', '日历', '数据'], icon: DataAnalysis },
       { path: '/settings', label: '个人设置', group: '我的空间', keywords: ['设置', '偏好', '资料'], icon: Setting },
     ],
