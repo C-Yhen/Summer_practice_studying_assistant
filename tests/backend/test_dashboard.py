@@ -5,8 +5,11 @@ from sqlalchemy import func, select
 
 from backend.app.models import (
     AsyncTask,
+    ChatMessage,
+    ChatSession,
     Course,
     Document,
+    DocumentVersion,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
@@ -122,6 +125,146 @@ def test_new_user_gets_complete_honest_empty_overview(
     assert data["recent_async_tasks"] == []
     assert data["next_action"]["type"] == "course"
     assert data["next_action"]["route"] == "/courses"
+    assert data["onboarding_progress"] == {
+        "version": 1,
+        "completed_count": 0,
+        "total_count": 5,
+        "is_complete": False,
+        "items": {
+            "course_created": False,
+            "document_ready": False,
+            "question_asked": False,
+            "plan_activated": False,
+            "task_completed": False,
+        },
+        "available_course_id": None,
+        "ready_document_course_id": None,
+    }
+
+
+def test_dashboard_onboarding_progress_uses_real_user_activity_and_is_read_only(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    target = date(2026, 7, 15)
+    second_headers, second_user_id = _second_user(client)
+    with client.app.state.database.session_factory() as db:
+        owner = db.scalar(select(User).where(User.email == "learner@example.com"))
+        assert owner is not None
+        course = Course(owner_id=owner.id, name="Onboarding course")
+        archived = Course(owner_id=owner.id, name="Historical course", archived=True)
+        foreign = Course(owner_id=second_user_id, name="Foreign onboarding course")
+        db.add_all([course, archived, foreign])
+        db.flush()
+
+        # Non-ready versions must not unlock the material milestone.
+        pending = Document(
+            course_id=course.id,
+            title="Pending",
+            file_type="txt",
+            file_path="pending.txt",
+            status="processing",
+        )
+        db.add(pending)
+        db.flush()
+        db.add(DocumentVersion(document_id=pending.id, version_no=1, file_path="pending.txt", status="processing"))
+
+        session = ChatSession(user_id=owner.id, course_id=course.id, title="Onboarding chat")
+        db.add(session)
+        db.flush()
+        db.add(ChatMessage(session_id=session.id, role="assistant", content="Welcome"))
+
+        plan = StudyPlan(
+            user_id=owner.id,
+            course_id=course.id,
+            goal="Onboarding plan",
+            start_date=target,
+            end_date=target + timedelta(days=7),
+            active_version=0,
+            status="draft",
+        )
+        db.add(plan)
+        db.flush()
+        candidate = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate")
+        db.add(candidate)
+        db.flush()
+        task = StudyTask(
+            plan_version_id=candidate.id,
+            user_id=owner.id,
+            course_id=course.id,
+            scheduled_date=target,
+            title="Incomplete onboarding task",
+            task_type="study",
+            estimated_minutes=20,
+            status="todo",
+        )
+        db.add(task)
+        course_id = course.id
+        db.commit()
+
+    first = _overview(client, auth_headers, target)
+    assert first.status_code == 200
+    progress = first.json()["data"]["onboarding_progress"]
+    assert progress["completed_count"] == 1
+    assert progress["items"] == {
+        "course_created": True,
+        "document_ready": False,
+        "question_asked": False,
+        "plan_activated": False,
+        "task_completed": False,
+    }
+    assert progress["available_course_id"] == course_id
+    assert progress["ready_document_course_id"] is None
+
+    with client.app.state.database.session_factory() as db:
+        pending = db.scalar(select(Document).where(Document.title == "Pending"))
+        session = db.scalar(select(ChatSession).where(ChatSession.title == "Onboarding chat"))
+        plan = db.scalar(select(StudyPlan).where(StudyPlan.goal == "Onboarding plan"))
+        task = db.scalar(select(StudyTask).where(StudyTask.title == "Incomplete onboarding task"))
+        assert pending is not None and session is not None and plan is not None and task is not None
+        pending.status = "ready"
+        version = db.scalar(select(DocumentVersion).where(DocumentVersion.document_id == pending.id))
+        assert version is not None
+        version.status = "ready"
+        db.add(ChatMessage(session_id=session.id, role="user", content="What should I review?"))
+        active = StudyPlanVersion(plan_id=plan.id, version=2, status="active")
+        db.add(active)
+        db.flush()
+        plan.status = "active"
+        plan.active_version = active.version
+        task.status = "completed"
+        db.commit()
+
+    tracked = [Course, Document, DocumentVersion, ChatSession, ChatMessage, StudyPlan, StudyPlanVersion, StudyTask, LearningRecord]
+    with client.app.state.database.session_factory() as db:
+        counts_before = {model.__name__: db.scalar(select(func.count(model.id))) for model in tracked}
+
+    complete = _overview(client, auth_headers, target)
+    assert complete.status_code == 200
+    progress = complete.json()["data"]["onboarding_progress"]
+    assert progress["completed_count"] == 5
+    assert progress["total_count"] == 5
+    assert progress["is_complete"] is True
+    assert all(progress["items"].values())
+    assert progress["ready_document_course_id"] == course_id
+
+    # A historical course still proves the first-course milestone after archival.
+    with client.app.state.database.session_factory() as db:
+        historical_course = db.get(Course, course_id)
+        assert historical_course is not None
+        historical_course.archived = True
+        db.commit()
+    archived_progress = _overview(client, auth_headers, target).json()["data"]["onboarding_progress"]
+    assert archived_progress["items"]["course_created"] is True
+
+    # Foreign records cannot influence either the state or its navigation context.
+    second_progress = _overview(client, second_headers, target).json()["data"]["onboarding_progress"]
+    assert second_progress["completed_count"] == 1
+    assert second_progress["items"]["course_created"] is True
+    assert not any(value for key, value in second_progress["items"].items() if key != "course_created")
+
+    with client.app.state.database.session_factory() as db:
+        counts_after = {model.__name__: db.scalar(select(func.count(model.id))) for model in tracked}
+    assert counts_after == counts_before
 
 
 def test_dashboard_aggregates_real_data_is_isolated_and_read_only(
@@ -372,6 +515,9 @@ def test_dashboard_aggregates_real_data_is_isolated_and_read_only(
     explicit = _overview(client, auth_headers, target, course_id=later_id)
     assert explicit.status_code == 200
     assert explicit.json()["data"]["focus_course"]["id"] == later_id
+    assert explicit.json()["data"]["course_count"] == 1
+    assert explicit.json()["data"]["ready_document_count"] == 1
+    assert explicit.json()["data"]["metrics"]["active_course_count"] == 1
     assert explicit.json()["data"]["today"]["total_count"] == 0
     assert explicit.json()["data"]["next_action"]["type"] == "study_plan"
 

@@ -7,9 +7,9 @@ def test_async_task_and_calendar_confirmation_are_idempotent(
     task = client.post(
         "/api/v1/async-tasks",
         headers=auth_headers,
-        json={"task_type": "weekly_report", "input_data": {"week": "2026-W29"}},
+        json={"task_type": "weekly_report", "input_data": {"start_date": "2026-07-10", "end_date": "2026-07-16"}},
     )
-    assert task.status_code == 200
+    assert task.status_code == 201
     task_data = task.json()["data"]
     assert task_data["status"] == "success"
     progress = client.get(

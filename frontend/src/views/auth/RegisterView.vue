@@ -11,13 +11,24 @@ import { getApiErrorMessage, mockEnabled } from '@/api/client'
 const auth = useAuthStore()
 const router = useRouter()
 const formRef = ref<FormInstance>()
-const form = reactive({ name: '', email: '', password: '', agree: true })
+const form = reactive({ name: '', email: '', password: '', confirmPassword: '', agree: false })
 const rules: FormRules = {
   name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
   email: [{ required: true, message: '请输入邮箱', trigger: 'blur' }, { type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
   password: [{ required: true, min: 8, message: '密码至少 8 位', trigger: 'blur' }],
+  confirmPassword: [
+    { required: true, message: '请再次输入密码', trigger: 'blur' },
+    {
+      validator: (_rule, value, callback) => {
+        if (value !== form.password) callback(new Error('两次输入的密码不一致'))
+        else callback()
+      },
+      trigger: ['blur', 'change'],
+    },
+  ],
 }
 async function submit() {
+  if (auth.loading) return
   if (!await formRef.value?.validate().catch(() => false)) return
   if (!form.agree) return ElMessage.warning('请先阅读并同意服务条款和隐私政策')
   try {
@@ -43,8 +54,9 @@ async function submit() {
           <el-form-item label="姓名 / 昵称" prop="name"><el-input v-model="form.name" size="large" :prefix-icon="User" placeholder="AI 将这样称呼你" /></el-form-item>
           <el-form-item label="邮箱" prop="email"><el-input v-model="form.email" size="large" :prefix-icon="Message" placeholder="name@university.edu" /></el-form-item>
           <el-form-item label="密码" prop="password"><el-input v-model="form.password" size="large" type="password" show-password :prefix-icon="Lock" placeholder="至少 8 位" /></el-form-item>
+          <el-form-item label="确认密码" prop="confirmPassword"><el-input v-model="form.confirmPassword" size="large" type="password" show-password :prefix-icon="Lock" placeholder="请再次输入密码" /></el-form-item>
           <el-checkbox v-model="form.agree" class="agreement">我已阅读并同意《服务条款》和《隐私政策》</el-checkbox>
-          <el-button type="primary" size="large" class="submit" :loading="auth.loading" @click="submit">创建账号</el-button>
+          <el-button type="primary" size="large" class="submit" :loading="auth.loading" :disabled="auth.loading" @click="submit">创建账号</el-button>
         </el-form>
         <div class="divider"><span>已有账号？</span></div>
         <el-button size="large" class="login-link" @click="router.push('/login')">返回登录</el-button>

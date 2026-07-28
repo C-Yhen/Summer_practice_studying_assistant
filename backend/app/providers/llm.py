@@ -10,7 +10,6 @@ import httpx
 
 from backend.app.config import Settings
 
-
 def text_terms(text: str) -> list[str]:
     lowered = text.lower()
     words = re.findall(r"[a-z0-9_]+", lowered)
@@ -18,6 +17,34 @@ def text_terms(text: str) -> list[str]:
     words.extend(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
     words.extend(chinese)
     return words
+
+
+def validate_embedding_vector(
+    vector: list[float], expected_dimension: int, *, context: str
+) -> list[float]:
+    if not isinstance(vector, list):
+        raise ValueError(f"EMBEDDING_INVALID_RESPONSE: {context} is not a vector")
+    if len(vector) != expected_dimension:
+        raise ValueError(
+            f"EMBEDDING_DIMENSION_MISMATCH: {context} returned {len(vector)}, expected {expected_dimension}"
+        )
+    try:
+        return [float(value) for value in vector]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"EMBEDDING_INVALID_RESPONSE: {context} contains non-numeric values") from exc
+
+
+def validate_embedding_batch(
+    vectors: list[list[float]], expected_dimension: int, *, expected_count: int | None = None
+) -> list[list[float]]:
+    if expected_count is not None and len(vectors) != expected_count:
+        raise ValueError(
+            f"EMBEDDING_ITEM_COUNT_MISMATCH: provider returned {len(vectors)}, expected {expected_count}"
+        )
+    return [
+        validate_embedding_vector(vector, expected_dimension, context=f"embedding item {index}")
+        for index, vector in enumerate(vectors)
+    ]
 
 
 class LLMProvider(ABC):
@@ -54,37 +81,121 @@ class MockLLMProvider(LLMProvider):
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, fallback: LLMProvider | None = None) -> None:
         self.settings = settings
-        self.headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+        self.fallback = fallback
+        self.headers = {
+            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Content-Type": "application/json",
+        }
+        # A provider instance is reused for the whole background job, so chat
+        # and embedding calls share its connection pool instead of reconnecting
+        # for every request in one RAG workflow.
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
-                headers=self.headers,
-                json={"model": self.settings.llm_chat_model, "messages": messages, **kwargs},
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+        if not self.settings.llm_chat_model:
+            if self.fallback is None:
+                raise RuntimeError("chat model is not configured")
+            return await self.fallback.chat(messages, **kwargs)
+        timeout = float(kwargs.pop("_timeout", 30))
+        response = await self._http_client().post(
+            f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
+            headers=self.headers,
+            json={"model": self.settings.llm_chat_model, "messages": messages, **kwargs},
+            timeout=httpx.Timeout(timeout),
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        async with httpx.AsyncClient(timeout=60) as client:
+        if not self.settings.llm_embedding_model:
+            if self.fallback is None:
+                raise RuntimeError("embedding model is not configured")
+            return await self.fallback.embed(texts)
+        if not texts:
+            return []
+        batch_size = max(1, self.settings.llm_embedding_batch_size)
+        embeddings: list[list[float]] = []
+        client = self._http_client()
+        for start in range(0, len(texts), batch_size):
             response = await client.post(
                 f"{self.settings.llm_base_url.rstrip('/')}/embeddings",
                 headers=self.headers,
-                json={"model": self.settings.llm_embedding_model, "input": texts},
+                json={
+                    "model": self.settings.llm_embedding_model,
+                    "input": texts[start : start + batch_size],
+                    "dimensions": self.settings.embedding_dimension,
+                    "encoding_format": "float",
+                },
+                timeout=httpx.Timeout(30),
             )
             response.raise_for_status()
-            return [item["embedding"] for item in response.json()["data"]]
+            batch = response.json().get("data")
+            expected_count = min(batch_size, len(texts) - start)
+            if not isinstance(batch, list) or len(batch) != expected_count:
+                raise RuntimeError("embedding provider returned an unexpected item count")
+            if all(isinstance(item, dict) and isinstance(item.get("index"), int) for item in batch):
+                batch = sorted(batch, key=lambda item: item["index"])
+                if [item["index"] for item in batch] != list(range(expected_count)):
+                    raise RuntimeError("embedding provider returned invalid item indexes")
+            try:
+                vectors = [item["embedding"] for item in batch]
+            except (KeyError, TypeError) as exc:
+                raise RuntimeError("embedding provider returned an invalid payload") from exc
+            embeddings.extend(
+                validate_embedding_batch(
+                    vectors,
+                    self.settings.embedding_dimension,
+                    expected_count=expected_count,
+                )
+            )
+        return validate_embedding_batch(
+            embeddings,
+            self.settings.embedding_dimension,
+            expected_count=len(texts),
+        )
+
+
+def llm_runtime_status(settings: Settings) -> dict[str, str | bool]:
+    provider = settings.llm_provider.strip().lower()
+    is_mock = provider in {"mock", "fake"}
+    return {
+        "provider": provider,
+        "chat_model": settings.llm_chat_model if not is_mock else "",
+        "chat_mode": "fake" if provider == "fake" else ("mock" if is_mock else "remote"),
+        "embedding_mode": "local" if is_mock or not settings.llm_embedding_model else "remote",
+        "is_mock": is_mock,
+    }
 
 
 def get_llm_provider(settings: Settings) -> LLMProvider:
-    if (
-        settings.llm_provider != "mock"
-        and settings.llm_base_url
-        and settings.llm_api_key
-        and settings.llm_embedding_model
-    ):
-        return OpenAICompatibleProvider(settings)
-    return MockLLMProvider(settings.embedding_dimension)
+    fallback = MockLLMProvider(settings.embedding_dimension)
+    provider = settings.llm_provider.strip().lower()
+    # ``fake`` is an explicit test-only worker mode: unlike ``mock`` it still
+    # queues AsyncTask/Celery work, but never contacts an external provider.
+    if provider in {"mock", "fake"}:
+        return fallback
+    if not provider:
+        raise ValueError("LLM_PROVIDER must be configured explicitly")
+    missing = [
+        name
+        for name, value in (
+            ("LLM_BASE_URL", settings.llm_base_url),
+            ("LLM_API_KEY", settings.llm_api_key),
+            ("LLM_CHAT_MODEL", settings.llm_chat_model),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError(f"{provider} provider is missing required settings: {', '.join(missing)}")
+    return OpenAICompatibleProvider(settings, fallback=fallback)

@@ -1,47 +1,654 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Check, Clock, Close, Document, DArrowRight, Star } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { asyncTaskApi, courseApi, practiceApi } from '@/api/services'
+import { getApiErrorMessage } from '@/api/client'
+import type {
+  CourseListItem,
+  PracticeAttemptRequest,
+  PracticeAttemptResult,
+  PracticeQuestion,
+  PracticeSummary,
+  WrongBookEntry,
+} from '@/types'
 
-const current = ref(2)
+interface PendingSubmission {
+  courseId: number
+  mode: 'all' | 'wrong'
+  questionId: number
+  payload: PracticeAttemptRequest
+}
+
+const route = useRoute()
+const router = useRouter()
+const courses = ref<CourseListItem[]>([])
+const courseId = ref<number | null>(null)
+const questions = ref<PracticeQuestion[]>([])
+const summary = ref<PracticeSummary | null>(null)
+const index = ref(0)
 const selected = ref('')
-const submitted = ref(false)
-const marked = ref(false)
-const questions = [
-  { id: 1, title: '关于关系数据库中的候选码，下列说法正确的是？', answer: 'B' },
-  { id: 2, title: '关系模式 R(A, B, C, D) 中，函数依赖集 F={A→B, B→C, A→D}。若 A 是候选码，则该关系模式最高满足哪一级范式？', answer: 'B', options: [{ key: 'A', text: '第一范式（1NF）' }, { key: 'B', text: '第二范式（2NF）' }, { key: 'C', text: '第三范式（3NF）' }, { key: 'D', text: 'BCNF' }] },
-  { id: 3, title: '以下哪个函数依赖违反第三范式？', answer: 'C' },
-]
-const question = computed(() => questions[current.value - 1] || questions[1])
-function submit() { if (!selected.value) return ElMessage.warning('请先选择一个答案'); submitted.value = true }
-function next() { submitted.value = false; selected.value = ''; current.value = Math.min(10, current.value + 1) }
+const result = ref<PracticeAttemptResult | null>(null)
+const pendingSubmission = ref<PendingSubmission | null>(null)
+const loading = ref(false)
+const booting = ref(false)
+const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
+const aiPollingTimedOut = ref(false)
+const submitting = ref(false)
+const error = ref('')
+const started = ref<number | null>(null)
+const wrongItems = ref<WrongBookEntry[]>([])
+const wrongSummary = ref({ pending: 0, mastered: 0, repeated_wrong: 0 })
+const wrongStatus = ref<'all' | 'pending' | 'mastered'>('all')
+const wrongQuery = ref('')
+const wrongUpdating = ref(false)
+const expandedWrongId = ref<number | null>(null)
+let requestVersion = 0
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
+let refreshAfterSubmit = false
+
+const activeTab = computed<'practice' | 'wrong'>(() => route.query.tab === 'wrong' ? 'wrong' : 'practice')
+const mode = computed<'all' | 'wrong'>(() => route.query.mode === 'wrong' ? 'wrong' : 'all')
+const question = computed(() => questions.value[index.value])
+const progress = computed(() => questions.value.length
+  ? Math.round((index.value + 1) / questions.value.length * 100)
+  : 0)
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+  aiEnhancementStatus.value = null
+  aiPollingTimedOut.value = false
+}
+
+async function refreshQuestionsAfterAI() {
+  const currentCourseId = courseId.value
+  if (!currentCourseId || activeTab.value !== 'practice' || submitting.value) return
+  const currentQuestionId = question.value?.id ?? null
+  const currentSelection = selected.value
+  const currentResult = result.value
+  const data = await practiceApi.questions(currentCourseId, mode.value)
+  if (courseId.value !== currentCourseId || activeTab.value !== 'practice') return
+  questions.value = data.items
+  summary.value = data.summary
+  const nextIndex = currentQuestionId === null ? -1 : data.items.findIndex((item) => item.id === currentQuestionId)
+  if (nextIndex >= 0) {
+    index.value = nextIndex
+    selected.value = currentSelection
+    result.value = currentResult
+  } else {
+    index.value = 0
+    resetAnswer(true)
+  }
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  aiEnhancementStatus.value = 'queued'
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (version !== aiPollVersion || courseId.value !== sourceCourseId) return
+      if (task.status === 'success') {
+        stopAiPolling()
+        if (submitting.value) refreshAfterSubmit = true
+        else await refreshQuestionsAfterAI()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        aiEnhancementStatus.value = task.status
+        return
+      }
+      if (attempts >= 40) {
+        aiPollingTimedOut.value = true
+        return
+      }
+      aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (version === aiPollVersion && courseId.value === sourceCourseId && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else aiPollingTimedOut.value = true
+    }
+  }
+  void poll()
+}
+
+function resetAnswer(startTimer = true) {
+  selected.value = ''
+  result.value = null
+  pendingSubmission.value = null
+  started.value = startTimer && question.value ? Date.now() : null
+}
+
+async function load() {
+  const version = ++requestVersion
+  loading.value = true
+  error.value = ''
+  try {
+    const availableCourses = (await courseApi.list()).items.filter((item) => !item.archived)
+    if (version !== requestVersion) return
+    courses.value = availableCourses
+    const routeCourseId = Number(route.query.courseId)
+    const resolvedCourseId = availableCourses.some((item) => item.id === routeCourseId)
+      ? routeCourseId
+      : (availableCourses[0]?.id ?? null)
+    courseId.value = resolvedCourseId
+    if (!resolvedCourseId) return
+    if (String(resolvedCourseId) !== route.query.courseId) {
+      await router.replace({
+        query: {
+          courseId: String(resolvedCourseId),
+          tab: activeTab.value,
+          ...(activeTab.value === 'practice' ? { mode: mode.value } : {}),
+        },
+      })
+      return
+    }
+
+    if (activeTab.value === 'wrong') {
+      expandedWrongId.value = null
+      const data = await practiceApi.wrongBook(resolvedCourseId, wrongStatus.value, wrongQuery.value.trim())
+      if (version !== requestVersion || resolvedCourseId !== courseId.value) return
+      wrongItems.value = data.items
+      wrongSummary.value = data.summary
+    } else {
+      questions.value = []
+      summary.value = null
+      resetAnswer(false)
+      const data = await practiceApi.questions(resolvedCourseId, mode.value)
+      if (version !== requestVersion || resolvedCourseId !== courseId.value) return
+      questions.value = data.items
+      summary.value = data.summary
+      index.value = 0
+      resetAnswer(true)
+    }
+  } catch (loadError) {
+    if (version === requestVersion) {
+      error.value = getApiErrorMessage(loadError, '练习加载失败')
+    }
+  } finally {
+    if (version === requestVersion) loading.value = false
+  }
+}
+
+async function bootstrap() {
+  if (!courseId.value || submitting.value || booting.value) return
+  const sourceCourseId = courseId.value
+  booting.value = true
+  try {
+    const generated = await practiceApi.bootstrap(sourceCourseId)
+    await load()
+    if (courseId.value !== sourceCourseId) return
+    if (generated.reason === 'KNOWLEDGE_POINTS_PROCESSING') {
+      ElMessage.info('课程资料正在提取可用知识点，完成后请重新生成练习题；可在任务中心查看进度。')
+      return
+    }
+    if (generated.reason === 'NO_SOURCE_GROUNDED_KNOWLEDGE_POINTS' || generated.reason === 'NO_SOURCE_GROUNDED_QUESTIONS') {
+      ElMessage.warning('课程资料尚未提取出可用知识点，暂不生成模板题；请重新解析或补充课程资料。')
+      return
+    }
+    if (generated.ai_enhancement_task_id) {
+      watchAiEnhancement(generated.ai_enhancement_task_id, sourceCourseId)
+      ElMessage.success('基础自测题已可练习；AI 增强题正在后台生成。')
+    }
+  } catch (bootstrapError) {
+    ElMessage.error(getApiErrorMessage(bootstrapError, '生成基础自测题失败'))
+  } finally {
+    booting.value = false
+  }
+}
+
+function chooseAnswer() {
+  if (!submitting.value) pendingSubmission.value = null
+}
+
+async function submit() {
+  const currentCourseId = courseId.value
+  const currentQuestion = question.value
+  if (!currentCourseId || !currentQuestion || !selected.value || submitting.value) return
+
+  let pending = pendingSubmission.value
+  if (
+    !pending
+    || pending.courseId !== currentCourseId
+    || pending.mode !== mode.value
+    || pending.questionId !== currentQuestion.id
+    || pending.payload.selected_option !== selected.value
+  ) {
+    pending = {
+      courseId: currentCourseId,
+      mode: mode.value,
+      questionId: currentQuestion.id,
+      payload: {
+        submission_id: crypto.randomUUID(),
+        selected_option: selected.value,
+        elapsed_seconds: Math.max(0, Math.round((Date.now() - (started.value ?? Date.now())) / 1000)),
+      },
+    }
+    pendingSubmission.value = pending
+  }
+
+  submitting.value = true
+  try {
+    const response = await practiceApi.submit(
+      pending.courseId,
+      pending.questionId,
+      pending.payload,
+    )
+    result.value = response
+    summary.value = response.summary
+    pendingSubmission.value = null
+  } catch (submitError) {
+    ElMessage.error(getApiErrorMessage(submitError, '提交失败，请使用原提交重试'))
+  } finally {
+    submitting.value = false
+    if (refreshAfterSubmit) {
+      refreshAfterSubmit = false
+      void refreshQuestionsAfterAI()
+    }
+  }
+}
+
+function move(step: number) {
+  if (submitting.value) return
+  index.value = Math.max(0, Math.min(questions.value.length - 1, index.value + step))
+  resetAnswer(true)
+}
+
+function changeCourse(nextCourseId: number) {
+  if (submitting.value || wrongUpdating.value) return
+  pendingSubmission.value = null
+  void router.replace({
+    query: {
+      courseId: String(nextCourseId),
+      tab: activeTab.value,
+      ...(activeTab.value === 'practice' ? { mode: mode.value } : {}),
+    },
+  })
+}
+
+function switchTab(next: string | number | boolean | undefined) {
+  if (submitting.value || wrongUpdating.value) return
+  const tab = next === 'wrong' ? 'wrong' : 'practice'
+  void router.replace({
+    query: {
+      ...(courseId.value ? { courseId: String(courseId.value) } : {}),
+      tab,
+      ...(tab === 'practice' ? { mode: mode.value } : {}),
+    },
+  })
+}
+
+function switchMode(next: string | number | boolean | undefined) {
+  if (submitting.value) return
+  const nextMode = next === 'wrong' ? 'wrong' : 'all'
+  void router.replace({
+    query: {
+      ...(courseId.value ? { courseId: String(courseId.value) } : {}),
+      tab: 'practice',
+      mode: nextMode,
+    },
+  })
+}
+
+async function updateWrong(entryId: number, next: 'mastered' | 'removed') {
+  if (!courseId.value || wrongUpdating.value) return
+  const currentCourseId = courseId.value
+  wrongUpdating.value = true
+  try {
+    await practiceApi.updateWrong(currentCourseId, entryId, next)
+    ElMessage.success(next === 'mastered' ? '已标记为掌握' : '已从错题清单移除')
+    if (courseId.value === currentCourseId) await load()
+  } catch (updateError) {
+    ElMessage.error(getApiErrorMessage(updateError, '操作失败'))
+  } finally {
+    wrongUpdating.value = false
+  }
+}
+
+function reviewWrongQuestions() {
+  if (!wrongSummary.value.pending) return
+  void router.replace({
+    query: {
+      ...(courseId.value ? { courseId: String(courseId.value) } : {}),
+      tab: 'practice',
+      mode: 'wrong',
+    },
+  })
+}
+
+watch(
+  () => [route.query.courseId, route.query.tab, route.query.mode],
+  () => {
+    stopAiPolling()
+    if (!submitting.value && !wrongUpdating.value) void load()
+  },
+)
+onMounted(load)
+onBeforeUnmount(stopAiPolling)
 </script>
 
 <template>
   <div>
-    <PageHeader title="范式判断专项练习" eyebrow="SMART PRACTICE" description="根据你的错题模式与掌握度动态选题 · 共 10 题">
-      <span class="timer-pill"><el-icon><Clock /></el-icon>14:36</span><el-button plain @click="marked=!marked"><el-icon><Star /></el-icon>{{ marked ? '已标记' : '标记本题' }}</el-button>
+    <PageHeader
+      title="练习与错题"
+      eyebrow="SMART PRACTICE"
+      description="完成练习、查看即时解析，并把错题转化为下一轮复习。"
+    >
+      <el-select
+        v-model="courseId"
+        class="course-select"
+        :disabled="submitting || wrongUpdating || loading || booting"
+        @change="changeCourse"
+      >
+        <el-option
+          v-for="course in courses"
+          :key="course.id"
+          :label="course.name"
+          :value="course.id"
+        />
+      </el-select>
     </PageHeader>
-    <section class="practice-layout">
-      <main class="content-card question-panel">
-        <div class="progress-head"><span>答题进度</span><b>{{ current }} / 10</b></div><el-progress :percentage="current * 10" :show-text="false" :stroke-width="6" />
-        <div class="question-body"><div class="question-label"><span>单选题</span><em>中等</em><small>知识点：第三范式 · 预计 2 分钟</small></div><h2><span>{{ current }}.</span>{{ question.title }}</h2>
-          <div class="option-list"><button v-for="option in (question.options || [{key:'A',text:'选项 A'},{key:'B',text:'选项 B'},{key:'C',text:'选项 C'},{key:'D',text:'选项 D'}])" :key="option.key" :class="{ selected: selected === option.key, correct: submitted && option.key === question.answer, wrong: submitted && selected === option.key && selected !== question.answer }" :disabled="submitted" @click="selected=option.key"><span>{{ option.key }}</span><p>{{ option.text }}</p><el-icon v-if="submitted && option.key === question.answer"><Check /></el-icon><el-icon v-else-if="submitted && selected === option.key"><Close /></el-icon></button></div>
-          <div v-if="submitted" class="explanation" :class="selected === question.answer ? 'right' : 'error'"><header><span><el-icon><component :is="selected === question.answer ? Check : Close" /></el-icon></span><div><b>{{ selected === question.answer ? '回答正确！' : `回答错误，正确答案是 ${question.answer}` }}</b><p>本题考查传递函数依赖与第三范式。</p></div></header><div class="explain-content"><h3>解析</h3><p>A 是候选码，且 A→B、B→C，因此存在 A→B→C 的传递依赖。非主属性 C 传递依赖于候选码 A，不满足第三范式；但不存在对候选码的部分依赖，因此最高满足第二范式。</p><div class="knowledge-chain"><span>A（候选码）</span><i>→</i><span>B（非主属性）</span><i>→</i><span>C（非主属性）</span></div><button><el-icon><Document /></el-icon>依据：《数据库系统概论》第 176 页 · 第 6 章</button></div></div>
-        </div>
-        <footer class="question-actions"><el-button :disabled="current === 1">上一题</el-button><el-button v-if="!submitted" type="primary" :disabled="!selected" @click="submit">提交答案</el-button><el-button v-else type="primary" @click="next">下一题 <el-icon><DArrowRight /></el-icon></el-button></footer>
-      </main>
 
-      <aside>
-        <article class="content-card card-pad navigator"><div class="card-header"><div><h2>答题卡</h2><p>已答 2 · 正确 1</p></div></div><div class="question-dots"><button v-for="n in 10" :key="n" :class="{ active:n===current, answered:n<current, wrong:n===1 }" @click="current=n">{{ n }}</button></div><div class="legend"><span><i class="answered"></i>已答</span><span><i class="wrong"></i>答错</span><span><i></i>未答</span></div></article>
-        <article class="content-card card-pad score-card"><span>本组实时表现</span><strong>50<small>%</small></strong><el-progress :percentage="50" :show-text="false" :stroke-width="7" color="#f0a052" /><p>当前正确率低于该知识点历史平均 68%</p><div><span>耗时<small>3m 24s</small></span><span>掌握度预估<small>46% → 48%</small></span></div></article>
-        <article class="ai-tip"><span>✦</span><div><b>答题提示</b><p>先找出候选码与主属性，再逐条检查部分依赖和传递依赖。</p></div></article>
-      </aside>
+    <section class="practice-tabs content-card">
+      <el-tabs :model-value="activeTab" @tab-change="switchTab">
+        <el-tab-pane label="开始练习" name="practice">
+          <div class="tab-body">
+            <el-alert v-if="error" :title="error" type="error" show-icon />
+            <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '基础题已可用，AI 增强题正在后台生成。'" type="info" :closable="false" show-icon />
+            <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 增强题未生成，现有基础题仍可正常练习。" type="warning" :closable="false" show-icon />
+            <div v-if="!error" v-loading="loading">
+              <el-empty v-if="!courseId" description="还没有课程，请先创建课程并上传资料">
+                <el-button type="primary" @click="router.push('/courses')">去创建课程</el-button>
+              </el-empty>
+
+              <template v-else>
+                <div class="practice-toolbar">
+                  <div>
+                    <h2>{{ mode === 'wrong' ? '错题复习' : '课程练习' }}</h2>
+                    <p>
+                      {{ mode === 'wrong'
+                        ? '只练习尚未掌握的错题，答对后继续巩固。'
+                        : '根据当前课程知识点进行自测，错误题目会自动进入错题清单。' }}
+                    </p>
+                  </div>
+                  <el-segmented
+                    :model-value="mode"
+                    :options="[
+                      { label: '课程练习', value: 'all' },
+                      { label: '错题复习', value: 'wrong' },
+                    ]"
+                    :disabled="submitting || booting"
+                    @change="switchMode"
+                  />
+                </div>
+
+                <div class="summary-strip">
+                  <div><span>累计答题</span><b>{{ summary?.total_attempts || 0 }}</b></div>
+                  <div><span>当前正确率</span><b>{{ Math.round((summary?.accuracy || 0) * 100) }}%</b></div>
+                  <div><span>待复习错题</span><b>{{ summary?.pending_wrong_count || 0 }}</b></div>
+                </div>
+
+                <el-empty
+                  v-if="!questions.length"
+                  :description="mode === 'wrong' ? '太棒了，当前没有待复习错题' : '当前课程还没有可练习题目'"
+                >
+                  <el-button
+                    v-if="mode === 'all'"
+                    type="primary"
+                    :loading="booting"
+                    :disabled="submitting"
+                    @click="bootstrap"
+                  >
+                    生成基础自测题
+                  </el-button>
+                  <el-button v-else @click="switchMode('all')">返回课程练习</el-button>
+                </el-empty>
+
+                <section v-else class="question-card">
+                  <div class="question-meta">
+                    <span>第 {{ index + 1 }} / {{ questions.length }} 题</span>
+                    <span>{{ question.knowledge_point || '综合知识点' }}</span>
+                    <span>{{ question.difficulty === 'hard' ? '较难' : question.difficulty === 'easy' ? '基础' : '适中' }}</span>
+                  </div>
+                  <el-progress :percentage="progress" :show-text="false" />
+                  <h2>{{ question.stem }}</h2>
+                  <el-radio-group
+                    v-model="selected"
+                    :disabled="Boolean(result) || submitting"
+                    @change="chooseAnswer"
+                  >
+                    <el-radio
+                      v-for="option in question.options"
+                      :key="option.key"
+                      :value="option.key"
+                      border
+                    >
+                      <b>{{ option.key }}</b><span>{{ option.text }}</span>
+                    </el-radio>
+                  </el-radio-group>
+
+                  <div v-if="result" class="result" :class="result.is_correct ? 'is-correct' : 'is-wrong'">
+                    <div class="result-title">
+                      {{ result.is_correct ? '回答正确' : `回答错误，正确答案是 ${result.correct_option}` }}
+                    </div>
+                    <p>{{ result.explanation }}</p>
+                    <p class="result-note">
+                      {{ result.knowledge_point || '综合知识点' }} · 掌握度
+                      {{ result.mastery_score === null ? '暂未评估' : `${Math.round(result.mastery_score * 100)}%` }}
+                    </p>
+                    <el-button v-if="!result.is_correct" plain @click="switchTab('wrong')">
+                      查看错题清单
+                    </el-button>
+                  </div>
+
+                  <footer>
+                    <el-button :disabled="index === 0 || submitting" @click="move(-1)">上一题</el-button>
+                    <el-button
+                      v-if="!result"
+                      type="primary"
+                      :loading="submitting"
+                      :disabled="!selected || submitting"
+                      @click="submit"
+                    >
+                      {{ submitting ? '正在提交' : '提交答案' }}
+                    </el-button>
+                    <el-button
+                      v-else-if="index < questions.length - 1"
+                      type="primary"
+                      :disabled="submitting"
+                      @click="move(1)"
+                    >
+                      下一题
+                    </el-button>
+                    <el-button v-else type="primary" @click="switchTab('wrong')">查看练习结果</el-button>
+                  </footer>
+                </section>
+              </template>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane name="wrong">
+          <template #label>
+            <span>错题清单 <em v-if="wrongSummary.pending">{{ wrongSummary.pending }}</em></span>
+          </template>
+          <div class="tab-body">
+            <el-alert v-if="error" :title="error" type="error" show-icon />
+            <div v-else v-loading="loading || wrongUpdating">
+              <el-empty v-if="!courseId" description="还没有课程，请先创建课程并上传资料">
+                <el-button type="primary" @click="router.push('/courses')">去创建课程</el-button>
+              </el-empty>
+
+              <template v-else>
+                <div class="wrong-hero">
+                  <div>
+                    <span class="section-kicker">复习闭环</span>
+                    <h2>集中处理薄弱知识点</h2>
+                    <p>按状态筛选错题，查看解析后可以标记掌握；需要巩固时直接进入错题复习。</p>
+                  </div>
+                  <el-button
+                    type="primary"
+                    :disabled="!wrongSummary.pending || wrongUpdating"
+                    @click="reviewWrongQuestions"
+                  >
+                    复习 {{ wrongSummary.pending }} 道待掌握错题
+                  </el-button>
+                </div>
+
+                <div class="summary-strip wrong-summary">
+                  <div><span>待掌握</span><b>{{ wrongSummary.pending }}</b></div>
+                  <div><span>重复答错</span><b>{{ wrongSummary.repeated_wrong }}</b></div>
+                  <div><span>已掌握</span><b>{{ wrongSummary.mastered }}</b></div>
+                </div>
+
+                <div class="wrong-toolbar">
+                  <el-radio-group v-model="wrongStatus" :disabled="wrongUpdating" @change="load">
+                    <el-radio-button value="all">全部</el-radio-button>
+                    <el-radio-button value="pending">待掌握</el-radio-button>
+                    <el-radio-button value="mastered">已掌握</el-radio-button>
+                  </el-radio-group>
+                  <el-input
+                    v-model="wrongQuery"
+                    clearable
+                    placeholder="搜索题干或知识点"
+                    :disabled="wrongUpdating"
+                    @change="load"
+                    @clear="load"
+                  />
+                </div>
+
+                <el-empty v-if="!wrongItems.length" description="没有符合当前条件的错题">
+                  <el-button v-if="wrongStatus !== 'all' || wrongQuery" @click="wrongStatus = 'all'; wrongQuery = ''; load()">
+                    查看全部错题
+                  </el-button>
+                  <el-button v-else type="primary" @click="switchTab('practice')">开始一次练习</el-button>
+                </el-empty>
+
+                <div v-else class="wrong-list">
+                  <article v-for="item in wrongItems" :key="item.id" class="wrong-item">
+                    <div class="wrong-item-top">
+                      <div>
+                        <div class="wrong-tags">
+                          <span>{{ item.question.knowledge_point || '综合知识点' }}</span>
+                          <span :class="item.status">{{ item.status === 'pending' ? '待掌握' : '已掌握' }}</span>
+                          <span v-if="item.wrong_count > 1" class="danger">已错 {{ item.wrong_count }} 次</span>
+                        </div>
+                        <h3>{{ item.question.stem }}</h3>
+                      </div>
+                      <div class="wrong-answer">
+                        <span>你的答案 <b>{{ item.last_selected_option }}</b></span>
+                        <span>正确答案 <b>{{ item.question.correct_option }}</b></span>
+                      </div>
+                    </div>
+                    <button class="explanation-toggle" type="button" @click="expandedWrongId = expandedWrongId === item.id ? null : item.id">
+                      {{ expandedWrongId === item.id ? '收起解析' : '查看答案解析' }}
+                    </button>
+                    <div v-if="expandedWrongId === item.id" class="explanation-panel">
+                      <b>为什么这样选？</b>
+                      <p>{{ item.question.explanation || '当前题目暂未提供解析。' }}</p>
+                      <small>
+                        当前掌握度：{{ item.mastery_score === null ? '暂未评估' : `${Math.round(item.mastery_score * 100)}%` }}
+                      </small>
+                    </div>
+                    <div class="wrong-actions">
+                      <el-button
+                        v-if="item.status === 'pending'"
+                        type="primary"
+                        plain
+                        :disabled="wrongUpdating"
+                        @click="updateWrong(item.id, 'mastered')"
+                      >
+                        标记已掌握
+                      </el-button>
+                      <el-button text type="danger" :disabled="wrongUpdating" @click="updateWrong(item.id, 'removed')">
+                        移出清单
+                      </el-button>
+                    </div>
+                  </article>
+                </div>
+              </template>
+            </div>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </section>
   </div>
 </template>
 
 <style scoped>
-.timer-pill{display:flex;align-items:center;gap:6px;padding:8px 11px;border-radius:9px;background:#eff1ff;color:#5d6ce3;font:10px "SFMono-Regular",monospace}.practice-layout{display:grid;grid-template-columns:minmax(0,1fr) 285px;gap:18px}.question-panel{overflow:hidden}.progress-head{display:flex;justify-content:space-between;padding:15px 22px 8px;color:#8c95a8;font-size:9px}.progress-head b{color:#5967da}.question-panel>.el-progress{padding:0 22px}.question-body{padding:27px 30px}.question-label{display:flex;align-items:center;gap:7px}.question-label>span,.question-label>em{padding:4px 7px;border-radius:6px;background:#eef0ff;color:#5f6de2;font-size:8px;font-style:normal}.question-label>em{background:#fff3e6;color:#dc8332}.question-label small{margin-left:auto;color:#929bad;font-size:8px}.question-body>h2{display:flex;gap:8px;margin:17px 0 22px;color:#333e5a;font-size:15px;line-height:1.7}.question-body>h2 span{color:#5e6ce5}.option-list{display:grid;gap:10px}.option-list button{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px 13px;border:1px solid #e1e5ed;border-radius:12px;background:#fff;color:#4d5870;text-align:left;cursor:pointer}.option-list button:hover{border-color:#9ca6ed;background:#fafaff}.option-list button>span{width:28px;height:28px;display:grid;place-items:center;flex:none;border-radius:9px;background:#f0f2f6;color:#707b92;font-size:10px;font-weight:700}.option-list p{flex:1;margin:0;font-size:11px}.option-list button.selected{border-color:#7d89ed;background:#f6f7ff}.option-list button.selected>span{background:#6372e8;color:#fff}.option-list button.correct{border-color:#68cbb6;background:#f0faf7}.option-list button.correct>span{background:#1aa388;color:#fff}.option-list button.correct>.el-icon{color:#15977f}.option-list button.wrong{border-color:#ec9fa3;background:#fff5f5}.option-list button.wrong>span{background:#df656a;color:#fff}.option-list button.wrong>.el-icon{color:#dc6268}.explanation{margin-top:18px;border:1px solid #d6ebe5;border-radius:13px;overflow:hidden}.explanation.error{border-color:#f0d3d3}.explanation header{display:flex;gap:10px;padding:12px 14px;background:#eff9f6}.explanation.error header{background:#fff3f3}.explanation header>span{width:25px;height:25px;display:grid;place-items:center;border-radius:8px;background:#1ba289;color:white}.explanation.error header>span{background:#dc656a}.explanation header div{display:flex;flex-direction:column}.explanation header b{font-size:10px}.explanation header p{margin:4px 0 0;color:#7d8f8a;font-size:8px}.explain-content{padding:14px}.explain-content h3{margin:0 0 7px;font-size:10px}.explain-content>p{margin:0;color:#67728a;font-size:9px;line-height:1.7}.knowledge-chain{display:flex;align-items:center;justify-content:center;gap:7px;margin:13px 0;padding:10px;border-radius:9px;background:#f6f7fa}.knowledge-chain span{padding:5px 7px;border-radius:6px;background:#e9ecff;color:#5e6cdd;font-size:8px}.knowledge-chain i{color:#9aa2b3;font-style:normal}.explain-content>button{display:flex;align-items:center;gap:5px;padding:0;border:0;background:transparent;color:#6170df;font-size:8px;cursor:pointer}.question-actions{display:flex;justify-content:space-between;padding:16px 22px;border-top:1px solid #edf0f4;background:#fafbfc}.navigator{margin-bottom:14px}.question-dots{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.question-dots button{aspect-ratio:1;border:1px solid #e1e5ed;border-radius:8px;background:#fff;color:#7b8599;font-size:9px;cursor:pointer}.question-dots button.answered{border-color:#b9c0f6;background:#eef0ff;color:#5967db}.question-dots button.wrong{border-color:#efb2b4;background:#fff0f0;color:#dc6267}.question-dots button.active{outline:2px solid #6372e8;outline-offset:1px}.legend{display:flex;gap:10px;margin-top:13px;color:#919aab;font-size:7px}.legend span{display:flex;align-items:center;gap:4px}.legend i{width:7px;height:7px;border-radius:2px;background:#f0f2f6}.legend i.answered{background:#e5e8ff}.legend i.wrong{background:#ffe6e6}.score-card>span{color:#8e97a9;font-size:8px}.score-card>strong{display:block;margin:10px 0;color:#e18a38;font-size:27px}.score-card>strong small{font-size:11px}.score-card>p{color:#9aa2b3;font-size:8px}.score-card>div{display:grid;grid-template-columns:1fr 1fr;padding-top:12px;border-top:1px solid #edf0f4}.score-card>div>span{display:flex;flex-direction:column;color:#929bad;font-size:8px}.score-card>div small{margin-top:5px;color:#46516b}.ai-tip{display:flex;gap:10px;margin-top:14px;padding:14px;border-radius:13px;background:#15264e;color:white}.ai-tip>span{color:#9aa7ff}.ai-tip b{font-size:9px}.ai-tip p{margin:5px 0 0;color:#a6b1ca;font-size:8px;line-height:1.5}@media(max-width:900px){.practice-layout{grid-template-columns:1fr}.practice-layout aside{display:grid;grid-template-columns:1fr 1fr;gap:14px}.ai-tip{grid-column:span 2;margin:0}}@media(max-width:600px){.question-body{padding:20px 16px}.question-label small{display:none}.knowledge-chain{align-items:stretch;flex-direction:column;text-align:center}.practice-layout aside{grid-template-columns:1fr}.ai-tip{grid-column:auto}}
+.course-select { width: 220px; }
+.practice-tabs { overflow: hidden; }
+.practice-tabs :deep(.el-tabs__header) { margin: 0; padding: 0 24px; border-bottom: 1px solid #e9edf5; }
+.practice-tabs :deep(.el-tabs__nav-wrap::after) { display: none; }
+.practice-tabs :deep(.el-tabs__item) { height: 58px; font-weight: 700; color: #64748b; }
+.practice-tabs :deep(.el-tabs__item.is-active) { color: #3157d8; }
+.practice-tabs :deep(.el-tabs__active-bar) { height: 3px; border-radius: 3px; background: #3157d8; }
+.practice-tabs :deep(.el-tabs__item em) { display: inline-grid; min-width: 21px; height: 21px; margin-left: 7px; padding: 0 6px; place-items: center; border-radius: 999px; background: #fee2e2; color: #c24141; font-size: 11px; font-style: normal; }
+.tab-body { min-height: 520px; padding: 26px; }
+.practice-toolbar, .wrong-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.practice-toolbar h2, .wrong-hero h2 { margin: 0 0 6px; color: #16213e; font-size: 22px; }
+.practice-toolbar p, .wrong-hero p { max-width: 700px; margin: 0; color: #6b7892; font-size: 13px; line-height: 1.7; }
+.section-kicker { display: block; margin-bottom: 6px; color: #3157d8; font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+.summary-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }
+.summary-strip div { display: flex; align-items: center; justify-content: space-between; min-height: 74px; padding: 15px 18px; border: 1px solid #e6ebf4; border-radius: 14px; background: #f9fbff; }
+.summary-strip span { color: #6b7892; font-size: 12px; }
+.summary-strip b { color: #192442; font-size: 24px; }
+.question-card { max-width: 900px; margin: 0 auto; padding: 28px; border: 1px solid #e4e9f3; border-radius: 18px; background: #fff; box-shadow: 0 14px 36px rgba(30, 49, 94, .07); }
+.question-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.question-meta span { padding: 5px 9px; border-radius: 999px; background: #f0f4ff; color: #526486; font-size: 11px; }
+.question-card > h2 { margin: 26px 0 20px; color: #17213c; font-size: 20px; line-height: 1.65; }
+.question-card .el-radio-group { display: grid; gap: 11px; margin: 0 0 20px; }
+.question-card .el-radio-group :deep(.el-radio) { align-items: flex-start; height: auto; min-height: 48px; margin-right: 0; padding: 13px 15px; white-space: normal; border-radius: 12px; }
+.question-card .el-radio-group :deep(.el-radio__input) { margin-top: 3px; }
+.question-card .el-radio-group :deep(.el-radio__label) { display: inline-flex; gap: 12px; white-space: normal; color: #35415d; line-height: 1.6; }
+.question-card .el-radio-group :deep(.el-radio__label b) { color: #3157d8; }
+.result { margin: 20px 0; padding: 18px; border: 1px solid #dce5ff; border-radius: 14px; background: #f5f8ff; }
+.result.is-correct { border-color: #ccebdd; background: #f2fbf7; }
+.result.is-wrong { border-color: #f2d5d5; background: #fff7f7; }
+.result-title { margin-bottom: 8px; color: #1f2d4d; font-weight: 800; }
+.result p { margin: 6px 0; color: #53617b; font-size: 13px; line-height: 1.7; }
+.result .result-note { color: #7c879d; font-size: 12px; }
+footer { position: relative; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 22px; }
+.wrong-summary div:first-child b { color: #d25b5b; }
+.wrong-summary div:nth-child(2) b { color: #d48a32; }
+.wrong-summary div:last-child b { color: #2f8f68; }
+.wrong-toolbar { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 20px; }
+.wrong-toolbar .el-input { max-width: 340px; }
+.wrong-list { display: grid; gap: 14px; }
+.wrong-item { padding: 20px; border: 1px solid #e5eaf3; border-radius: 16px; background: #fff; transition: border-color .2s, box-shadow .2s; }
+.wrong-item:hover { border-color: #cad6f8; box-shadow: 0 10px 26px rgba(37, 58, 112, .07); }
+.wrong-item-top { display: flex; justify-content: space-between; gap: 24px; }
+.wrong-item-top > div:first-child { min-width: 0; flex: 1; }
+.wrong-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+.wrong-tags span { padding: 4px 8px; border-radius: 999px; background: #f0f4fb; color: #60708d; font-size: 10px; font-weight: 700; }
+.wrong-tags .pending { background: #fff0e8; color: #b75a2c; }
+.wrong-tags .mastered { background: #eaf8f1; color: #277c5a; }
+.wrong-tags .danger { background: #feecec; color: #bd4545; }
+.wrong-item h3 { margin: 0; color: #1e2944; font-size: 15px; line-height: 1.65; }
+.wrong-answer { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; min-width: 130px; color: #7b879c; font-size: 11px; }
+.wrong-answer b { display: inline-grid; width: 24px; height: 24px; margin-left: 4px; place-items: center; border-radius: 7px; background: #edf2ff; color: #3157d8; font-size: 12px; }
+.explanation-toggle { margin-top: 14px; padding: 0; border: 0; background: transparent; color: #3157d8; cursor: pointer; font-size: 12px; font-weight: 700; }
+.explanation-panel { margin-top: 12px; padding: 15px 17px; border-radius: 12px; background: #f7f9fd; color: #55637c; font-size: 12px; line-height: 1.7; }
+.explanation-panel b { color: #26334f; }
+.explanation-panel p { margin: 5px 0; }
+.explanation-panel small { color: #8490a5; }
+.wrong-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #eef1f6; }
+
+@media (max-width: 760px) {
+  .course-select { width: 100%; }
+  .tab-body { padding: 18px; }
+  .practice-toolbar, .wrong-hero, .wrong-item-top { align-items: stretch; flex-direction: column; }
+  .summary-strip { grid-template-columns: 1fr; }
+  .wrong-toolbar { flex-direction: column; }
+  .wrong-toolbar .el-input { max-width: none; }
+  .wrong-answer { align-items: flex-start; }
+  .question-card { padding: 20px; }
+}
 </style>

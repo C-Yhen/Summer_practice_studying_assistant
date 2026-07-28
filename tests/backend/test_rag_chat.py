@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from backend.app.models import Document
@@ -126,7 +128,7 @@ def test_persistent_rag_session_title_history_and_citations(
     insufficient_data = insufficient.json()["data"]
     assert insufficient_data["sufficient_evidence"] is False
     assert insufficient_data["citations"] == []
-    assert "没有找到足够证据" in insufficient_data["answer"]
+    assert "离线演示模式" in insufficient_data["answer"]
     refreshed_history = client.get(
         f"/api/v1/chat-sessions/{session_id}/messages", headers=auth_headers
     ).json()["data"]["items"]
@@ -136,6 +138,22 @@ def test_persistent_rag_session_title_history_and_citations(
         "user",
         "assistant",
     ]
+
+
+def test_high_semantic_score_without_shared_terms_does_not_create_a_citation() -> None:
+    """A retrieval score alone must not turn an unrelated answer into RAG."""
+    from backend.app.providers.llm import MockLLMProvider
+    from backend.app.services.rag import answer_from_sources
+
+    answer, sufficient = asyncio.run(answer_from_sources(
+        MockLLMProvider(),
+        "What is the capital of France?",
+        [{"score": 0.99, "quote": "The Smoke Constant is 42.", "document_name": "smoke.pdf", "page_number": 1}],
+        "strict",
+    ))
+
+    assert sufficient is False
+    assert "离线演示模式" in answer
 
 
 def test_rag_document_scope_and_ready_validation(

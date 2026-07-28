@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Calendar, Check, Clock, Refresh, Warning } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { courseApi, planApi } from '@/api/services'
-import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask } from '@/types'
+import { asyncTaskApi, courseApi, planApi, profileApi } from '@/api/services'
+import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask, UserPreferences } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -14,12 +14,63 @@ const courses = ref<CourseListItem[]>([])
 const selectedCourseId = ref<number | null>(null)
 const coursesLoading = ref(false)
 const coursesError = ref('')
+const preferences = ref<UserPreferences | null>(null)
+const preferenceDefaults = ref({ dailyMinutes: 0, sessionMinutes: 0 })
+const preferencesError = ref('')
+const preferencesLoading = ref(false)
 const plan = ref<CurrentStudyPlanResponse | null>(null)
 const planLoading = ref(false)
 const planError = ref('')
 const generating = ref(false)
 const confirming = ref(false)
 const confirmVisible = ref(false)
+const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
+const aiPollingTimedOut = ref(false)
+let initializationVersion = 0
+let internalRouteUpdate = false
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+  aiEnhancementStatus.value = null
+  aiPollingTimedOut.value = false
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number, sourcePlanId: number, sourceVersion: number) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  aiEnhancementStatus.value = 'queued'
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (version !== aiPollVersion || selectedCourseId.value !== sourceCourseId || plan.value?.plan_id !== sourcePlanId || plan.value?.version !== sourceVersion) return
+      if (task.status === 'success') {
+        stopAiPolling()
+        await loadCurrentPlan()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        aiEnhancementStatus.value = task.status
+        return
+      }
+      if (attempts >= 40) {
+        aiPollingTimedOut.value = true
+        return
+      }
+      aiEnhancementStatus.value = task.status === 'processing' ? 'processing' : 'queued'
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else aiPollingTimedOut.value = true
+    }
+  }
+  void poll()
+}
 
 function localDate(offset = 0) {
   const date = new Date()
@@ -51,6 +102,14 @@ const groupedTasks = computed(() => {
 const totalMinutes = computed(() => (plan.value?.tasks || []).reduce((sum, task) => sum + task.estimated_minutes, 0))
 const completedCount = computed(() => (plan.value?.tasks || []).filter((task) => task.status === 'completed').length)
 const isCandidate = computed(() => plan.value?.status === 'candidate')
+const generationContext = computed(() => {
+  const value = plan.value?.diff?.generation_context
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+})
+const generationOverrides = computed(() => {
+  const overrides = generationContext.value?.overrides
+  return overrides && typeof overrides === 'object' && !Array.isArray(overrides) ? overrides as Record<string, boolean> : null
+})
 
 function pageError(error: unknown, fallback: string) {
   return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
@@ -58,8 +117,9 @@ function pageError(error: unknown, fallback: string) {
 
 function queryCourseId(): number | null {
   const raw = Array.isArray(route.query.courseId) ? route.query.courseId[0] : route.query.courseId
+  if (raw === undefined) return null
   const parsed = typeof raw === 'string' ? Number(raw) : NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : -1
 }
 
 async function syncCourseQuery() {
@@ -78,6 +138,31 @@ async function loadCourses() {
   } finally {
     coursesLoading.value = false
   }
+}
+
+function applyPreferenceDefaults() {
+  if (!preferences.value) return
+  preferenceDefaults.value = {
+    dailyMinutes: preferences.value.daily_minutes,
+    sessionMinutes: preferences.value.session_minutes,
+  }
+  form.dailyMinutes = preferenceDefaults.value.dailyMinutes
+  form.sessionMinutes = preferenceDefaults.value.sessionMinutes
+}
+
+const dailyMinutesOverride = computed(() => form.dailyMinutes !== preferenceDefaults.value.dailyMinutes)
+const sessionMinutesOverride = computed(() => form.sessionMinutes !== preferenceDefaults.value.sessionMinutes)
+
+async function loadPreferences() {
+  preferencesLoading.value = true
+  preferencesError.value = ''
+  try {
+    preferences.value = (await profileApi.get()).preferences
+    applyPreferenceDefaults()
+  } catch (error) {
+    preferences.value = null
+    preferencesError.value = pageError(error, '学习偏好加载失败')
+  } finally { preferencesLoading.value = false }
 }
 
 async function loadCurrentPlan() {
@@ -99,29 +184,38 @@ async function loadCurrentPlan() {
 }
 
 async function selectCourse(courseId: number) {
-  selectedCourseId.value = courseId
+  if (generating.value) return
+  stopAiPolling()
   plan.value = null
   planError.value = ''
   confirmVisible.value = false
-  await syncCourseQuery()
-  await loadCurrentPlan()
+  await router.replace({ name: 'plan', query: { courseId: String(courseId) } })
 }
 
 async function initialize() {
-  await loadCourses()
-  if (coursesError.value || !courses.value.length) return
+  const version = ++initializationVersion
+  selectedCourseId.value = null
+  plan.value = null
+  planError.value = ''
+  await Promise.all([loadCourses(), loadPreferences()])
+  if (version !== initializationVersion || coursesError.value || preferencesError.value || !courses.value.length) return
   const requested = queryCourseId()
-  if (requested && !courses.value.some((course) => course.id === requested)) {
+  if (requested === -1 || (requested && !courses.value.some((course) => course.id === requested))) {
     coursesError.value = 'URL 中的课程不属于当前账号或已归档'
     return
   }
   selectedCourseId.value = requested || courses.value[0].id
-  if (!requested) await syncCourseQuery()
+  if (!requested) {
+    internalRouteUpdate = true
+    await syncCourseQuery()
+    internalRouteUpdate = false
+  }
+  if (version !== initializationVersion) return
   await loadCurrentPlan()
 }
 
 async function generatePlan() {
-  if (generating.value || !selectedCourseId.value) return
+  if (generating.value || !selectedCourseId.value || !preferences.value) return
   const goal = form.goal.trim()
   if (!goal) return ElMessage.warning('请填写学习目标')
   if (!form.startDate || !form.endDate) return ElMessage.warning('请选择计划起止日期')
@@ -132,14 +226,17 @@ async function generatePlan() {
     goal,
     start_date: form.startDate,
     end_date: form.endDate,
-    daily_availability: { default_minutes: form.dailyMinutes },
-    session_minutes: form.sessionMinutes,
+    daily_availability: dailyMinutesOverride.value ? { default_minutes: form.dailyMinutes } : {},
     unavailable_dates: [],
   }
+  if (sessionMinutesOverride.value) payload.session_minutes = form.sessionMinutes
   generating.value = true
+  const sourceCourseId = selectedCourseId.value
+  stopAiPolling()
   planError.value = ''
   try {
-    const generated = await planApi.generate(selectedCourseId.value, payload)
+    const generated = await planApi.generate(sourceCourseId, payload)
+    if (selectedCourseId.value !== sourceCourseId) return
     plan.value = {
       plan_id: generated.plan_id,
       course_id: generated.course_id,
@@ -152,7 +249,12 @@ async function generatePlan() {
       confirmation_token: generated.confirmation_token,
       ...generated.candidate_version,
     }
-    ElMessage.success('候选学习计划已生成，确认前不会进入今日任务')
+    if (generated.ai_enhancement_task_id) {
+      watchAiEnhancement(generated.ai_enhancement_task_id, generated.course_id, generated.plan_id, generated.candidate_version.version)
+    }
+    ElMessage.success(generated.ai_enhancement_task_id
+      ? '候选学习计划已生成；AI 摘要会在后台补充，当前计划可直接确认。'
+      : '候选学习计划已生成，确认前不会进入今日任务')
   } catch (error) {
     planError.value = pageError(error, '学习计划生成失败')
   } finally {
@@ -190,30 +292,58 @@ function openTodayTasks() {
   router.push({ name: 'today', query: selectedCourseId.value ? { courseId: String(selectedCourseId.value) } : {} })
 }
 
+function resetPreferenceDefaults() { applyPreferenceDefaults() }
+
 function formatDay(value: string) {
   const date = new Date(`${value}T00:00:00`)
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', weekday: 'short' }).format(date)
 }
 
-onMounted(initialize)
+function taskTypeLabel(value: string) {
+  return ({ study: '学习', review: '复习', practice: '练习', quiz: '测验', reading: '阅读', derivation: '推导' } as Record<string, string>)[value] || value
+}
+
+function difficultyLabel(value: string) {
+  return ({ easy: '基础', medium: '适中', hard: '进阶' } as Record<string, string>)[value] || value
+}
+
+function statusLabel(value: string) {
+  return ({ pending: '待完成', in_progress: '进行中', completed: '已完成', candidate: '待确认', active: '已生效' } as Record<string, string>)[value] || value
+}
+
+function contextLabel(value: unknown, kind: 'foundation' | 'order' | 'difficulty') {
+  const dictionaries = {
+    foundation: { beginner: '入门', intermediate: '有一定基础', advanced: '基础扎实' },
+    order: { sequential: '按章节顺序', weak_first: '薄弱点优先', exam_first: '考试重点优先' },
+    difficulty: { easy: '基础', medium: '适中', hard: '进阶', adaptive: '自适应' },
+  } as const
+  return dictionaries[kind][String(value) as keyof typeof dictionaries[typeof kind]] || String(value || '未设置')
+}
+
+watch(() => route.query.courseId, () => {
+  if (!internalRouteUpdate) void initialize()
+}, { immediate: true })
+onBeforeUnmount(stopAiPolling)
 </script>
 
 <template>
   <div class="plan-page">
-    <PageHeader title="学习计划" eyebrow="RULE-BASED PLANNING" description="基于课程目标、可用时间和掌握度生成规则计划，确认后任务才会生效。">
-      <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" style="width:240px" @change="selectCourse">
+    <PageHeader title="学习计划" eyebrow="智能规划" description="结合课程目标、可用时间、学习偏好与掌握情况智能编排；确认前不会改动你的任务。">
+      <el-select :model-value="selectedCourseId" placeholder="选择课程" :loading="coursesLoading" :disabled="generating" style="width:240px" @change="selectCourse">
         <el-option v-for="course in courses" :key="course.id" :value="course.id" :label="course.code ? `${course.name} · ${course.code}` : course.name" />
       </el-select>
       <el-button v-if="plan" plain :loading="planLoading" @click="loadCurrentPlan"><el-icon><Refresh /></el-icon>刷新计划</el-button>
+      <el-button plain @click="router.push({ path: '/settings', query: { tab: 'learning' } })">调整默认偏好</el-button>
       <el-button v-if="plan?.plan_status === 'active'" type="primary" @click="openTodayTasks">进入今日任务</el-button>
     </PageHeader>
 
     <el-alert v-if="coursesError" :title="coursesError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="initialize">重试</el-button></template></el-alert>
+    <el-alert v-else-if="preferencesError" :title="preferencesError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadPreferences">重试</el-button></template></el-alert>
     <el-empty v-else-if="!coursesLoading && !courses.length" description="当前账号还没有课程"><el-button type="primary" @click="router.push('/courses')">前往课程管理</el-button></el-empty>
 
-    <template v-else-if="selectedCourseId">
+    <template v-else-if="selectedCourseId && preferences">
       <section class="content-card form-card">
-        <div class="section-head"><div><span>计划参数</span><h2>{{ plan ? '生成新计划' : '生成学习计划' }}</h2><p>后端会再次校验日期与学习时长；重新生成会创建新的候选计划。</p></div><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '生成中…' : '生成候选计划' }}</el-button></div>
+          <div class="section-head"><div><span>第 1 步 · 告诉我你的目标</span><h2>{{ plan ? '重新规划学习节奏' : '创建一份可执行的学习计划' }}</h2><p>时长默认采用个人偏好，你可以只为本次计划临时调整。系统会先生成预览，由你确认后再生效。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复默认时长</el-button><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '正在生成计划预览…' : '生成计划预览' }}</el-button></div></div>
         <el-form label-position="top" class="plan-form">
           <el-form-item label="学习目标"><el-input v-model="form.goal" maxlength="500" show-word-limit /></el-form-item>
           <el-form-item label="开始日期"><el-input v-model="form.startDate" type="date" /></el-form-item>
@@ -224,6 +354,8 @@ onMounted(initialize)
       </section>
 
       <el-alert v-if="planError" :title="planError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadCurrentPlan">重新加载</el-button></template></el-alert>
+      <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '计划预览已可确认，AI 摘要与风险提示正在后台补充。'" type="info" :closable="false" show-icon class="page-alert" />
+      <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 摘要未生成，当前规则计划仍可正常确认。" type="warning" :closable="false" show-icon class="page-alert" />
       <div v-if="planLoading" v-loading="true" class="plan-loading"></div>
       <el-empty v-else-if="!plan" description="当前课程还没有学习计划，请先生成候选计划" />
 
@@ -241,13 +373,15 @@ onMounted(initialize)
           <article><span>版本状态</span><strong class="text-value">{{ plan.status }}</strong><small>{{ plan.summary || '暂无汇总' }}</small></article>
         </section>
 
+        <section class="content-card context-card"><div class="section-head"><div><span>为什么这样安排</span><h2>本计划采用的真实条件</h2><p>以下参数来自你的设置与本次输入，可用于核对计划是否符合预期。</p></div></div><template v-if="generationContext"><div class="context-grid"><div><span>时间预算</span><b>每天 {{ generationContext.daily_minutes }} 分钟</b><small>每次约 {{ generationContext.session_minutes }} 分钟</small></div><div><span>当前基础</span><b>{{ contextLabel(generationContext.foundation_level, 'foundation') }}</b><small>难度偏好：{{ contextLabel(generationContext.preferred_difficulty, 'difficulty') }}</small></div><div><span>学习顺序</span><b>{{ contextLabel(generationContext.learning_order, 'order') }}</b><small>{{ generationContext.needs_error_points ? '会优先照顾薄弱知识点' : '按常规顺序安排' }}</small></div><div><span>专项需求</span><b>{{ generationContext.needs_exam_focus ? '包含考试重点' : '常规学习节奏' }}</b><small>{{ generationContext.needs_derivation ? '包含推导类任务' : '不强制安排推导任务' }}</small></div></div><small class="context-footnote">本次临时覆盖：每日预算 {{ generationOverrides?.daily_minutes ? '已调整' : '未调整' }}；单次时长 {{ generationOverrides?.session_minutes ? '已调整' : '未调整' }}。确认前你仍可修改参数并重新生成。</small></template><p v-else class="no-risk">该历史计划未记录生成依据，任务内容仍可正常查看。</p></section>
+
         <section class="content-card risk-card"><div class="section-head"><div><span>计划风险</span><h2>真实排期检查</h2></div></div><p v-if="!plan.risks.length" class="no-risk">当前未检测到明显排期风险</p><ul v-else><li v-for="risk in plan.risks" :key="risk"><el-icon><Warning /></el-icon>{{ risk }}</li></ul></section>
 
         <el-empty v-if="!groupedTasks.length" description="当前候选计划没有可安排任务，请根据风险调整日期或预算" />
         <section v-else class="day-list">
           <article v-for="day in groupedTasks" :key="day.date" class="content-card day-card">
             <header><div><el-icon><Calendar /></el-icon><span>{{ formatDay(day.date) }}</span></div><small>{{ day.tasks.length }} 项 · {{ day.tasks.reduce((sum, task) => sum + task.estimated_minutes, 0) }} 分钟</small></header>
-            <div class="tasks"><div v-for="task in day.tasks" :key="task.id" :class="{ completed: task.status === 'completed' }"><span class="type">{{ task.task_type }}</span><div><b>{{ task.title }}</b><small>难度 {{ task.difficulty }} · 优先级 {{ Math.round(task.priority * 100) }} · 状态 {{ task.status }}</small></div><em><el-icon><Clock /></el-icon>{{ task.estimated_minutes }} 分钟</em></div></div>
+            <div class="tasks"><div v-for="task in day.tasks" :key="task.id" :class="{ completed: task.status === 'completed' }"><span class="type">{{ taskTypeLabel(task.task_type) }}</span><div><b>{{ task.title }}</b><small>{{ difficultyLabel(task.difficulty) }}难度 · 优先级 {{ Math.round(task.priority * 100) }} · {{ statusLabel(task.status) }}</small></div><em><el-icon><Clock /></el-icon>{{ task.estimated_minutes }} 分钟</em></div></div>
           </article>
         </section>
       </template>
@@ -261,5 +395,5 @@ onMounted(initialize)
 </template>
 
 <style scoped>
-.page-alert{margin-bottom:16px}.form-card{padding:18px;margin-bottom:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:18px}.section-head span{color:#6371df;font-size:9px;font-weight:750}.section-head h2{margin:5px 0;color:#3f4962;font-size:15px}.section-head p{margin:0;color:#929bad;font-size:9px}.plan-form{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:12px;margin-top:16px}.plan-form :deep(.el-form-item){margin:0}.plan-form :deep(.el-input-number){width:100%}.plan-loading{min-height:240px}.status-card{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;margin-bottom:14px;border-left:4px solid}.status-card.candidate{border-left-color:#e49a42;background:#fffaf3}.status-card.active{border-left-color:#18a78b;background:#f4fbf9}.status-card span{font-size:9px;font-weight:800}.candidate span{color:#cf7d24}.active span{color:#168d77}.status-card h2{margin:6px 0;color:#3f4962;font-size:15px}.status-card p{margin:0;color:#858fa4;font-size:9px}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:14px}.summary-grid article{display:flex;flex-direction:column;padding:17px;border:1px solid var(--line);border-radius:14px;background:white}.summary-grid span{color:#8f98aa;font-size:8px}.summary-grid strong{margin-top:7px;color:#42506d;font-size:20px}.summary-grid .text-value{font-size:14px}.summary-grid small{margin-top:5px;color:#9ca4b4;font-size:8px}.risk-card{padding:17px 20px;margin-bottom:14px}.risk-card ul,.confirm-box ul{display:grid;gap:7px;padding:0;margin:12px 0 0;list-style:none}.risk-card li{display:flex;align-items:center;gap:6px;color:#b96f2d;font-size:9px}.no-risk{margin:12px 0 0;color:#168d77;font-size:9px}.day-list{display:grid;gap:12px}.day-card{overflow:hidden}.day-card header{display:flex;align-items:center;justify-content:space-between;padding:13px 17px;border-bottom:1px solid #edf0f5;background:#fafbfc}.day-card header div{display:flex;align-items:center;gap:7px;color:#5362d7;font-size:10px;font-weight:750}.day-card header small{color:#8d96a8;font-size:8px}.tasks{display:grid}.tasks>div{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:13px 17px;border-bottom:1px solid #eff1f5}.tasks>div:last-child{border:0}.tasks>div.completed{opacity:.62;background:#f7faf9}.tasks .type{padding:4px 7px;border-radius:6px;background:#eef0ff;color:#5868dd;font-size:8px}.tasks b{display:block;color:#48536c;font-size:10px}.tasks small{display:block;margin-top:5px;color:#929bad;font-size:8px}.tasks em{display:flex;align-items:center;gap:4px;color:#768198;font-size:8px;font-style:normal}.confirm-box{display:flex;gap:12px;padding:15px;border-radius:12px;background:#fff7eb;color:#d9832d}.confirm-box>.el-icon{flex:none;font-size:20px}.confirm-box b{font-size:11px}.confirm-box p,.confirm-box li{color:#836a50;font-size:9px;line-height:1.6}@media(max-width:1050px){.plan-form{grid-template-columns:repeat(2,1fr)}.plan-form :first-child{grid-column:span 2}.summary-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:620px){.plan-form,.summary-grid{grid-template-columns:1fr}.plan-form :first-child{grid-column:auto}.status-card{align-items:flex-start;gap:14px;flex-direction:column}.tasks>div{grid-template-columns:auto 1fr}.tasks em{grid-column:2}}
+.page-alert{margin-bottom:16px}.form-card{padding:22px;margin-bottom:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:18px}.section-head span{color:#5268dc;font-size:11px;font-weight:800}.section-head h2{margin:6px 0;color:#25314c;font-size:18px}.section-head p{margin:0;color:#7d889d;font-size:12px;line-height:1.6}.plan-form{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:12px;margin-top:18px}.plan-form :deep(.el-form-item){margin:0}.plan-form :deep(.el-input-number){width:100%}.plan-loading{min-height:240px}.status-card{display:flex;align-items:center;justify-content:space-between;padding:20px 22px;margin-bottom:14px;border-left:4px solid}.status-card.candidate{border-left-color:#e49a42;background:#fffaf3}.status-card.active{border-left-color:#18a78b;background:#f4fbf9}.status-card span{font-size:11px;font-weight:800}.candidate span{color:#cf7d24}.active span{color:#168d77}.status-card h2{margin:6px 0;color:#3f4962;font-size:17px}.status-card p{margin:0;color:#758096;font-size:11px}.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:14px}.summary-grid article{display:flex;flex-direction:column;padding:17px;border:1px solid var(--line);border-radius:14px;background:white}.summary-grid span{color:#7f899c;font-size:11px}.summary-grid strong{margin-top:7px;color:#42506d;font-size:22px}.summary-grid .text-value{font-size:15px}.summary-grid small{margin-top:5px;color:#929caf;font-size:10px}.risk-card,.context-card{padding:20px 22px;margin-bottom:14px}.risk-card ul,.confirm-box ul{display:grid;gap:7px;padding:0;margin:12px 0 0;list-style:none}.risk-card li{display:flex;align-items:center;gap:6px;color:#b96f2d;font-size:11px}.context-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}.context-grid>div{display:flex;flex-direction:column;padding:14px;border:1px solid #e6eaf2;border-radius:12px;background:#f9fafe}.context-grid span{color:#7f8aa0;font-size:10px}.context-grid b{margin:7px 0 5px;color:#34415d;font-size:13px}.context-grid small,.context-footnote{color:#8993a6;font-size:10px;line-height:1.5}.context-footnote{display:block;margin-top:12px}.no-risk{margin:12px 0 0;color:#168d77;font-size:11px}.day-list{display:grid;gap:12px}.day-card{overflow:hidden}.day-card header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #edf0f5;background:#fafbfc}.day-card header div{display:flex;align-items:center;gap:7px;color:#5362d7;font-size:12px;font-weight:750}.day-card header small{color:#7d879b;font-size:10px}.tasks{display:grid}.tasks>div{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:15px 18px;border-bottom:1px solid #eff1f5}.tasks>div:last-child{border:0}.tasks>div.completed{opacity:.62;background:#f7faf9}.tasks .type{padding:5px 8px;border-radius:6px;background:#eef0ff;color:#5868dd;font-size:10px}.tasks b{display:block;color:#3c4862;font-size:12px}.tasks small{display:block;margin-top:5px;color:#8690a4;font-size:10px}.tasks em{display:flex;align-items:center;gap:4px;color:#6d7890;font-size:10px;font-style:normal}.confirm-box{display:flex;gap:12px;padding:15px;border-radius:12px;background:#fff7eb;color:#d9832d}.confirm-box>.el-icon{flex:none;font-size:20px}.confirm-box b{font-size:12px}.confirm-box p,.confirm-box li{color:#836a50;font-size:11px;line-height:1.6}@media(max-width:1050px){.plan-form{grid-template-columns:repeat(2,1fr)}.plan-form :first-child{grid-column:span 2}.summary-grid,.context-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:620px){.plan-form,.summary-grid,.context-grid{grid-template-columns:1fr}.plan-form :first-child{grid-column:auto}.section-head,.status-card{align-items:flex-start;gap:14px;flex-direction:column}.tasks>div{grid-template-columns:auto 1fr}.tasks em{grid-column:2}}
 </style>

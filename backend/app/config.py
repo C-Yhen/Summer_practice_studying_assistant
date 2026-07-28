@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     sync_document_processing: bool = True
     upload_dir: Path = Path("./backend/storage/uploads")
     max_upload_bytes: int = 10 * 1024 * 1024
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_language: str = "chi_sim+eng"
+    pdf_ocr_dpi: int = 300
+    pdf_ocr_min_text_chars: int = 80
     rag_top_k: int = 5
     embedding_dimension: int = 1024
     llm_provider: str = "mock"
@@ -26,6 +30,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_chat_model: str = ""
     llm_embedding_model: str = ""
+    llm_embedding_batch_size: int = 20
+    # Remote AI is optional enhancement work. These bounds protect a worker from
+    # a slow provider; interactive endpoints never wait for them.
+    ai_recommend_timeout_seconds: int = 12
+    ai_plan_timeout_seconds: int = 18
+    ai_practice_timeout_seconds: int = 18
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
@@ -48,6 +58,15 @@ class Settings(BaseSettings):
             return "postgresql+psycopg://" + value.removeprefix("postgres://")
         if value.startswith("postgresql://"):
             return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+        return value
+
+    @field_validator("embedding_dimension")
+    @classmethod
+    def require_supported_embedding_dimension(cls, value: int) -> int:
+        # The PostgreSQL pgvector column is Vector(1024). Keep runtime
+        # configuration aligned with that persisted schema.
+        if value != 1024:
+            raise ValueError("EMBEDDING_DIMENSION must be 1024 for the current database schema")
         return value
 
 

@@ -4,8 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { Document, RefreshRight, Upload } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
-import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
-import { asyncTaskApi, courseApi, documentApi } from '@/api/services'
+import { getApiErrorMessage, isApiError, isUnauthorizedError } from '@/api/client'
+import { courseApi, documentApi } from '@/api/services'
 import type { BackendAsyncTask, BackendDocument, CourseListItem } from '@/types'
 
 const POLL_INTERVAL_MS = 1500
@@ -14,7 +14,7 @@ const TERMINAL_STATUSES = new Set(['success', 'failed', 'cancelled'])
 const STEP_LABELS: Record<string, string> = {
   queued: '等待处理',
   worker_started: '任务已开始',
-  extracting: '提取文本',
+  extracting: '提取文本 / OCR',
   chunking: '清洗与切块',
   embedding: '生成向量',
   completed: '处理完成',
@@ -54,6 +54,32 @@ const chunkCount = computed(() => {
   const value = task.value?.result_data?.chunk_count
   return typeof value === 'number' ? value : null
 })
+const extractionMode = computed(() => {
+  const value = task.value?.result_data?.extraction_mode
+  return typeof value === 'string' ? value : null
+})
+const nativePageCount = computed(() => {
+  const value = task.value?.result_data?.native_page_count
+  return typeof value === 'number' ? value : null
+})
+const ocrPageCount = computed(() => {
+  const value = task.value?.result_data?.ocr_page_count
+  return typeof value === 'number' ? value : null
+})
+const extractionModeLabel = computed(() => {
+  if (extractionMode.value === 'ocr') return '全页 OCR'
+  if (extractionMode.value === 'hybrid') return '原生文本 + OCR'
+  if (extractionMode.value === 'native') return '原生文本层'
+  return null
+})
+const extractionHint = computed(() => {
+  if (activeDocument.value?.file_type !== 'pdf') return ''
+  if (task.value?.current_step === 'extracting') return '正在读取 PDF 文本层；扫描页会自动切换到 OCR。'
+  if (extractionMode.value === 'ocr') return '该 PDF 未提供足够的文本层，已对全部页面进行 OCR。'
+  if (extractionMode.value === 'hybrid') return '已优先使用 PDF 文本层，并对低文本页面补充 OCR。'
+  if (extractionMode.value === 'native') return '已直接使用 PDF 文本层，无需 OCR。'
+  return '系统会优先读取 PDF 文本层，必要时自动使用 OCR。'
+})
 const currentStepLabel = computed(() => {
   const step = task.value?.current_step
   return step ? STEP_LABELS[step] || step : '暂无步骤信息'
@@ -84,17 +110,32 @@ function documentErrorMessage(error: unknown, fallback: string) {
   return isUnauthorizedError(error) ? '登录状态已失效，请重新登录' : getApiErrorMessage(error, fallback)
 }
 
+function processingErrorMessage(error: string | null | undefined) {
+  if (!error) return '—'
+  const messages: Record<string, string> = {
+    DOCUMENT_TEXT_EMPTY: '未能从文档提取到可检索文本。扫描 PDF 请确认 OCR 引擎和语言包已安装。',
+    PDF_OCR_ENGINE_UNAVAILABLE: '服务器未安装 PDF OCR 引擎，请重新构建后端镜像，或关闭 PDF OCR。',
+    PDF_OCR_LANGUAGE_UNAVAILABLE: '服务器缺少配置的 OCR 语言包，请安装 chi_sim / eng，或调整 PDF_OCR_LANGUAGE。',
+    PDF_OCR_TIMEOUT: 'PDF OCR 处理超时，请尝试降低 PDF_OCR_DPI 或拆分文档后重试。',
+  }
+  return messages[error] || error
+}
+
 function stopPolling() {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer)
   pollTimer = undefined
   polling.value = false
 }
 
-function schedulePoll(taskId: string) {
+function isCurrentTask(documentId: number, taskId: string) {
+  return activeDocument.value?.id === documentId && activeTaskId.value === taskId
+}
+
+function schedulePoll(documentId: number, taskId: string) {
   stopPolling()
-  if (!task.value || TERMINAL_STATUSES.has(task.value.status) || activeTaskId.value !== taskId) return
+  if (!task.value || TERMINAL_STATUSES.has(task.value.status) || !isCurrentTask(documentId, taskId)) return
   polling.value = true
-  pollTimer = window.setTimeout(() => void readTask(taskId, true), POLL_INTERVAL_MS)
+  pollTimer = window.setTimeout(() => void readTask(documentId, taskId, true), POLL_INTERVAL_MS)
 }
 
 async function loadCourses() {
@@ -137,28 +178,30 @@ async function refreshActiveDocument(documentId: number) {
   }
 }
 
-async function readTask(taskId: string, isPoll = false) {
+async function readTask(documentId: number, taskId: string, isPoll = false) {
   try {
-    const result = await asyncTaskApi.get(taskId)
-    if (activeTaskId.value !== taskId) return
+    const result = await documentApi.getTask(documentId, taskId)
+    if (!isCurrentTask(documentId, taskId)) return
     task.value = result
     taskError.value = ''
     pollFailures = 0
     if (TERMINAL_STATUSES.has(result.status)) {
       stopPolling()
-      if (activeDocument.value) void refreshActiveDocument(activeDocument.value.id)
+      if (activeDocument.value?.id === documentId) void refreshActiveDocument(documentId)
       if (selectedCourseId.value) void loadDocuments(selectedCourseId.value)
     } else {
-      schedulePoll(taskId)
+      schedulePoll(documentId, taskId)
     }
   } catch (error) {
-    if (activeTaskId.value !== taskId) return
+    if (!isCurrentTask(documentId, taskId)) return
     pollFailures += 1
-    taskError.value = documentErrorMessage(error, '任务状态读取失败')
+    taskError.value = isApiError(error, 404, 'TASK_NOT_FOUND')
+      ? '任务不存在或不属于当前文档'
+      : documentErrorMessage(error, '任务状态读取失败')
     if (pollFailures >= MAX_POLL_FAILURES || !isPoll) {
       stopPolling()
     } else {
-      schedulePoll(taskId)
+      schedulePoll(documentId, taskId)
     }
   }
 }
@@ -174,7 +217,14 @@ async function resolveTask(documentId: number, requestedTaskId: string) {
     }
   }
   activeTaskId.value = taskId
-  await readTask(taskId)
+  await readTask(documentId, taskId)
+
+  if (!requestedTaskId && isCurrentTask(documentId, taskId) && !taskError.value) {
+    void router.replace({
+      name: 'document-tasks',
+      query: { courseId: String(selectedCourseId.value), documentId: String(documentId), taskId },
+    })
+  }
 }
 
 async function initialize() {
@@ -196,6 +246,14 @@ async function initialize() {
   const requestedCourseId = parsePositiveId(route.query.courseId)
   const requestedDocumentId = parsePositiveId(route.query.documentId)
   const requestedTaskId = parseTaskId(route.query.taskId)
+  if (route.query.courseId !== undefined && requestedCourseId === null) {
+    coursesError.value = 'URL 中的课程地址无效'
+    return
+  }
+  if (route.query.documentId !== undefined && requestedDocumentId === null) {
+    documentError.value = 'URL 中的文档地址无效'
+    return
+  }
 
   if (requestedCourseId) {
     if (!courses.value.some((course) => course.id === requestedCourseId)) {
@@ -247,7 +305,7 @@ async function refreshAll() {
   if (activeTaskId.value) {
     stopPolling()
     pollFailures = 0
-    await readTask(activeTaskId.value)
+    if (activeDocument.value) await readTask(activeDocument.value.id, activeTaskId.value)
   }
 }
 
@@ -256,7 +314,7 @@ function retryTaskStatus() {
   pollFailures = 0
   taskError.value = ''
   if (activeTaskId.value) {
-    void readTask(activeTaskId.value)
+    if (activeDocument.value) void readTask(activeDocument.value.id, activeTaskId.value)
   } else if (activeDocument.value) {
     void resolveTask(activeDocument.value.id, '')
   }
@@ -276,7 +334,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <PageHeader title="文档处理进度" eyebrow="RAG PIPELINE" description="通过 REST 自动刷新真实文档与解析任务状态。">
+    <PageHeader title="文档处理进度" eyebrow="资料解析" description="自动刷新文档与解析任务的真实状态。">
       <span class="refresh-state" :class="{ error: taskError }"><i></i>{{ refreshLabel }}</span>
       <el-button plain :icon="RefreshRight" @click="refreshAll">刷新状态</el-button>
     </PageHeader>
@@ -319,7 +377,16 @@ onBeforeUnmount(() => {
           <p><span>文本块数</span><b>{{ chunkCount ?? '待生成' }}</b></p>
           <p><span>创建时间</span><b>{{ formatDate(task.created_at) }}</b></p>
         </div>
-        <el-alert v-if="task.error_message" :title="task.error_message" type="error" :closable="false" show-icon class="inner-alert" />
+        <div v-if="extractionHint" class="extraction-hint">
+          <span class="hint-dot"></span>
+          <div><b>PDF 识别策略</b><p>{{ extractionHint }}</p></div>
+        </div>
+        <div v-if="extractionModeLabel" class="extraction-summary">
+          <div><span>解析方式</span><b>{{ extractionModeLabel }}</b></div>
+          <div><span>原生文本页</span><b>{{ nativePageCount ?? '—' }}</b></div>
+          <div><span>OCR 识别页</span><b>{{ ocrPageCount ?? '—' }}</b></div>
+        </div>
+        <el-alert v-if="task.error_message" :title="processingErrorMessage(task.error_message)" type="error" :closable="false" show-icon class="inner-alert" />
         <el-alert v-if="taskError" :title="taskError" type="error" :closable="false" show-icon class="inner-alert"><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>
       </template>
       <el-alert v-else-if="taskError" :title="taskError" type="warning" :closable="false" show-icon><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>
@@ -334,7 +401,7 @@ onBeforeUnmount(() => {
         <el-table-column label="状态" width="115"><template #default="scope"><StatusPill :status="scope.row.status" /></template></el-table-column>
         <el-table-column label="页数" width="85"><template #default="scope">{{ scope.row.page_count ?? '—' }}</template></el-table-column>
         <el-table-column label="更新时间" min-width="150"><template #default="scope">{{ formatDate(scope.row.updated_at) }}</template></el-table-column>
-        <el-table-column label="失败原因" min-width="180"><template #default="scope">{{ scope.row.error_message || '—' }}</template></el-table-column>
+        <el-table-column label="失败原因" min-width="220"><template #default="scope">{{ processingErrorMessage(scope.row.error_message) }}</template></el-table-column>
         <el-table-column label="操作" width="110"><template #default="scope"><el-button link type="primary" @click="selectDocument(scope.row)">查看状态</el-button></template></el-table-column>
       </el-table>
     </section>
@@ -342,5 +409,5 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.refresh-state{display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:999px;background:#eef1ff;color:#5868de;font-size:9px;font-weight:700}.refresh-state i{width:7px;height:7px;border-radius:50%;background:currentColor}.refresh-state.error{background:#ffeded;color:#dc5f5f}.selector-card{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:18px}.selector-card>div{display:flex;flex:1;flex-direction:column;gap:8px;color:#4b5670;font-size:10px}.state-alert{margin-bottom:18px}.state-alert :deep(.el-alert__content),.inner-alert :deep(.el-alert__content){width:100%}.state-alert :deep(.el-alert__description),.inner-alert :deep(.el-alert__description){display:flex;justify-content:flex-end;margin:0}.active-task{padding:25px 27px;margin-bottom:18px;border:1px solid #dfe3f5;border-radius:19px;background:linear-gradient(145deg,#fff,#f8f9ff);box-shadow:var(--shadow-soft)}.active-top{display:flex;align-items:center;gap:13px;margin-bottom:20px}.file-icon{width:45px;height:49px;display:grid;place-items:center;border-radius:12px;background:#eef0ff;color:#6472e9;font-size:20px}.active-info{flex:1}.active-info>span{color:#6674df;font-size:9px;font-weight:700}.active-info h2{margin:5px 0;color:#36415d;font-size:15px}.active-info p{margin:0;color:#8c96aa;font-size:9px}.active-top>strong{color:#5362de;font-size:30px}.active-top>strong small{font-size:13px}.stage-list{display:grid;grid-template-columns:repeat(6,1fr);margin:23px 0 19px}.stage-list>div{position:relative;display:flex;align-items:center;flex-direction:column;color:#a0a8b8}.stage-list>div::after{content:"";position:absolute;left:60%;right:-40%;top:12px;height:2px;background:#e5e8ef}.stage-list>div:last-child::after{display:none}.stage-list span{position:relative;z-index:1;width:25px;height:25px;display:grid;place-items:center;border:2px solid #dfe3eb;border-radius:50%;background:#fff}.stage-list span i{width:5px;height:5px;border-radius:50%;background:#b3bac8}.stage-list b{margin-top:8px;font-size:9px}.stage-list .done span{border-color:#16a98d;background:#16a98d}.stage-list .done span i{background:white}.stage-list .done::after{background:#6fd2c0}.stage-list .active span{border-color:#6574eb;box-shadow:0 0 0 5px #edf0ff}.stage-list .active span i{background:#6271e8}.stage-list .active b{color:#5362dd}.task-detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:13px;border-radius:12px;background:#f3f5fb}.task-detail-grid p{display:flex;min-width:0;flex-direction:column;gap:5px;margin:0;color:#8b95a9;font-size:9px}.task-detail-grid b{overflow-wrap:anywhere;color:#4d5872;font-size:10px}.inner-alert{margin-top:14px}.table-card{margin-top:18px}.document-cell{display:flex;align-items:center;gap:10px}.document-cell>span{width:34px;height:38px;display:grid;place-items:center;border-radius:8px;background:#fff0ed;color:#d96857;font-size:7px;font-weight:800}.document-cell>div{display:flex;flex-direction:column}.document-cell b{font-size:10px;color:#424d67}.document-cell small{margin-top:4px;color:#979faf;font-size:8px}@media(max-width:800px){.selector-card{align-items:stretch;flex-direction:column}.stage-list{grid-template-columns:repeat(3,1fr);gap:12px}.stage-list>div::after{display:none}.task-detail-grid{grid-template-columns:1fr 1fr}.active-info p{display:none}.active-top>strong{font-size:22px}}@media(max-width:520px){.stage-list,.task-detail-grid{grid-template-columns:1fr}.stage-list>div{align-items:flex-start}.active-task{padding:18px}}
+.refresh-state{display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:999px;background:#eef1ff;color:#5868de;font-size:9px;font-weight:700}.refresh-state i{width:7px;height:7px;border-radius:50%;background:currentColor}.refresh-state.error{background:#ffeded;color:#dc5f5f}.selector-card{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:18px}.selector-card>div{display:flex;flex:1;flex-direction:column;gap:8px;color:#4b5670;font-size:10px}.state-alert{margin-bottom:18px}.state-alert :deep(.el-alert__content),.inner-alert :deep(.el-alert__content){width:100%}.state-alert :deep(.el-alert__description),.inner-alert :deep(.el-alert__description){display:flex;justify-content:flex-end;margin:0}.active-task{padding:25px 27px;margin-bottom:18px;border:1px solid #dfe3f5;border-radius:19px;background:linear-gradient(145deg,#fff,#f8f9ff);box-shadow:var(--shadow-soft)}.active-top{display:flex;align-items:center;gap:13px;margin-bottom:20px}.file-icon{width:45px;height:49px;display:grid;place-items:center;border-radius:12px;background:#eef0ff;color:#6472e9;font-size:20px}.active-info{flex:1}.active-info>span{color:#6674df;font-size:9px;font-weight:700}.active-info h2{margin:5px 0;color:#36415d;font-size:15px}.active-info p{margin:0;color:#8c96aa;font-size:9px}.active-top>strong{color:#5362de;font-size:30px}.active-top>strong small{font-size:13px}.stage-list{display:grid;grid-template-columns:repeat(6,1fr);margin:23px 0 19px}.stage-list>div{position:relative;display:flex;align-items:center;flex-direction:column;color:#a0a8b8}.stage-list>div::after{content:"";position:absolute;left:60%;right:-40%;top:12px;height:2px;background:#e5e8ef}.stage-list>div:last-child::after{display:none}.stage-list span{position:relative;z-index:1;width:25px;height:25px;display:grid;place-items:center;border:2px solid #dfe3eb;border-radius:50%;background:#fff}.stage-list span i{width:5px;height:5px;border-radius:50%;background:#b3bac8}.stage-list b{margin-top:8px;font-size:9px}.stage-list .done span{border-color:#16a98d;background:#16a98d}.stage-list .done span i{background:white}.stage-list .done::after{background:#6fd2c0}.stage-list .active span{border-color:#6574eb;box-shadow:0 0 0 5px #edf0ff}.stage-list .active span i{background:#6271e8}.stage-list .active b{color:#5362dd}.task-detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:13px;border-radius:12px;background:#f3f5fb}.task-detail-grid p{display:flex;min-width:0;flex-direction:column;gap:5px;margin:0;color:#8b95a9;font-size:9px}.task-detail-grid b{overflow-wrap:anywhere;color:#4d5872;font-size:10px}.extraction-hint{display:flex;align-items:flex-start;gap:10px;margin-top:14px;padding:12px 14px;border:1px solid #e6e9fb;border-radius:12px;background:#fafaff}.hint-dot{width:8px;height:8px;flex:none;margin-top:4px;border-radius:50%;background:#6876e8;box-shadow:0 0 0 4px #edf0ff}.extraction-hint b{color:#5967d9;font-size:10px}.extraction-hint p{margin:4px 0 0;color:#7d879b;font-size:9px;line-height:1.5}.extraction-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.extraction-summary>div{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border-radius:10px;background:#f3f5fb}.extraction-summary span{color:#8b95a9;font-size:8px}.extraction-summary b{color:#4d5872;font-size:10px}.inner-alert{margin-top:14px}.table-card{margin-top:18px}.document-cell{display:flex;align-items:center;gap:10px}.document-cell>span{width:34px;height:38px;display:grid;place-items:center;border-radius:8px;background:#fff0ed;color:#d96857;font-size:7px;font-weight:800}.document-cell>div{display:flex;flex-direction:column}.document-cell b{font-size:10px;color:#424d67}.document-cell small{margin-top:4px;color:#979faf;font-size:8px}@media(max-width:800px){.selector-card{align-items:stretch;flex-direction:column}.stage-list{grid-template-columns:repeat(3,1fr);gap:12px}.stage-list>div::after{display:none}.task-detail-grid{grid-template-columns:1fr 1fr}.extraction-summary{grid-template-columns:1fr 1fr}.active-info p{display:none}.active-top>strong{font-size:22px}}@media(max-width:520px){.stage-list,.task-detail-grid,.extraction-summary{grid-template-columns:1fr}.stage-list>div{align-items:flex-start}.active-task{padding:18px}}
 </style>

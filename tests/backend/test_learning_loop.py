@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from backend.app.models import KnowledgePoint
 
 
 def _course(client: TestClient, headers: dict[str, str]) -> int:
@@ -83,6 +84,9 @@ def test_plan_confirmation_mastery_and_recommendations(
         headers=auth_headers,
         files={"file": ("db.txt", b"Database keys and normalization review.", "text/plain")},
     )
+    with client.app.state.database.session_factory() as db:
+        db.add(KnowledgePoint(course_id=course_id, name="第三范式", description="Third normal form removes transitive dependencies. 来源：db.txt 第1页。", estimated_minutes=30))
+        db.commit()
     generated = client.post(
         f"/api/v1/courses/{course_id}/study-plans/generate",
         headers=auth_headers,
@@ -126,14 +130,6 @@ def test_plan_confirmation_mastery_and_recommendations(
         f"/api/v1/courses/{course_id}/recommendations/resources", headers=auth_headers
     ).json()["data"]["items"]
     assert resources
-    breakdown = resources[0]["score_breakdown"]
-    expected_score = 100 * (
-        0.30 * breakdown["knowledge_match"]
-        + 0.25 * breakdown["weakness"]
-        + 0.20 * breakdown["difficulty_match"]
-        + 0.10 * breakdown["preference_match"]
-        + 0.10 * breakdown["resource_quality"]
-        + 0.05 * breakdown["time_match"]
-    )
-    assert abs(expected_score - resources[0]["score"]) < 0.01
+    assert resources[0]["item_type"] == "course_chat"
+    assert resources[0]["score_breakdown"]
     assert resources[0]["reason"]

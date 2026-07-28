@@ -10,25 +10,58 @@ from sqlalchemy import select
 from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import AsyncTask, Document, DocumentVersion
-from backend.app.providers.llm import get_llm_provider
 from backend.app.responses import ok
 from backend.app.schemas import DocumentRead
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
-from backend.app.services.documents import process_document
+from backend.app.services.async_tasks import dispatch_async_task, task_payload
 
 router = APIRouter(tags=["documents"])
 ALLOWED_TYPES = {"pdf", "txt", "md", "markdown"}
+DOCUMENT_TASK_TYPES = {"document_parse", "document_process"}
 
 
 def _owned_document(db: DBSession, document_id: int, owner_id: int) -> Document:
     document = db.scalar(
         select(Document)
         .join(Document.course)
-        .where(Document.id == document_id, Document.course.has(owner_id=owner_id))
+        .where(
+            Document.id == document_id,
+            Document.course.has(owner_id=owner_id, archived=False),
+        )
     )
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
+
+
+def _owned_document_task(
+    db: DBSession, document_id: int, task_id: str, owner_id: int
+) -> AsyncTask:
+    """Return a document processing task only when it belongs to this document.
+
+    The endpoint deliberately uses one 404 response for every failed link in the
+    document -> task chain, so a caller cannot use it to discover another
+    document's task identifiers.
+    """
+    try:
+        document = _owned_document(db, document_id, owner_id)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+        raise
+
+    task = db.scalar(
+        select(AsyncTask).where(
+            AsyncTask.public_id == task_id,
+            AsyncTask.user_id == owner_id,
+            AsyncTask.resource_type == "document",
+            AsyncTask.resource_id == str(document.id),
+            AsyncTask.task_type.in_(DOCUMENT_TASK_TYPES),
+        )
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
+    return task
 
 
 @router.post("/courses/{course_id}/documents", status_code=status.HTTP_201_CREATED)
@@ -89,29 +122,16 @@ async def upload_document(
         raise
     db.refresh(document)
     db.refresh(task)
-    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
-        try:
-            await process_document(db, document, task, get_llm_provider(settings))
-        except Exception:
-            # process_document persists a consistent failed document/version/task state.
-            db.refresh(document)
-            db.refresh(task)
-    else:
-        from backend.app.tasks.jobs import process_document_job
-
-        try:
-            process_document_job.delay(document.id, task.public_id)
-        except Exception as exc:
-            document.status = "failed"
-            document.error_message = f"TASK_DISPATCH_FAILED: {exc}"
-            version.status = "failed"
-            version.error_message = document.error_message
-            task.status = "failed"
-            task.current_step = "dispatch_failed"
-            task.error_message = document.error_message
-            db.commit()
-            db.refresh(document)
-            db.refresh(task)
+    await dispatch_async_task(db, task, settings)
+    db.refresh(task)
+    db.refresh(document)
+    if task.status == "failed" and task.current_step == "dispatch_failed":
+        document.status = "failed"
+        document.error_message = task.error_message
+        version.status = "failed"
+        version.error_message = task.error_message
+        db.commit()
+        db.refresh(document)
     return ok({
         "document": DocumentRead.model_validate(document).model_dump(mode="json"),
         "async_task_id": task.public_id,
@@ -146,7 +166,16 @@ async def reparse_document(
     settings: AppSettings,
 ) -> dict:
     document = _owned_document(db, document_id, current_user.id)
-    target_version = document.current_version + 1
+    latest_version = db.scalar(
+        select(DocumentVersion.version_no)
+        .where(DocumentVersion.document_id == document.id)
+        .order_by(DocumentVersion.version_no.desc())
+        .limit(1)
+    )
+    # A failed parse is intentionally kept in the version history, while
+    # ``current_version`` continues to point at the latest ready version.
+    # Allocate after both values so retrying cannot reuse an occupied number.
+    target_version = max(document.current_version, latest_version or 0) + 1
     db.add(
         DocumentVersion(
             document_id=document.id,
@@ -165,12 +194,8 @@ async def reparse_document(
     db.add(task)
     db.commit()
     db.refresh(task)
-    if settings.sync_document_processing or db.bind.dialect.name == "sqlite":
-        await process_document(db, document, task, get_llm_provider(settings))
-    else:
-        from backend.app.tasks.jobs import process_document_job
-
-        process_document_job.delay(document.id, task.public_id)
+    await dispatch_async_task(db, task, settings)
+    db.refresh(task)
     return ok({"document_id": document.id, "version": target_version, "async_task_id": task.public_id})
 
 
@@ -252,3 +277,10 @@ def latest_document_task(document_id: int, db: DBSession, current_user: CurrentU
     if task is None:
         raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
     return ok({"task_id": task.public_id, "status": task.status, "progress": task.progress, "current_step": task.current_step})
+
+
+@router.get("/documents/{document_id}/tasks/{task_id}")
+def read_document_task(
+    document_id: int, task_id: str, db: DBSession, current_user: CurrentUser
+) -> dict:
+    return ok(task_payload(_owned_document_task(db, document_id, task_id, current_user.id)))

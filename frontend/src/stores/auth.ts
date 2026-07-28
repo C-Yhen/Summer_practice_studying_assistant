@@ -8,6 +8,7 @@ import {
   unwrapApiResponse,
 } from '@/api/client'
 import type { AuthTokenResponse, AuthUser, BackendUser } from '@/types'
+import { resetSessionExpiryCoordinator, suppressSessionExpiryCoordinator } from '@/api/session-expiry'
 
 const TOKEN_KEY = 'studypilot_token'
 const DEMO_USER_KEY = 'studypilot_demo_user'
@@ -79,6 +80,7 @@ export const useAuthStore = defineStore('auth', () => {
     sessionStorage.setItem(TOKEN_KEY, accessToken)
     if (mockEnabled) sessionStorage.setItem(DEMO_USER_KEY, JSON.stringify(authenticatedUser))
     else sessionStorage.removeItem(DEMO_USER_KEY)
+    resetSessionExpiryCoordinator()
   }
 
   async function waitForDemo() {
@@ -166,8 +168,14 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    suppressSessionExpiryCoordinator()
     clearSession()
     restoreError.value = ''
+  }
+
+  function updateCurrentUser(backendUser: BackendUser) {
+    user.value = toAuthUser(backendUser)
+    if (mockEnabled && user.value) sessionStorage.setItem(DEMO_USER_KEY, JSON.stringify(user.value))
   }
 
   return {
@@ -181,5 +189,6 @@ export const useAuthStore = defineStore('auth', () => {
     register,
     restoreSession,
     logout,
+    updateCurrentUser,
   }
 })

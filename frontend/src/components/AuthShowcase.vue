@@ -15,9 +15,9 @@ import { Check, DataAnalysis, Document, MagicStick } from '@element-plus/icons-v
         <div><span><el-icon><DataAnalysis /></el-icon></span><p><b>可解释能力洞察</b><small>掌握度、推荐理由与趋势一目了然</small></p><el-icon class="check"><Check /></el-icon></div>
       </div>
       <div class="showcase-proof">
-        <div><strong>36</strong><span>知识点持续追踪</span></div>
-        <i></i><div><strong>94%</strong><span>问答引用覆盖率</span></div>
-        <i></i><div><strong>+27%</strong><span>本周学习效率</span></div>
+        <div><strong>可追踪</strong><span>知识点与学习进度</span></div>
+        <i></i><div><strong>可回溯</strong><span>资料问答引用来源</span></div>
+        <i></i><div><strong>可解释</strong><span>学习建议生成依据</span></div>
       </div>
     </div>
   </section>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from pydantic import (
@@ -12,6 +12,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+CURRENT_ONBOARDING_VERSION = 1
 
 
 class APIModel(BaseModel):
@@ -59,16 +61,76 @@ class TokenResponse(BaseModel):
     user: UserRead
 
 
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(item is None for item in value.values()):
+            raise ValueError("explicit null is not allowed")
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def clean_optional_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("display_name cannot be blank")
+        return value
+
+
 class PreferenceUpdate(BaseModel):
-    foundation_level: str = Field(default="basic", max_length=24)
-    learning_order: str = Field(default="explain_first", max_length=24)
-    preferred_difficulty: str = Field(default="basic", max_length=24)
-    preferred_resource_types: list[str] = Field(default_factory=list)
-    session_minutes: int = Field(default=45, ge=15, le=180)
-    daily_minutes: int = Field(default=120, ge=15, le=720)
-    needs_exam_focus: bool = True
-    needs_error_points: bool = True
-    needs_derivation: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    foundation_level: Literal["basic", "intermediate", "advanced"] | None = None
+    learning_order: Literal["explain_first", "weakness_first"] | None = None
+    preferred_difficulty: Literal["basic", "adaptive", "advanced"] | None = None
+    preferred_resource_types: list[Literal["pdf", "ppt", "markdown", "text"]] | None = None
+    session_minutes: int | None = Field(default=None, ge=15, le=180)
+    daily_minutes: int | None = Field(default=None, ge=15, le=720)
+    needs_exam_focus: bool | None = None
+    needs_error_points: bool | None = None
+    needs_derivation: bool | None = None
+    onboarding_seen_version: int | None = Field(
+        default=None, ge=0, le=CURRENT_ONBOARDING_VERSION
+    )
+    onboarding_completed: Literal[True] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_explicit_nulls(cls, value: Any) -> Any:
+        if isinstance(value, dict) and any(item is None for item in value.values()):
+            raise ValueError("explicit null is not allowed")
+        return value
+
+    @field_validator("preferred_resource_types")
+    @classmethod
+    def deduplicate_resource_types(
+        cls, value: list[Literal["pdf", "ppt", "markdown", "text"]] | None
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        return list(dict.fromkeys(value))
+
+
+class PreferenceRead(APIModel):
+    foundation_level: Literal["basic", "intermediate", "advanced"]
+    learning_order: Literal["explain_first", "weakness_first"]
+    preferred_difficulty: Literal["basic", "adaptive", "advanced"]
+    preferred_resource_types: list[Literal["pdf", "ppt", "markdown", "text"]]
+    session_minutes: int
+    daily_minutes: int
+    needs_exam_focus: bool
+    needs_error_points: bool
+    needs_derivation: bool
+    onboarding_seen_version: int
+    onboarding_completed_at: datetime | None
 
 
 class CourseBase(BaseModel):
@@ -101,6 +163,16 @@ class CourseUpdate(BaseModel):
     target_score: int | None = Field(default=None, ge=0, le=100)
     color: str | None = Field(default=None, max_length=20)
     archived: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_course_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("name cannot be blank")
+        return value
 
 
 class ExamDateUpdate(BaseModel):
@@ -214,9 +286,9 @@ class RagSearch(BaseModel):
 class PlanGenerate(BaseModel):
     start_date: date
     end_date: date
-    daily_availability: dict[str, int] = Field(default_factory=lambda: {"default_minutes": 120})
+    daily_availability: dict[str, int] = Field(default_factory=dict)
     unavailable_dates: list[date] = Field(default_factory=list)
-    session_minutes: int = Field(default=45, ge=15, le=180)
+    session_minutes: int | None = Field(default=None, ge=15, le=180)
     goal: str = Field(default="完成课程复习", max_length=500)
 
     @model_validator(mode="after")
@@ -228,11 +300,9 @@ class PlanGenerate(BaseModel):
         self.goal = self.goal.strip()
         if not self.goal:
             raise ValueError("goal cannot be blank")
-        default_minutes = self.daily_availability.get("default_minutes", 120)
-        if not 15 <= default_minutes <= 720:
+        default_minutes = self.daily_availability.get("default_minutes")
+        if default_minutes is not None and not 15 <= default_minutes <= 720:
             raise ValueError("default_minutes must be between 15 and 720")
-        if self.session_minutes > default_minutes:
-            raise ValueError("session_minutes must not exceed default_minutes")
         for raw_date, minutes in self.daily_availability.items():
             if raw_date == "default_minutes":
                 continue
@@ -342,6 +412,24 @@ class DashboardAsyncTask(BaseModel):
     finished_at: datetime | None
 
 
+class DashboardOnboardingItems(BaseModel):
+    course_created: bool
+    document_ready: bool
+    question_asked: bool
+    plan_activated: bool
+    task_completed: bool
+
+
+class DashboardOnboardingProgress(BaseModel):
+    version: int
+    completed_count: int
+    total_count: int
+    is_complete: bool
+    items: DashboardOnboardingItems
+    available_course_id: int | None
+    ready_document_course_id: int | None
+
+
 class DashboardOverview(BaseModel):
     target_date: date
     range_start: date
@@ -356,6 +444,7 @@ class DashboardOverview(BaseModel):
     weak_points: list[DashboardWeakPoint]
     next_action: DashboardNextAction
     recent_async_tasks: list[DashboardAsyncTask]
+    onboarding_progress: DashboardOnboardingProgress
 
 
 class LearningRecordCreate(BaseModel):
@@ -368,16 +457,51 @@ class LearningRecordCreate(BaseModel):
     occurred_at: datetime | None = None
 
 
+class PracticeAttemptCreate(BaseModel):
+    submission_id: str = Field(min_length=8, max_length=64)
+    selected_option: str = Field(min_length=1, max_length=8)
+    elapsed_seconds: int = Field(default=0, ge=0, le=7200)
+
+
+class WrongBookUpdate(BaseModel):
+    status: Literal["mastered", "removed"]
+
+
 class RecommendationFeedback(BaseModel):
     action: Literal["shown", "clicked", "completed", "skipped", "saved"]
     rating: float | None = Field(default=None, ge=1, le=5)
 
 
+class CourseRecommendationFeedback(BaseModel):
+    recommendation_key: str = Field(min_length=1, max_length=160)
+    action: Literal["clicked", "saved", "skipped"]
+
+
+class UserBehaviorTrack(BaseModel):
+    action: str = Field(min_length=1, max_length=32)
+    target_type: str = Field(min_length=1, max_length=32)
+    target_id: str | None = None
+    dwell_seconds: int = Field(default=0, ge=0)
+    weight: float = Field(default=1.0, ge=0.1, le=10.0)
+
+
 class AsyncTaskCreate(BaseModel):
     task_type: str = Field(min_length=1, max_length=64)
-    resource_type: str | None = Field(default=None, max_length=32)
-    resource_id: str | None = Field(default=None, max_length=64)
     input_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class WeeklyReportInput(BaseModel):
+    start_date: date
+    end_date: date
+    course_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> WeeklyReportInput:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 30:
+            raise ValueError("date range must not exceed 31 days")
+        return self
 
 
 class MCPToolCallCreate(BaseModel):
@@ -405,7 +529,49 @@ class CalendarEventCreate(BaseModel):
         return self
 
 
+class CalendarEventUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> CalendarEventUpdate:
+        if self.start_at is not None and self.end_at is not None and self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        if self.title is None and self.start_at is None and self.end_at is None:
+            raise ValueError("at least one event field is required")
+        return self
+
+
+class CalendarPlanSyncRequest(BaseModel):
+    start_date: date
+    end_date: date
+    course_id: int | None = Field(default=None, gt=0)
+    daily_start_time: time
+    gap_minutes: int = Field(default=10, ge=0, le=120)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> CalendarPlanSyncRequest:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 30:
+            raise ValueError("date range must not exceed 31 days")
+        return self
+
+
+class CalendarPlanSyncConfirm(BaseModel):
+    preview: dict[str, Any]
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+
+
+class AIRuntimeStatus(BaseModel):
+    provider: str
+    chat_model: str
+    chat_mode: Literal["remote", "mock"]
+    embedding_mode: Literal["remote", "local"]
+    is_mock: bool

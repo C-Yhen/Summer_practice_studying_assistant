@@ -10,17 +10,22 @@ from backend.app.api.v1.courses import _owned_course
 from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     AsyncTask,
+    Document,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
     StudyPlan,
     StudyPlanVersion,
     StudyTask,
+    UserPreference,
 )
 from backend.app.planning.engine import PlanInput, PlanningPoint, build_plan, reschedule
 from backend.app.responses import ok
 from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, TaskComplete
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
+from backend.app.services.mastery import apply_mastery_evidence
+from backend.app.services.ai_enrichment import queue_ai_enhancement
+from backend.app.services.course_content import persist_extracted_knowledge_points, usable_knowledge_points
 
 router = APIRouter(tags=["study-plans"])
 
@@ -33,6 +38,9 @@ def _owned_plan(db: DBSession, plan_id: int, user_id: int) -> StudyPlan:
 
 
 def _seed_points(db: DBSession, course_id: int) -> list[KnowledgePoint]:
+    """Compatibility name: never create generic points without source material."""
+    return usable_knowledge_points(db, course_id)
+
     points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
     if points:
         return points
@@ -45,6 +53,44 @@ def _seed_points(db: DBSession, course_id: int) -> list[KnowledgePoint]:
         db.add(KnowledgePoint(course_id=course_id, name=name, importance=importance, difficulty=difficulty, estimated_minutes=minutes, prerequisite_ids=dependencies))
     db.flush()
     return list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
+
+
+def _persist_ai_points(
+    db: DBSession, course_id: int, raw_points: list[dict]
+) -> list[KnowledgePoint]:
+    """Persist validated AI-extracted points for downstream practice/mastery flows."""
+    return persist_extracted_knowledge_points(db, course_id, raw_points)
+
+    existing = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
+    if existing:
+        return existing
+
+    points: list[KnowledgePoint] = []
+    for raw in raw_points:
+        name = str(raw.get("name", "")).strip()
+        if not name or len(name) > 160:
+            continue
+        difficulty = str(raw.get("difficulty", "basic")).strip()
+        if difficulty not in {"basic", "intermediate", "advanced"}:
+            difficulty = "basic"
+        try:
+            importance = min(1.0, max(0.0, float(raw.get("importance", 0.5))))
+            estimated_minutes = min(90, max(15, int(raw.get("estimated_minutes", 45))))
+        except (TypeError, ValueError):
+            continue
+        point = KnowledgePoint(
+            course_id=course_id,
+            name=name,
+            description=str(raw.get("description", "")).strip() or None,
+            importance=importance,
+            difficulty=difficulty,
+            estimated_minutes=estimated_minutes,
+            prerequisite_ids=[],
+        )
+        db.add(point)
+        points.append(point)
+    db.flush()
+    return points
 
 
 def _version_payload(version: StudyPlanVersion) -> dict:
@@ -88,7 +134,7 @@ def _plan_payload(plan: StudyPlan, version: StudyPlanVersion) -> dict:
 
 
 @router.post("/courses/{course_id}/study-plans/generate")
-def generate_plan(
+async def generate_plan(
     course_id: int,
     payload: PlanGenerate,
     db: DBSession,
@@ -96,9 +142,15 @@ def generate_plan(
     settings: AppSettings,
 ) -> dict:
     _owned_course(db, course_id, current_user.id)
-    points = _seed_points(db, course_id)
+    preference = db.scalar(
+        select(UserPreference).where(UserPreference.user_id == current_user.id)
+    )
+    if preference is None:
+        preference = UserPreference(user_id=current_user.id)
+        db.add(preference)
+        db.flush()
     masteries = {
-        item.knowledge_point_id: item.score
+        item.knowledge_point_id: item
         for item in db.scalars(
             select(KnowledgeMastery).where(
                 KnowledgeMastery.user_id == current_user.id,
@@ -106,13 +158,65 @@ def generate_plan(
             )
         )
     }
+    daily_override = "default_minutes" in payload.daily_availability
+    session_override = "session_minutes" in payload.model_fields_set
+    daily_minutes = payload.daily_availability.get("default_minutes", preference.daily_minutes)
+    session_minutes = payload.session_minutes if session_override else preference.session_minutes
+    if session_minutes is None or session_minutes > daily_minutes:
+        raise HTTPException(status_code=422, detail="SESSION_MINUTES_EXCEEDS_DAILY_MINUTES")
+    generation_context = {
+        "daily_minutes": daily_minutes,
+        "session_minutes": session_minutes,
+        "foundation_level": preference.foundation_level,
+        "learning_order": preference.learning_order,
+        "preferred_difficulty": preference.preferred_difficulty,
+        "preferred_resource_types": list(preference.preferred_resource_types or []),
+        "needs_exam_focus": preference.needs_exam_focus,
+        "needs_error_points": preference.needs_error_points,
+        "needs_derivation": preference.needs_derivation,
+        "overrides": {"daily_minutes": daily_override, "session_minutes": session_override},
+    }
+
+    # Candidate scheduling is always rule-first, but only with points that can
+    # be traced to ready course material; never invent generic seed labels.
+    points = _seed_points(db, course_id)
+    if not points:
+        ready_document_ids = list(
+            db.scalars(
+                select(Document.id).where(
+                    Document.course_id == course_id,
+                    Document.status == "ready",
+                    Document.is_deleted.is_(False),
+                )
+            )
+        )
+        if not ready_document_ids:
+            raise HTTPException(status_code=422, detail="COURSE_CONTENT_NOT_READY")
+        extraction_task = await queue_ai_enhancement(
+            db,
+            settings,
+            task_type="knowledge_point_extraction",
+            user_id=current_user.id,
+            course_id=course_id,
+            input_data={"document_ids": ready_document_ids},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"KNOWLEDGE_POINTS_PROCESSING:{extraction_task.public_id if extraction_task else ''}",
+        )
     input_data = PlanInput(
         start_date=payload.start_date,
         end_date=payload.end_date,
-        default_daily_minutes=payload.daily_availability.get("default_minutes", 120),
-        session_minutes=payload.session_minutes,
+        default_daily_minutes=daily_minutes,
+        session_minutes=session_minutes,
         unavailable_dates=set(payload.unavailable_dates),
         daily_overrides={date.fromisoformat(key): value for key, value in payload.daily_availability.items() if key != "default_minutes"},
+        foundation_level=preference.foundation_level,
+        learning_order=preference.learning_order,
+        preferred_difficulty=preference.preferred_difficulty,
+        needs_exam_focus=preference.needs_exam_focus,
+        needs_error_points=preference.needs_error_points,
+        needs_derivation=preference.needs_derivation,
     )
     skeleton = build_plan(
         input_data,
@@ -121,32 +225,66 @@ def generate_plan(
                 id=point.id,
                 name=point.name,
                 importance=point.importance,
-                mastery=masteries.get(point.id, 0.3),
+                mastery=masteries[point.id].score if point.id in masteries else None,
+                has_mastery_record=point.id in masteries and masteries[point.id].attempts > 0,
                 estimated_minutes=point.estimated_minutes,
                 difficulty=point.difficulty,
                 prerequisite_ids=point.prerequisite_ids,
+                description=point.description or "",
             )
             for point in points
         ],
     )
+    plan_mode = "rule"
+
+    # Refresh points for task mapping
+    db_points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
+    kp_name_to_id = {p.name: p.id for p in db_points}
+
     try:
         plan = StudyPlan(user_id=current_user.id, course_id=course_id, goal=payload.goal, start_date=payload.start_date, end_date=payload.end_date)
         db.add(plan)
         db.flush()
-        version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason="首次生成", summary=f"共安排 {len(skeleton['tasks'])} 项任务。", risks=skeleton["risks"])
+        summary = skeleton.get("summary") or f"共安排 {len(skeleton['tasks'])} 项任务。"
+        version = StudyPlanVersion(plan_id=plan.id, version=1, status="candidate", reason=f"AI 生成" if plan_mode == "ai" else "首次生成", summary=summary, risks=skeleton.get("risks", []), diff={"generation_context": generation_context, "plan_mode": plan_mode})
         db.add(version)
         db.flush()
         for item in skeleton["tasks"]:
-            db.add(StudyTask(plan_version_id=version.id, user_id=current_user.id, course_id=course_id, knowledge_point_id=item["knowledge_point_id"], scheduled_date=item["scheduled_date"], title=item["title"], task_type=item["task_type"], estimated_minutes=item["estimated_minutes"], priority=item["priority"], difficulty=item["difficulty"]))
-        task = AsyncTask(user_id=current_user.id, task_type="plan_generation", resource_type="study_plan", resource_id=str(plan.id), status="success", progress=100, current_step="completed", result_data={"plan_id": plan.id, "version": 1})
+            kp_id = None
+            if item.get("knowledge_point_id"):
+                kp_id = item["knowledge_point_id"]
+            db.add(StudyTask(plan_version_id=version.id, user_id=current_user.id, course_id=course_id, knowledge_point_id=kp_id, scheduled_date=date.fromisoformat(item["scheduled_date"]) if isinstance(item["scheduled_date"], str) else item["scheduled_date"], title=item["title"], task_type=item.get("task_type", "focused_study"), estimated_minutes=item["estimated_minutes"], priority=item.get("priority", 0.5), difficulty=item.get("difficulty", "basic")))
+        task = AsyncTask(user_id=current_user.id, task_type="plan_generation", resource_type="study_plan", resource_id=str(plan.id), status="success", progress=100, current_step="completed", result_data={"plan_id": plan.id, "version": 1, "plan_mode": plan_mode})
         db.add(task)
         db.commit()
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=500, detail="PLAN_GENERATION_FAILED") from None
     db.refresh(version)
+    ai_task = await queue_ai_enhancement(
+        db,
+        settings,
+        task_type="plan_ai_enhancement",
+        user_id=current_user.id,
+        course_id=course_id,
+        input_data={
+            "plan_id": plan.id,
+            "version": version.version,
+            "goal": plan.goal,
+            "start_date": plan.start_date.isoformat(),
+            "end_date": plan.end_date.isoformat(),
+            "unavailable_dates": [item.isoformat() for item in payload.unavailable_dates],
+            "daily_minutes": daily_minutes,
+            "session_minutes": session_minutes,
+            "foundation_level": preference.foundation_level,
+            "learning_order": preference.learning_order,
+            "preferred_difficulty": preference.preferred_difficulty,
+            "needs_exam_focus": preference.needs_exam_focus,
+            "needs_error_points": preference.needs_error_points,
+        },
+    )
     token = issue_confirmation(settings.jwt_secret, user_id=current_user.id, action="confirm_plan", resource_id=f"{plan.id}:1", payload={"base_version": 0})
-    return ok({"async_task_id": task.public_id, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
+    return ok({"async_task_id": task.public_id, "ai_enhancement_task_id": ai_task.public_id if ai_task else None, "plan_id": plan.id, "course_id": course_id, "goal": plan.goal, "start_date": plan.start_date.isoformat(), "end_date": plan.end_date.isoformat(), "expected_base_version": 0, "candidate_version": _version_payload(version), "confirmation_token": token})
 
 
 @router.get("/courses/{course_id}/study-plans/current")
@@ -305,23 +443,16 @@ def complete_task(task_id: int, payload: TaskComplete, db: DBSession, current_us
     db.add(LearningRecord(user_id=current_user.id, course_id=task.course_id, task_id=task.id, knowledge_point_id=task.knowledge_point_id, duration_seconds=payload.actual_minutes * 60, completed=True))
     mastery_score = None
     if task.knowledge_point_id:
-        mastery = db.scalar(select(KnowledgeMastery).where(KnowledgeMastery.user_id == current_user.id, KnowledgeMastery.knowledge_point_id == task.knowledge_point_id))
-        if mastery is None:
-            mastery = KnowledgeMastery(
-                user_id=current_user.id,
-                course_id=task.course_id,
-                knowledge_point_id=task.knowledge_point_id,
-                score=0.3,
-                confidence=0.2,
-                attempts=0,
-                correct_attempts=0,
-            )
-            db.add(mastery)
-        mastery.score = round(min(1.0, mastery.score + 0.15 * (1 - mastery.score)), 4)
-        mastery.confidence = round(min(1.0, mastery.confidence + 0.1), 4)
-        mastery.attempts += 1
-        mastery.correct_attempts += 1
-        mastery.last_studied_at = task.completed_at
+        mastery = apply_mastery_evidence(
+            db,
+            user_id=current_user.id,
+            course_id=task.course_id,
+            knowledge_point_id=task.knowledge_point_id,
+            correct=True,
+            score_strength=0.15,
+            confidence_strength=0.1,
+            occurred_at=task.completed_at,
+        )
         mastery_score = mastery.score
     try:
         db.commit()

@@ -11,6 +11,14 @@ export interface Course {
   targetScore: number
 }
 
+export interface AIRuntimeStatus {
+  provider: string
+  chat_model: string
+  chat_mode: 'remote' | 'mock'
+  embedding_mode: 'remote' | 'local'
+  is_mock: boolean
+}
+
 export interface BackendCourse {
   id: number
   owner_id: number
@@ -32,6 +40,15 @@ export interface BackendCourseListResponse {
 
 export interface CourseCreateRequest {
   name: string
+  code?: string | null
+  description?: string | null
+  exam_date?: string | null
+  target_score?: number
+  color?: string | null
+}
+
+export interface CourseUpdateRequest {
+  name?: string
   code?: string | null
   description?: string | null
   exam_date?: string | null
@@ -80,17 +97,201 @@ export interface DocumentUploadResponse {
   async_task_id: string
 }
 
+export interface DocumentReparseResponse {
+  document_id: number
+  version: number
+  async_task_id: string
+}
+
+export interface KnowledgeMasteryItem {
+  knowledge_point_id: number
+  knowledge_point: string
+  score: number | null
+  confidence: number | null
+  attempts: number
+  trend: string | null
+  has_record: boolean
+}
+
+export interface KnowledgeMasteryResponse {
+  items: KnowledgeMasteryItem[]
+}
+
+export interface LearningRecordItem {
+  id: number
+  task_id: number | null
+  task_title: string | null
+  knowledge_point_id: number | null
+  knowledge_point: string | null
+  record_type: string
+  duration_seconds: number
+  completed: boolean
+  occurred_at: string
+}
+
+export interface LearningRecordListResponse {
+  items: LearningRecordItem[]
+  total: number
+  summary: { minutes: number }
+}
+
+export type RecommendationType = 'study_task' | 'mastery_review' | 'course_chat' | 'create_plan' | 'upload_document' | 'weekly_report'
+export type RecommendationCategory = 'all' | 'task' | 'mastery' | 'resource' | 'plan' | 'report'
+export type RecommendationFeedbackAction = 'clicked' | 'saved' | 'skipped'
+
+export interface RecommendationSignal {
+  code: string
+  label: string
+  value: number
+  contribution: number
+}
+
+export interface CourseRecommendationItem {
+  recommendation_key: string
+  item_type: RecommendationType
+  category: Exclude<RecommendationCategory, 'all'>
+  category_label: string
+  item_id: number
+  course_id: number
+  title: string
+  subtitle: string
+  score: number
+  reason: string
+  estimated_minutes: number | null
+  knowledge_point: { id: number; name: string; score: number; attempts: number } | null
+  signals: RecommendationSignal[]
+  score_breakdown: Record<string, number>
+  action: { type: string; label: string }
+}
+
+export interface CourseRecommendationsResponse {
+  course: { id: number; name: string }
+  target_date: string
+  algorithm_version: string
+  strategy_summary: string
+  items: CourseRecommendationItem[]
+  category_counts: Record<RecommendationCategory, number>
+  selection: { mode: 'diverse' | 'category'; returned: number; candidate_total: number }
+  ai_enhancement?: {
+    task_id: string
+    status: 'queued' | 'processing' | 'success' | 'failed' | 'cancelled'
+    current_step: string | null
+    summary: string | null
+    suggestions: unknown[]
+    failure_type: string | null
+  } | null
+}
+
+export interface RecommendationHistoryItem {
+  record_id: number
+  item_type: RecommendationType
+  category: Exclude<RecommendationCategory, 'all'>
+  category_label: string
+  item_id: number
+  title: string
+  score: number
+  reason: string
+  feedback_action: RecommendationFeedbackAction | null
+  created_at: string
+}
+
+export interface RecommendationHistoryResponse {
+  items: RecommendationHistoryItem[]
+  total: number
+  metrics: Record<RecommendationFeedbackAction, number>
+}
+
 export interface BackendAsyncTask {
   task_id: string
   task_type: string
+  resource_type: string | null
+  resource_id: string | null
   status: string
   progress: number
   current_step: string | null
+  input_data: Record<string, unknown>
   result_data: Record<string, unknown> | null
   error_message: string | null
   retry_count: number
   cancel_requested: boolean
   created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  can_cancel: boolean
+  can_retry: boolean
+}
+
+export interface AsyncTaskListParams {
+  status?: string
+  task_type?: string
+  limit?: number
+  offset?: number
+}
+
+export interface AsyncTaskListResponse {
+  items: BackendAsyncTask[]
+  total: number
+}
+
+export interface WeeklyReportRequest {
+  start_date: string
+  end_date: string
+  course_id?: number | null
+}
+
+export interface WeeklyReportDailyItem {
+  date: string
+  learning_minutes: number
+  scheduled_tasks: number
+  completed_tasks: number
+}
+
+export interface WeeklyReportCourseBreakdown {
+  course_id: number
+  course_name: string
+  learning_minutes: number
+  scheduled_tasks: number
+  completed_tasks: number
+  completion_rate: number
+}
+
+export interface WeeklyReportWeakPoint {
+  knowledge_point: string
+  score: number
+  knowledge_point_id?: number
+  course_id?: number
+  course_name?: string
+  attempts?: number
+  confidence?: number
+}
+
+export interface WeeklyReportResult {
+  range_start: string
+  range_end: string
+  total_learning_minutes: number
+  study_days: number
+  scheduled_tasks: number
+  completed_tasks: number
+  completion_rate: number
+  weak_points: WeeklyReportWeakPoint[]
+  summary: string
+  report_schema_version?: number
+  timezone?: string
+  scope_label?: string
+  course_names?: string[]
+  daily?: WeeklyReportDailyItem[]
+  course_breakdown?: WeeklyReportCourseBreakdown[]
+}
+
+export function normalizeWeeklyReport(value: Record<string, unknown> | null): WeeklyReportResult | null {
+  if (!value || typeof value.range_start !== 'string' || typeof value.range_end !== 'string' || typeof value.summary !== 'string') return null
+  const number = (key: string) => typeof value[key] === 'number' ? value[key] : 0
+  const weakPoints = Array.isArray(value.weak_points) ? value.weak_points.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object').filter(item => typeof item.knowledge_point === 'string').map(item => ({ knowledge_point: String(item.knowledge_point), score: typeof item.score === 'number' ? item.score : 0, ...(typeof item.knowledge_point_id === 'number' ? { knowledge_point_id: item.knowledge_point_id } : {}), ...(typeof item.course_id === 'number' ? { course_id: item.course_id } : {}), ...(typeof item.course_name === 'string' ? { course_name: item.course_name } : {}), ...(typeof item.attempts === 'number' ? { attempts: item.attempts } : {}), ...(typeof item.confidence === 'number' ? { confidence: item.confidence } : {}) })) : []
+  const daily = Array.isArray(value.daily) ? value.daily.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && typeof item.date === 'string').map(item => ({ date: String(item.date), learning_minutes: typeof item.learning_minutes === 'number' ? item.learning_minutes : 0, scheduled_tasks: typeof item.scheduled_tasks === 'number' ? item.scheduled_tasks : 0, completed_tasks: typeof item.completed_tasks === 'number' ? item.completed_tasks : 0 })) : undefined
+  const breakdown = Array.isArray(value.course_breakdown) ? value.course_breakdown.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && typeof item.course_id === 'number' && typeof item.course_name === 'string').map(item => ({ course_id: Number(item.course_id), course_name: String(item.course_name), learning_minutes: typeof item.learning_minutes === 'number' ? item.learning_minutes : 0, scheduled_tasks: typeof item.scheduled_tasks === 'number' ? item.scheduled_tasks : 0, completed_tasks: typeof item.completed_tasks === 'number' ? item.completed_tasks : 0, completion_rate: typeof item.completion_rate === 'number' ? item.completion_rate : 0 })) : undefined
+  const courseNames = Array.isArray(value.course_names) ? value.course_names.filter((item): item is string => typeof item === 'string') : undefined
+  return { range_start: value.range_start, range_end: value.range_end, total_learning_minutes: number('total_learning_minutes'), study_days: number('study_days'), scheduled_tasks: number('scheduled_tasks'), completed_tasks: number('completed_tasks'), completion_rate: number('completion_rate'), weak_points: weakPoints, summary: value.summary, ...(typeof value.report_schema_version === 'number' ? { report_schema_version: value.report_schema_version } : {}), ...(typeof value.timezone === 'string' ? { timezone: value.timezone } : {}), ...(typeof value.scope_label === 'string' ? { scope_label: value.scope_label } : {}), ...(courseNames ? { course_names: courseNames } : {}), ...(daily ? { daily } : {}), ...(breakdown ? { course_breakdown: breakdown } : {}) }
 }
 
 export interface LatestDocumentTaskResponse {
@@ -168,11 +369,18 @@ export interface ChatMessageListResponse {
 export interface StudyPlanGenerateRequest {
   start_date: string
   end_date: string
-  daily_availability: Record<string, number>
+  daily_availability?: Record<string, number>
   unavailable_dates?: string[]
-  session_minutes: number
+  session_minutes?: number
   goal: string
 }
+
+export interface PracticeOption { key: string; text: string }
+export interface PracticeQuestion { id:number; knowledge_point_id:number|null; knowledge_point:string|null; question_type:string; stem:string; options:PracticeOption[]; difficulty:string; origin:string; source_document_id:number|null; source_page_number:number|null; source_quote:string|null }
+export interface PracticeSummary { total_attempts:number; correct_attempts:number; wrong_attempts:number; accuracy:number; pending_wrong_count:number; knowledge_point_count:number }
+export interface PracticeAttemptRequest { submission_id:string; selected_option:string; elapsed_seconds:number }
+export interface PracticeAttemptResult extends PracticeQuestion { attempt_id:number; question_id:number; selected_option:string; is_correct:boolean; correct_option:string; explanation:string; mastery_score:number|null; wrong_book_updated:boolean; summary:PracticeSummary; idempotent_replay:boolean }
+export interface WrongBookEntry { id:number; status:'pending'|'mastered'|'removed'; wrong_count:number; last_selected_option:string; last_wrong_at:string; question:PracticeQuestion & {correct_option:string;explanation:string}; mastery_score:number|null }
 
 export interface StudyPlanTask {
   id: number
@@ -207,6 +415,7 @@ export interface StudyPlanGenerateResponse {
   expected_base_version: number
   candidate_version: StudyPlanVersion
   confirmation_token: string
+  ai_enhancement_task_id?: string | null
 }
 
 export interface CurrentStudyPlanResponse extends StudyPlanVersion {
@@ -343,6 +552,24 @@ export interface DashboardAsyncTask {
   finished_at: string | null
 }
 
+export interface DashboardOnboardingItems {
+  course_created: boolean
+  document_ready: boolean
+  question_asked: boolean
+  plan_activated: boolean
+  task_completed: boolean
+}
+
+export interface DashboardOnboardingProgress {
+  version: number
+  completed_count: number
+  total_count: number
+  is_complete: boolean
+  items: DashboardOnboardingItems
+  available_course_id: number | null
+  ready_document_course_id: number | null
+}
+
 export interface DashboardOverview {
   target_date: string
   range_start: string
@@ -357,6 +584,7 @@ export interface DashboardOverview {
   weak_points: DashboardWeakPoint[]
   next_action: DashboardNextAction
   recent_async_tasks: DashboardAsyncTask[]
+  onboarding_progress: DashboardOnboardingProgress
 }
 
 export type TaskStatus = 'todo' | 'doing' | 'done'
@@ -409,6 +637,45 @@ export interface BackendUser {
   updated_at: string
 }
 
+export type FoundationLevel = 'basic' | 'intermediate' | 'advanced'
+export type LearningOrder = 'explain_first' | 'weakness_first'
+export type PreferredDifficulty = 'basic' | 'adaptive' | 'advanced'
+export type PreferredResourceType = 'pdf' | 'ppt' | 'markdown' | 'text'
+
+export interface UserPreferences {
+  foundation_level: FoundationLevel
+  learning_order: LearningOrder
+  preferred_difficulty: PreferredDifficulty
+  preferred_resource_types: PreferredResourceType[]
+  session_minutes: number
+  daily_minutes: number
+  needs_exam_focus: boolean
+  needs_error_points: boolean
+  needs_derivation: boolean
+  onboarding_seen_version: number
+  onboarding_completed_at: string | null
+}
+
+export type UserPreferencesUpdate = Partial<Omit<
+  UserPreferences,
+  'onboarding_seen_version' | 'onboarding_completed_at'
+>>
+
+export interface OnboardingProgressUpdate {
+  onboarding_seen_version: number
+  onboarding_completed?: true
+}
+
+export interface UserProfileResponse {
+  user: BackendUser
+  preferences: UserPreferences
+}
+
+export interface UserProfileUpdate {
+  display_name?: string
+  timezone?: string
+}
+
 export interface AuthUser {
   id: number
   email: string
@@ -426,3 +693,24 @@ export interface AuthTokenResponse {
   expires_in: number
   user: BackendUser
 }
+
+export interface StatisticsDailyPoint { date:string; actual_learning_seconds:number; planned_minutes:number; task_total:number; task_completed:number; practice_attempts:number; practice_correct:number; practice_accuracy:number|null }
+export interface StatisticsCourseDistribution { course_id:number; course_name:string; learning_seconds:number; percentage:number }
+export interface StatisticsHeatmapDay { date:string; learning_seconds:number }
+export interface StatisticsEfficientPeriod { label:string; start_hour:number; end_hour:number; attempts:number; correct:number; accuracy:number }
+export interface StatisticsInsight { code:string; title:string; detail:string; evidence:Record<string, unknown>|string }
+export interface StatisticsOverview { range:{start_date:string;end_date:string;days:number;timezone:string}; scope:{course_id:number|null;course_name:string|null}; summary:{total_learning_seconds:number;previous_total_learning_seconds:number|null;learning_seconds_change:number|null;learning_days:number;longest_streak_days:number;task_total:number;task_completed:number;task_completion_rate:number|null;previous_task_completion_rate:number|null;task_completion_rate_change:number|null;practice_attempts:number;practice_correct:number;practice_wrong:number;practice_accuracy:number|null;previous_practice_accuracy:number|null;practice_accuracy_change:number|null;efficient_period:StatisticsEfficientPeriod|null}; daily:StatisticsDailyPoint[]; course_distribution:StatisticsCourseDistribution[]; heatmap:StatisticsHeatmapDay[]; insights:StatisticsInsight[] }
+
+export interface CalendarEventItem { id:number; title:string; start_at:string; end_at:string; provider:string; sync_status:string; study_task_id:number|null; course_id:number|null; course_name:string|null; task_type:string|null; created_at:string; updated_at:string }
+export interface CalendarEventListResponse { items:CalendarEventItem[]; total:number; timezone:string }
+export interface CalendarAvailabilitySlot { start_at:string; end_at:string; source:string }
+export interface CalendarPlanSyncRequest { start_date:string; end_date:string; course_id?:number; daily_start_time:string; gap_minutes:number }
+export interface CalendarPlanSyncPreviewItem { task_id:number; course_id:number; course_name:string; title:string; task_type:string; scheduled_date:string; estimated_minutes:number; start_at:string; end_at:string; status:'ready'|'conflict'|'already_synced'|'outside_day'; reason:string|null; conflict_with:{event_id:number;title:string;start_at:string;end_at:string}|null; existing_event_id:number|null; idempotency_key:string }
+export interface CalendarPlanSyncPreview { timezone:string; scope:CalendarPlanSyncRequest; items:CalendarPlanSyncPreviewItem[]; ready_count:number; conflict_count:number; already_synced_count:number; outside_day_count:number; confirmation_token:string; expires_in_seconds:number }
+export interface CalendarPlanSyncConfirmResult { created_count:number; replayed_count:number; event_ids:number[]; items:CalendarPlanSyncPreviewItem[]; idempotent_replay:boolean }
+export interface CalendarEventCreateRequest { title:string; start_at:string; end_at:string; study_task_id?:number|null; idempotency_key?:string }
+export interface CalendarEventUpdateRequest { title?:string; start_at?:string; end_at?:string }
+export interface CalendarEventPreview { status:string; preview:Record<string, unknown>; confirmation_token:string; expires_in_seconds?:number }
+export interface MCPToolInfo { name:string; is_write:boolean; requires_confirmation:boolean; description:string }
+export interface MCPToolCallItem { id:number; agent_run_id:string; tool_name:string; status:string; duration_ms:number; error_message:string|null; created_at:string }
+export interface MCPToolCallListResponse { items:MCPToolCallItem[]; total:number }

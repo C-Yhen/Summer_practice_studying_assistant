@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
@@ -12,6 +11,9 @@ from backend.app.models import (
     AsyncTask,
     Course,
     Document,
+    DocumentVersion,
+    ChatMessage,
+    ChatSession,
     KnowledgeMastery,
     KnowledgePoint,
     LearningRecord,
@@ -21,21 +23,10 @@ from backend.app.models import (
 )
 from backend.app.responses import ok
 from backend.app.schemas import DashboardOverview
+from backend.app.services.timezones import as_utc, local_date_range_utc, resolve_user_timezone
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-
-
-def _user_timezone(name: str) -> tuple[ZoneInfo | timezone, str]:
-    try:
-        return ZoneInfo(name), name
-    except (ZoneInfoNotFoundError, ValueError):
-        # Records are stored in UTC. UTC is the explicit fallback for an invalid saved timezone.
-        return timezone.utc, "UTC"
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _focus_course(
@@ -105,7 +96,77 @@ def dashboard_overview(
             .group_by(Document.course_id)
         )
     }
-    ready_document_count = sum(ready_counts.values())
+
+    # This is deliberately a compact, read-only aggregate.  The checklist is
+    # based on persisted user activity, never on a client-side dismissal.
+    course_created = bool(
+        db.scalar(select(Course.id).where(Course.owner_id == current_user.id).limit(1))
+    )
+    ready_document_course_id = db.scalar(
+        select(Document.course_id)
+        .join(Course, Course.id == Document.course_id)
+        .join(
+            DocumentVersion,
+            (DocumentVersion.document_id == Document.id)
+            & (DocumentVersion.version_no == Document.current_version),
+        )
+        .where(
+            Course.owner_id == current_user.id,
+            Course.archived.is_(False),
+            Document.is_deleted.is_(False),
+            DocumentVersion.status == "ready",
+        )
+        .order_by(Document.updated_at.desc(), Document.id.desc())
+        .limit(1)
+    )
+    document_ready = ready_document_course_id is not None
+    question_asked = bool(
+        db.scalar(
+            select(ChatMessage.id)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(ChatSession.user_id == current_user.id, ChatMessage.role == "user")
+            .limit(1)
+        )
+    )
+    plan_activated = bool(
+        db.scalar(
+            select(StudyPlanVersion.id)
+            .join(StudyPlan, StudyPlan.id == StudyPlanVersion.plan_id)
+            .where(
+                StudyPlan.user_id == current_user.id,
+                StudyPlan.status == "active",
+                StudyPlanVersion.status == "active",
+                StudyPlan.active_version == StudyPlanVersion.version,
+            )
+            .limit(1)
+        )
+    )
+    task_completed = bool(
+        db.scalar(
+            select(StudyTask.id)
+            .where(StudyTask.user_id == current_user.id, StudyTask.status == "completed")
+            .limit(1)
+        )
+    ) or bool(
+        db.scalar(
+            select(LearningRecord.id)
+            .where(LearningRecord.user_id == current_user.id, LearningRecord.completed.is_(True))
+            .limit(1)
+        )
+    )
+    onboarding_items = {
+        "course_created": course_created,
+        "document_ready": document_ready,
+        "question_asked": question_asked,
+        "plan_activated": plan_activated,
+        "task_completed": task_completed,
+    }
+    ready_document_count = (
+        ready_counts.get(focus.id, 0)
+        if course_id is not None and focus is not None
+        else sum(ready_counts.values())
+    )
+    scoped_course_count = 1 if course_id is not None and focus is not None else len(courses)
 
     task_scope = [
         StudyTask.user_id == current_user.id,
@@ -135,11 +196,8 @@ def dashboard_overview(
     today_total = len(today_tasks)
     today_completion_rate = len(completed_today) / today_total if today_total else 0.0
 
-    user_zone, timezone_name = _user_timezone(current_user.timezone)
-    range_start_utc = datetime.combine(range_start, time.min, user_zone).astimezone(timezone.utc)
-    range_end_utc = datetime.combine(
-        target_date + timedelta(days=1), time.min, user_zone
-    ).astimezone(timezone.utc)
+    user_zone, timezone_name = resolve_user_timezone(current_user.timezone)
+    range_start_utc, range_end_utc = local_date_range_utc(range_start, target_date, user_zone)
     record_scope = [
         LearningRecord.user_id == current_user.id,
         LearningRecord.completed.is_(True),
@@ -151,7 +209,7 @@ def dashboard_overview(
     records = list(db.scalars(select(LearningRecord).where(*record_scope)))
     learning_seconds_by_day: dict[date, int] = defaultdict(int)
     for record in records:
-        local_day = _as_utc(record.occurred_at).astimezone(user_zone).date()
+        local_day = as_utc(record.occurred_at).astimezone(user_zone).date()
         learning_seconds_by_day[local_day] += record.duration_seconds
 
     mastery_scope = [KnowledgeMastery.user_id == current_user.id]
@@ -263,7 +321,7 @@ def dashboard_overview(
         range_start=range_start,
         range_end=target_date,
         timezone=timezone_name,
-        course_count=len(courses),
+        course_count=scoped_course_count,
         ready_document_count=ready_document_count,
         focus_course={
             "id": focus.id,
@@ -304,7 +362,7 @@ def dashboard_overview(
             "today_focus_minutes": round(learning_seconds_by_day[target_date] / 60),
             "today_completion_rate": round(today_completion_rate, 4),
             "average_mastery": average_mastery,
-            "active_course_count": len(courses),
+            "active_course_count": scoped_course_count,
             "ready_document_count": ready_document_count,
             "study_days_in_range": sum(seconds > 0 for seconds in learning_seconds_by_day.values()),
         },
@@ -323,5 +381,14 @@ def dashboard_overview(
             }
             for task in recent_async_tasks
         ],
+        onboarding_progress={
+            "version": 1,
+            "completed_count": sum(onboarding_items.values()),
+            "total_count": len(onboarding_items),
+            "is_complete": all(onboarding_items.values()),
+            "items": onboarding_items,
+            "available_course_id": courses[0].id if courses else None,
+            "ready_document_course_id": ready_document_course_id,
+        },
     )
     return ok(response.model_dump(mode="json"))

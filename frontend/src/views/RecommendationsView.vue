@@ -1,43 +1,405 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Clock, Document, MagicStick, Reading, Star, View } from '@element-plus/icons-vue'
+import { Refresh, Star } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
+import { asyncTaskApi, courseApi, recommendationApi } from '@/api/services'
+import type {
+  CourseListItem,
+  CourseRecommendationItem,
+  CourseRecommendationsResponse,
+  RecommendationCategory,
+  RecommendationFeedbackAction,
+  RecommendationHistoryResponse,
+} from '@/types'
 
-const activeTab = ref('all')
-const resources = [
-  { id: 1, kind: '资料', icon: 'PDF', title: '函数依赖：从定义到属性闭包', source: '数据库课程讲义 · 第 32–39 页', duration: '35 分钟', match: 96, level: '基础', reason: '你的“函数依赖”掌握度仅 52%，它是第三范式的前置知识。', evidence: ['薄弱点匹配', '计划任务需要', '内容难度适合'], color: 'red' },
-  { id: 2, kind: '练习', icon: '10题', title: '第三范式专项练习', source: 'AI 基于近 3 次错题生成', duration: '18 分钟', match: 92, level: '中等', reason: '最近 5 道范式题中有 3 道因传递依赖判断错误而失分。', evidence: ['错题相似度 89%', '考试高频', '预计提升 12%'], color: 'purple' },
-  { id: 3, kind: '资料', icon: 'PPT', title: '事务隔离级别图解', source: '数据库课程讲义 · 第 8 章', duration: '22 分钟', match: 87, level: '基础', reason: '事务并发掌握度 58%，且该内容将在 3 天后的模拟测验中出现。', evidence: ['掌握度偏低', '近期计划', '章节关联'], color: 'orange' },
-  { id: 4, kind: '练习', icon: '8题', title: '候选码与属性闭包强化', source: '题库精选 · 动态难度', duration: '15 分钟', match: 85, level: '进阶', reason: '完成这组练习将补齐范式判断的关键前置能力。', evidence: ['知识依赖', '错误模式匹配', '短时高收益'], color: 'green' },
-  { id: 5, kind: '资料', icon: 'MD', title: '索引优化期末速记', source: '期末复习重点 · 第 4 节', duration: '12 分钟', match: 78, level: '复习', reason: '你的索引掌握度较好，适合在考前用短时间完成一次巩固。', evidence: ['间隔复习到期', '时间适配', '高频考点'], color: 'blue' },
-  { id: 6, kind: '练习', icon: '20题', title: '数据库综合模拟卷一', source: '历年题型重组', duration: '60 分钟', match: 74, level: '综合', reason: '建议完成基础补弱后用于检验整体复习成效。', evidence: ['目标 90 分', '覆盖面广', '考前 7 天'], color: 'purple' },
+const route = useRoute()
+const router = useRouter()
+const courses = ref<CourseListItem[]>([])
+const courseId = ref<number | null>(null)
+const category = ref<RecommendationCategory>('all')
+const result = ref<CourseRecommendationsResponse | null>(null)
+const loading = ref(false)
+const coursesLoading = ref(false)
+const courseLoadError = ref('')
+const recommendationError = ref('')
+const routeError = ref('')
+const feedbackBusyKeys = ref<Set<string>>(new Set())
+const actionBusyKey = ref<string | null>(null)
+const feedbackState = ref<Record<string, 'saved' | 'skipped'>>({})
+const historyVisible = ref(false)
+const history = ref<RecommendationHistoryResponse | null>(null)
+const historyLoading = ref(false)
+const historyRefreshing = ref(false)
+let requestVersion = 0
+let historyRequestVersion = 0
+let viewActive = true
+let aiPollTimer: ReturnType<typeof setTimeout> | null = null
+let aiPollVersion = 0
+const aiPollingTimedOut = ref(false)
+
+const categoryOptions: { value: RecommendationCategory; label: string; empty: string }[] = [
+  { value: 'all', label: '综合', empty: '当前没有可执行的下一步建议' },
+  { value: 'task', label: '学习任务', empty: '当前没有待完成的近期学习任务' },
+  { value: 'mastery', label: '薄弱点复习', empty: '暂无有真实学习记录的薄弱知识点' },
+  { value: 'resource', label: '资料与问答', empty: '当前没有资料或问答相关建议' },
+  { value: 'plan', label: '学习计划', empty: '当前已有生效计划，无需再次创建' },
+  { value: 'report', label: '学习复盘', empty: '最近 7 天暂无学习记录，暂不建议生成周报' },
 ]
-function feedback(type: string) { ElMessage.success(type === 'like' ? '已记录：这个推荐对你有帮助' : '已减少相似内容推荐') }
+const selectedCourse = computed(() => courses.value.find((course) => course.id === courseId.value) || null)
+const selectedCategory = computed(() => categoryOptions.find((item) => item.value === category.value) || categoryOptions[0])
+const items = computed(() => result.value?.items || [])
+const aiSuggestions = computed(() => (result.value?.ai_enhancement?.suggestions || []).flatMap((value) => {
+  if (typeof value === 'string' && value.trim()) return [{ title: value.trim(), reason: '', estimatedMinutes: null as number | null, priority: null as number | null }]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  const item = value as Record<string, unknown>
+  const title = typeof item.title === 'string' ? item.title.trim() : ''
+  const reason = typeof item.reason === 'string' ? item.reason.trim() : ''
+  if (!title || !reason) return []
+  return [{
+    title,
+    reason,
+    estimatedMinutes: typeof item.estimated_minutes === 'number' ? item.estimated_minutes : null,
+    priority: typeof item.priority === 'number' ? item.priority : null,
+  }]
+}))
+
+function stopAiPolling() {
+  aiPollVersion += 1
+  if (aiPollTimer) clearTimeout(aiPollTimer)
+  aiPollTimer = null
+  aiPollingTimedOut.value = false
+}
+
+function watchAiEnhancement(taskId: string, sourceCourseId: number, sourceCategory: RecommendationCategory) {
+  stopAiPolling()
+  const version = aiPollVersion
+  let attempts = 0
+  const poll = async () => {
+    attempts += 1
+    try {
+      const task = await asyncTaskApi.get(taskId)
+      if (!viewActive || version !== aiPollVersion || courseId.value !== sourceCourseId || category.value !== sourceCategory) return
+      if (task.status === 'success') {
+        await loadRecommendations()
+        return
+      }
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        if (result.value?.ai_enhancement?.task_id === taskId) {
+          result.value.ai_enhancement.status = task.status
+          result.value.ai_enhancement.failure_type = task.error_message
+        }
+        return
+      }
+      if (attempts >= 40) {
+        aiPollingTimedOut.value = true
+        return
+      }
+      aiPollTimer = setTimeout(() => { void poll() }, 1500)
+    } catch {
+      if (viewActive && version === aiPollVersion && attempts < 40) aiPollTimer = setTimeout(() => { void poll() }, 1500)
+      else aiPollingTimedOut.value = true
+    }
+  }
+  void poll()
+}
+
+function pageError(value: unknown, fallback: string) {
+  return isUnauthorizedError(value) ? '登录状态已失效，请重新登录' : getApiErrorMessage(value, fallback)
+}
+
+function queryValue(key: 'courseId' | 'category') {
+  const raw = route.query[key]
+  return Array.isArray(raw) ? raw[0] : raw
+}
+
+function requestedCourseId(): { present: boolean; value: number | null } {
+  const raw = queryValue('courseId')
+  if (raw === undefined) return { present: false, value: null }
+  const parsed = typeof raw === 'string' ? Number(raw) : NaN
+  return { present: true, value: Number.isInteger(parsed) && parsed > 0 ? parsed : null }
+}
+
+function requestedCategory(): { value: RecommendationCategory; valid: boolean } {
+  const raw = queryValue('category')
+  if (raw === undefined) return { value: 'all', valid: true }
+  return categoryOptions.some((item) => item.value === raw)
+    ? { value: raw as RecommendationCategory, valid: true }
+    : { value: 'all', valid: false }
+}
+
+function recommendationQuery(id: number | null, nextCategory: RecommendationCategory) {
+  const query: Record<string, string> = {}
+  if (id !== null) query.courseId = String(id)
+  if (nextCategory !== 'all') query.category = nextCategory
+  return query
+}
+
+async function loadCourses() {
+  courseLoadError.value = ''
+  coursesLoading.value = true
+  try {
+    courses.value = (await courseApi.list()).items.filter((course) => !course.archived)
+  } catch (value) {
+    courseLoadError.value = pageError(value, '课程列表加载失败')
+  } finally {
+    coursesLoading.value = false
+  }
+}
+
+async function loadRecommendations() {
+  const id = courseId.value
+  const requestedCategory = category.value
+  const version = ++requestVersion
+  result.value = null
+  recommendationError.value = ''
+  if (id === null) return
+  loading.value = true
+  try {
+    const loaded = await recommendationApi.list(id, { category: requestedCategory, limit: 6 })
+    if (version === requestVersion && courseId.value === id && category.value === requestedCategory) {
+      result.value = loaded
+      const enhancement = loaded.ai_enhancement
+      if (enhancement && (enhancement.status === 'queued' || enhancement.status === 'processing')) {
+        watchAiEnhancement(enhancement.task_id, id, requestedCategory)
+      } else {
+        stopAiPolling()
+      }
+    }
+  } catch (value) {
+    if (version === requestVersion) recommendationError.value = pageError(value, '推荐加载失败')
+  } finally {
+    if (version === requestVersion) loading.value = false
+  }
+}
+
+async function synchronizeRoute() {
+  if (coursesLoading.value) return
+  const requestedCourse = requestedCourseId()
+  const requestedFilter = requestedCategory()
+  let nextCourse: number | null = null
+
+  if (requestedCourse.present) {
+    if (requestedCourse.value === null || !courses.value.some((course) => course.id === requestedCourse.value)) {
+      courseId.value = null
+      result.value = null
+      recommendationError.value = ''
+      routeError.value = '课程不存在、已归档或无权访问'
+      return
+    }
+    nextCourse = requestedCourse.value
+  } else if (courses.value[0]) {
+    nextCourse = courses.value[0].id
+  }
+
+  const desiredQuery = recommendationQuery(nextCourse, requestedFilter.value)
+  const routeHasDesiredCourse = queryValue('courseId') === desiredQuery.courseId
+  const routeHasDesiredCategory = (queryValue('category') || undefined) === desiredQuery.category
+  if (!requestedFilter.valid || !routeHasDesiredCourse || !routeHasDesiredCategory) {
+    await router.replace({ name: 'recommendations', query: desiredQuery })
+    return
+  }
+
+  const courseChanged = courseId.value !== nextCourse
+  courseId.value = nextCourse
+  category.value = requestedFilter.value
+  routeError.value = ''
+  if (courseChanged) {
+    stopAiPolling()
+    feedbackState.value = {}
+    feedbackBusyKeys.value = new Set()
+    actionBusyKey.value = null
+    history.value = null
+    historyVisible.value = false
+    historyLoading.value = false
+    historyRefreshing.value = false
+    historyRequestVersion += 1
+  }
+  await loadRecommendations()
+}
+
+async function retryCourses() {
+  await loadCourses()
+  if (!courseLoadError.value) await synchronizeRoute()
+}
+
+async function retryRecommendations() {
+  if (courseId.value !== null) await loadRecommendations()
+}
+
+function clearRecommendationState() {
+  requestVersion += 1
+  result.value = null
+  recommendationError.value = ''
+}
+
+async function selectCourse(id: number | null) {
+  clearRecommendationState()
+  await router.replace({ name: 'recommendations', query: recommendationQuery(id, category.value) })
+}
+
+async function selectCategory(nextCategory: RecommendationCategory) {
+  if (courseId.value === null) return
+  clearRecommendationState()
+  await router.replace({ name: 'recommendations', query: recommendationQuery(courseId.value, nextCategory) })
+}
+
+function routeFor(item: CourseRecommendationItem) {
+  const courseQuery = { courseId: String(item.course_id) }
+  const map: Record<string, { name: string; query?: Record<string, string> }> = {
+    open_today_tasks: { name: 'today', query: { ...courseQuery, taskId: String(item.item_id) } },
+    open_mastery: { name: 'mastery', query: courseQuery },
+    open_chat: { name: 'chat', query: courseQuery },
+    open_plan: { name: 'plan', query: courseQuery },
+    open_upload: { name: 'upload', query: courseQuery },
+    open_async_tasks: { name: 'tasks' },
+  }
+  return map[item.action.type] || null
+}
+
+async function refreshHistory(initial = false) {
+  if (courseId.value === null) return
+  if (historyLoading.value || historyRefreshing.value) return
+  const id = courseId.value
+  const version = ++historyRequestVersion
+  if (initial) historyLoading.value = true
+  else historyRefreshing.value = true
+  try {
+    const loaded = await recommendationApi.history(id)
+    if (viewActive && version === historyRequestVersion && courseId.value === id) history.value = loaded
+  } catch (value) {
+    if (viewActive && version === historyRequestVersion) ElMessage.error(pageError(value, '推荐历史加载失败'))
+  } finally {
+    if (version === historyRequestVersion) {
+      if (initial) historyLoading.value = false
+      else historyRefreshing.value = false
+    }
+  }
+}
+
+async function act(item: CourseRecommendationItem) {
+  const destination = routeFor(item)
+  if (!destination || actionBusyKey.value !== null) return
+  const key = item.recommendation_key
+  const sourceCourseId = item.course_id
+  const sourceRequestVersion = requestVersion
+  actionBusyKey.value = key
+  try {
+    try {
+      await recommendationApi.feedback(sourceCourseId, { recommendation_key: key, action: 'clicked' })
+    } catch (value) {
+      if (
+        viewActive
+        && requestVersion === sourceRequestVersion
+        && courseId.value === sourceCourseId
+        && actionBusyKey.value === key
+      ) {
+        ElMessage.warning(pageError(value, '点击反馈未保存，仍可继续跳转'))
+      }
+    }
+    if (
+      !viewActive
+      || requestVersion !== sourceRequestVersion
+      || courseId.value !== sourceCourseId
+      || actionBusyKey.value !== key
+    ) {
+      return
+    }
+    if (viewActive && historyVisible.value) void refreshHistory()
+    await router.push(destination)
+  } finally {
+    if (actionBusyKey.value === key) actionBusyKey.value = null
+  }
+}
+
+async function feedback(item: CourseRecommendationItem, action: RecommendationFeedbackAction) {
+  const key = item.recommendation_key
+  if (feedbackBusyKeys.value.has(key)) return
+  feedbackBusyKeys.value = new Set(feedbackBusyKeys.value).add(key)
+  try {
+    await recommendationApi.feedback(item.course_id, { recommendation_key: item.recommendation_key, action })
+    if (viewActive && courseId.value === item.course_id) {
+      feedbackState.value = { ...feedbackState.value, [item.recommendation_key]: action as 'saved' | 'skipped' }
+      if (historyVisible.value) void refreshHistory()
+      ElMessage.success(action === 'saved' ? '已记录：这个推荐有帮助' : '已记录：不感兴趣')
+    }
+  } catch (value) {
+    if (viewActive && courseId.value === item.course_id) ElMessage.error(pageError(value, '反馈保存失败'))
+  } finally {
+    const next = new Set(feedbackBusyKeys.value)
+    next.delete(key)
+    feedbackBusyKeys.value = next
+  }
+}
+
+async function openHistory() {
+  if (courseId.value === null || historyVisible.value || historyLoading.value) return
+  historyVisible.value = true
+  history.value = null
+  await refreshHistory(true)
+}
+
+function priorityLabel(score: number) {
+  if (score >= 75) return '优先处理'
+  if (score >= 50) return '建议安排'
+  return '可选建议'
+}
+
+function feedbackLabel(action: RecommendationFeedbackAction | null) {
+  return { clicked: '已点击', saved: '有帮助', skipped: '不感兴趣' }[action || 'clicked']
+}
+
+onMounted(async () => {
+  await loadCourses()
+  await synchronizeRoute()
+})
+watch([() => route.query.courseId, () => route.query.category], () => { void synchronizeRoute() })
+onBeforeUnmount(() => {
+  viewActive = false
+  stopAiPolling()
+  requestVersion += 1
+  historyRequestVersion += 1
+  feedbackBusyKeys.value = new Set()
+  actionBusyKey.value = null
+})
 </script>
 
 <template>
   <div>
-    <PageHeader title="推荐中心" eyebrow="EXPLAINABLE RECOMMENDATION" description="不只告诉你学什么，也说明为什么现在值得学。">
-      <el-button plain><el-icon><Star /></el-icon>推荐历史</el-button><el-button type="primary"><el-icon><MagicStick /></el-icon>刷新推荐</el-button>
+    <PageHeader title="下一步建议" eyebrow="个性化推荐" description="综合任务、掌握情况、课程资料和近期学习记录，帮你判断此刻最值得做什么。">
+      <el-button plain :loading="historyLoading" :disabled="courseId === null || historyLoading" @click="openHistory"><el-icon><Star /></el-icon>推荐历史</el-button>
+      <el-button type="primary" :loading="loading" :disabled="loading || courseId === null" @click="loadRecommendations"><el-icon><Refresh /></el-icon>刷新推荐</el-button>
     </PageHeader>
-    <section class="recommend-hero">
-      <div><span>今日推荐策略</span><h2>优先补齐「函数依赖」→ 再进入第三范式练习</h2><p>综合知识点掌握度、近 18 次答题、考试剩余 7 天与今日 72 分钟可用时间生成。</p><div><span>掌握度权重 35%</span><span>考试紧迫度 25%</span><span>错题相似度 25%</span><span>时间适配 15%</span></div></div>
-      <strong>87<small>%</small><em>策略置信度</em></strong>
-    </section>
-    <div class="filters"><el-radio-group v-model="activeTab" size="large"><el-radio-button value="all">全部推荐</el-radio-button><el-radio-button value="resource">学习资料</el-radio-button><el-radio-button value="practice">练习题</el-radio-button></el-radio-group><div><el-select model-value="数据库系统" style="width:150px"><el-option label="数据库系统" value="数据库系统" /></el-select><el-select model-value="推荐度排序" style="width:130px"><el-option label="推荐度排序" value="推荐度排序" /></el-select></div></div>
-    <section class="recommend-grid">
-      <article v-for="item in resources.filter(i => activeTab === 'all' || (activeTab === 'resource' ? i.kind === '资料' : i.kind === '练习'))" :key="item.id" class="recommend-card content-card">
-        <div class="card-top"><span class="type-icon" :class="item.color">{{ item.icon }}</span><div class="match"><strong>{{ item.match }}%</strong><span>推荐匹配</span></div></div>
-        <span class="kind">{{ item.kind }} · {{ item.level }}</span><h2>{{ item.title }}</h2><p class="source">{{ item.source }}</p>
-        <div class="resource-meta"><span><el-icon><Clock /></el-icon>{{ item.duration }}</span><span><el-icon><View /></el-icon>1.2k 学习</span><span><el-icon><Star /></el-icon>4.8</span></div>
-        <div class="reason"><div><el-icon><MagicStick /></el-icon><b>为什么推荐给你</b></div><p>{{ item.reason }}</p><div class="evidence"><span v-for="tag in item.evidence" :key="tag">{{ tag }}</span></div></div>
-        <div class="card-actions"><el-button type="primary"><el-icon><component :is="item.kind === '资料' ? Document : Reading" /></el-icon>{{ item.kind === '资料' ? '开始阅读' : '开始练习' }}</el-button><el-dropdown><el-button plain>反馈 ···</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="feedback('like')">推荐准确</el-dropdown-item><el-dropdown-item @click="feedback('dislike')">不感兴趣</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
-      </article>
-    </section>
+    <div v-if="coursesLoading && !courses.length" class="loading"><el-skeleton :rows="4" animated /></div>
+    <el-alert v-else-if="courseLoadError" type="error" show-icon :closable="false" :title="courseLoadError" class="page-alert"><template #default><el-button text :loading="coursesLoading" :disabled="coursesLoading" @click="retryCourses">重新加载课程</el-button></template></el-alert>
+    <el-alert v-else-if="routeError && !courses.length" type="error" show-icon :closable="false" :title="routeError" class="page-alert" />
+    <el-empty v-else-if="!courses.length" description="请先创建课程"><el-button type="primary" @click="router.push({ name: 'courses' })">前往课程列表</el-button></el-empty>
+    <template v-else>
+      <div class="toolbar">
+        <el-select :model-value="courseId" placeholder="选择课程" :loading="coursesLoading" @update:model-value="selectCourse"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select>
+        <el-radio-group :model-value="category" class="category-tabs" @update:model-value="selectCategory">
+          <el-radio-button v-for="option in categoryOptions" :key="option.value" :value="option.value">
+            {{ option.label }}<small v-if="result"> {{ result.category_counts[option.value] }}</small>
+          </el-radio-button>
+        </el-radio-group>
+      </div>
+      <el-alert v-if="routeError" type="error" show-icon :closable="false" :title="routeError" class="page-alert"><template #default><el-button text @click="selectCourse(courses[0]?.id || null)">切换到可用课程</el-button></template></el-alert>
+      <el-alert v-if="recommendationError" type="error" show-icon :closable="false" :title="recommendationError" class="page-alert"><template #default><el-button text :loading="loading" :disabled="loading" @click="retryRecommendations">重新加载推荐</el-button></template></el-alert>
+      <section v-if="result" class="recommend-hero"><div><span>当前课程</span><h2>{{ selectedCourse?.name }}</h2><p>{{ result.strategy_summary }}</p></div><strong>为你筛选 {{ result.selection.returned }} 条<small>从 {{ result.selection.candidate_total }} 个可执行动作中排序</small></strong></section>
+      <el-alert v-if="result?.ai_enhancement?.status === 'queued' || result?.ai_enhancement?.status === 'processing'" type="info" show-icon :closable="false" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : 'AI 增强建议正在后台生成，当前规则推荐已可正常使用。'" class="page-alert" />
+      <el-alert v-else-if="result?.ai_enhancement?.status === 'failed' || result?.ai_enhancement?.status === 'cancelled'" type="warning" show-icon :closable="false" title="AI 增强暂时不可用，当前规则推荐和反馈功能仍可正常使用。" class="page-alert"><template #default><el-button text @click="loadRecommendations">重新触发增强</el-button><el-button text @click="router.push({ name: 'tasks' })">查看任务中心</el-button></template></el-alert>
+      <section v-if="result?.ai_enhancement?.status === 'success' && (result.ai_enhancement.summary || aiSuggestions.length)" class="ai-result content-card"><b>AI 增强建议</b><p v-if="result.ai_enhancement.summary">{{ result.ai_enhancement.summary }}</p><ul v-if="aiSuggestions.length"><li v-for="(suggestion, index) in aiSuggestions.slice(0, 3)" :key="index"><b>{{ suggestion.title }}</b><p v-if="suggestion.reason">{{ suggestion.reason }}</p><small v-if="suggestion.estimatedMinutes !== null || suggestion.priority !== null">{{ suggestion.estimatedMinutes !== null ? `${suggestion.estimatedMinutes} 分钟` : '' }}{{ suggestion.estimatedMinutes !== null && suggestion.priority !== null ? ' · ' : '' }}{{ suggestion.priority !== null ? `优先级 ${Math.round(suggestion.priority * 100)}%` : '' }}</small></li></ul></section>
+      <div v-if="loading" class="loading"><el-skeleton :rows="6" animated /></div>
+      <el-empty v-else-if="!routeError && !recommendationError && result && !items.length" :description="selectedCategory.empty" />
+      <section v-else-if="result" class="recommend-grid"><article v-for="(item, index) in items" :key="item.recommendation_key" class="recommend-card content-card"><div class="card-top"><span>{{ index === 0 && category === 'all' ? '首要建议' : item.category_label }}</span><b :class="{ urgent: item.score >= 75 }">{{ priorityLabel(item.score) }}</b></div><h2>{{ item.title }}</h2><p>{{ item.subtitle }}</p><div class="reason"><b>为什么推荐给你</b><p>{{ item.reason }}</p><details v-if="item.signals.length"><summary>查看判断信号</summary><div><el-tag v-for="signal in item.signals" :key="signal.code" size="small">{{ signal.label }} · {{ signal.contribution.toFixed(1) }}</el-tag></div></details></div><div class="card-actions"><el-button v-if="routeFor(item)" type="primary" :loading="actionBusyKey === item.recommendation_key" :disabled="actionBusyKey !== null" @click="act(item)">{{ item.action.label }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'saved' ? 'success' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'saved')">{{ feedbackState[item.recommendation_key] === 'saved' ? '已标记有帮助' : '有帮助' }}</el-button><el-button :type="feedbackState[item.recommendation_key] === 'skipped' ? 'warning' : 'default'" :loading="feedbackBusyKeys.has(item.recommendation_key)" :disabled="feedbackBusyKeys.has(item.recommendation_key)" @click="feedback(item, 'skipped')">{{ feedbackState[item.recommendation_key] === 'skipped' ? '已标记不感兴趣' : '不感兴趣' }}</el-button></div></article></section>
+      <p v-if="result" class="rules-note">建议来自你的真实学习记录与可执行状态 · 推荐模型版本 {{ result.algorithm_version }}</p>
+    </template>
+    <el-dialog v-model="historyVisible" title="推荐历史" width="620px"><div v-loading="historyLoading"><div v-if="history" class="history-metrics"><el-tag>点击 {{ history.metrics.clicked }}</el-tag><el-tag>有帮助 {{ history.metrics.saved }}</el-tag><el-tag>不感兴趣 {{ history.metrics.skipped }}</el-tag><el-button size="small" :loading="historyRefreshing" :disabled="historyRefreshing" @click="refreshHistory()">刷新历史</el-button></div><el-empty v-if="history && !history.items.length" description="暂无真实反馈历史" /><el-timeline v-else><el-timeline-item v-for="item in history?.items || []" :key="item.record_id" :timestamp="item.created_at"><b>{{ item.title }}</b> · {{ item.category_label }} · {{ feedbackLabel(item.feedback_action) }}<p>{{ item.reason }}</p></el-timeline-item></el-timeline></div></el-dialog>
   </div>
 </template>
 
 <style scoped>
-.recommend-hero{display:flex;align-items:center;gap:30px;padding:23px 28px;margin-bottom:18px;border-radius:18px;background:linear-gradient(110deg,#17264e,#293d78);color:white}.recommend-hero>div{flex:1}.recommend-hero>div>span{color:#8f9cf7;font-size:8px;font-weight:750}.recommend-hero h2{margin:7px 0;font-size:17px}.recommend-hero p{margin:0;color:#aab5ce;font-size:9px}.recommend-hero>div>div{display:flex;gap:7px;margin-top:14px}.recommend-hero>div>div span{padding:5px 8px;border-radius:6px;background:rgba(255,255,255,.07);color:#bec6dc;font-size:7px}.recommend-hero>strong{display:flex;align-items:center;justify-content:center;flex-direction:column;width:90px;height:90px;border:7px solid rgba(255,255,255,.13);border-top-color:#7dd9c5;border-radius:50%;font-size:24px}.recommend-hero>strong small{font-size:10px}.recommend-hero>strong em{margin-top:3px;color:#93a0ba;font-size:7px;font-style:normal}.filters{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}.filters>div{display:flex;gap:8px}.recommend-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.recommend-card{padding:19px}.card-top{display:flex;align-items:flex-start;justify-content:space-between}.type-icon{width:46px;height:50px;display:grid;place-items:center;border-radius:12px;font-size:10px;font-weight:800}.type-icon.red{background:#fff0ed;color:#dc6956}.type-icon.purple{background:#eff1ff;color:#6271e6}.type-icon.orange{background:#fff3e6;color:#da8332}.type-icon.green{background:#eaf8f4;color:#16947c}.type-icon.blue{background:#ebf4ff;color:#4783c8}.match{display:flex;align-items:flex-end;flex-direction:column}.match strong{color:#15a087;font-size:16px}.match span{margin-top:4px;color:#98a1b3;font-size:7px}.kind{display:block;margin-top:15px;color:#6472dd;font-size:8px;font-weight:750}.recommend-card>h2{margin:6px 0;color:#3c4762;font-size:14px}.source{margin:0;color:#8d97aa;font-size:8px}.resource-meta{display:flex;gap:13px;padding:12px 0;border-bottom:1px solid #edf0f5}.resource-meta span{display:flex;align-items:center;gap:4px;color:#8e97aa;font-size:8px}.reason{padding:12px;margin:13px 0;border-radius:11px;background:#f7f8fc}.reason>div:first-child{display:flex;align-items:center;gap:6px;color:#5d6be0;font-size:9px}.reason p{margin:7px 0;color:#68738b;font-size:8px;line-height:1.6}.evidence{display:flex;flex-wrap:wrap;gap:5px}.evidence span{padding:3px 5px;border-radius:5px;background:#e9ecff;color:#6472dc;font-size:7px}.card-actions{display:flex;gap:7px}.card-actions>.el-button:first-child{flex:1}@media(max-width:1100px){.recommend-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:700px){.recommend-grid{grid-template-columns:1fr}.filters{align-items:flex-start;gap:12px;flex-direction:column}.recommend-hero>strong{display:none}.recommend-hero>div>div{flex-wrap:wrap}}
+.page-alert{margin-bottom:16px}.toolbar{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}.toolbar .el-select{width:220px}.category-tabs{display:flex;flex-wrap:wrap;justify-content:flex-end}.category-tabs small{margin-left:3px;color:#74809a}.recommend-hero{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:25px 30px;margin-bottom:18px;border-radius:18px;background:linear-gradient(115deg,#17264e,#394a94);color:#fff;box-shadow:0 15px 34px rgba(25,40,83,.16)}.recommend-hero span{color:#aeb9e9;font-size:11px;font-weight:750}.recommend-hero h2{margin:5px 0 7px;font-size:22px}.recommend-hero p{max-width:680px;margin:0;color:#dce1f0;font-size:13px;line-height:1.6}.recommend-hero strong{font-size:19px;text-align:right}.recommend-hero small{display:block;margin-top:5px;color:#c7cfe8;font-size:11px;font-weight:400}.ai-result{margin-bottom:16px;padding:18px}.ai-result p,.ai-result ul{margin:8px 0 0;color:#58647c;font-size:12px;line-height:1.6}.recommend-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.recommend-card{display:flex;min-height:280px;flex-direction:column;padding:20px}.card-top{display:flex;justify-content:space-between;color:#5267dd;font-size:12px;font-weight:750}.card-top b{color:#53806c}.card-top b.urgent{color:#d5683d}.recommend-card h2{margin:16px 0 8px;color:#34415b;font-size:17px}.recommend-card>p{min-height:40px;margin:0 0 14px;color:#758096;font-size:12px;line-height:1.6}.reason{padding:14px;border:1px solid #e9ecf4;border-radius:11px;background:#f8f9fc;font-size:12px}.reason>b{color:#45516c}.reason summary{margin-top:10px;color:#6572d4;cursor:pointer;font-weight:700}.reason p{margin:7px 0 0;color:#69758d;line-height:1.6}.reason div,.card-actions,.history-metrics{display:flex;gap:6px;flex-wrap:wrap}.reason details div{margin-top:9px}.card-actions{margin-top:auto;padding-top:16px}.history-metrics{margin-bottom:15px}.rules-note{margin:20px 0 0;color:#7f8aa1;font-size:11px;text-align:right}@media(max-width:900px){.toolbar{align-items:stretch;flex-direction:column}.toolbar .el-select{width:100%}.category-tabs{justify-content:flex-start}.recommend-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.recommend-hero{align-items:flex-start;flex-direction:column}.recommend-hero strong{text-align:left}.recommend-grid{grid-template-columns:1fr}}
 </style>

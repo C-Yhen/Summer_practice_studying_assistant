@@ -1,9 +1,16 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios'
 import type { ApiEnvelope } from '@/types'
+import { notifySessionExpired } from '@/api/session-expiry'
 
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
   timeout: 8000,
+})
+
+/** 用于 AI 调用的客户端，超时 120 秒（聊天 / 计划生成等耗时操作） */
+export const aiApiClient = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  timeout: 120_000,
 })
 
 export class ApiEnvelopeError extends Error {
@@ -68,12 +75,16 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
   if (!axios.isAxiosError(error)) return error instanceof Error ? error.message : fallback
 
   if (error.code === AxiosError.ETIMEDOUT || error.code === AxiosError.ECONNABORTED) {
-    return '连接后端超时，请确认服务已启动'
+    return '请求响应超时，后端可能暂时繁忙；请稍后重试。基础功能通常仍可继续使用。'
   }
   if (!error.response) return '无法连接后端服务，请确认后端和数据库正常运行'
 
   const detail = readErrorDetail(error.response.data)
+  if (detail?.startsWith('KNOWLEDGE_POINTS_PROCESSING')) {
+    return '课程资料正在提取可用知识点，请稍后重新生成；也可在任务中心查看进度。'
+  }
   const knownDetails: Record<string, string> = {
+    'Email is already registered': '该邮箱已注册',
     FILE_EMPTY: '文件不能为空',
     FILE_TOO_LARGE: '文件大小超过后端限制',
     FILE_TYPE_UNSUPPORTED: '仅支持 PDF、TXT、MD 或 Markdown 文件',
@@ -87,14 +98,17 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
     PLAN_VERSION_CONFLICT: '计划版本已变化，请刷新后重新确认',
     TASK_NOT_ACTIVE: '该任务所属计划尚未生效或已经失效',
     PLAN_GENERATION_FAILED: '学习计划生成失败，请稍后重试',
+    COURSE_CONTENT_NOT_READY: '课程资料尚未提取出可用知识点，请先上传或重新解析资料。',
     TASK_COMPLETION_FAILED: '任务完成状态保存失败，请重试',
+    IDEMPOTENCY_KEY_REUSED: '本次提交标识已被其他答案使用，请刷新题目后重试',
+    PRACTICE_ATTEMPT_FAILED: '答题结果保存失败，请使用原提交重试',
   }
   if (detail && knownDetails[detail]) return knownDetails[detail]
   switch (error.response.status) {
     case 401:
       return '邮箱或密码错误'
     case 409:
-      return '该邮箱已注册'
+      return detail || '请求与当前数据状态冲突'
     case 422:
       return detail ? `提交信息校验失败：${detail}` : '提交信息不符合要求'
     case 413:
@@ -115,7 +129,49 @@ apiClient.interceptors.request.use((config) => {
 
 apiClient.interceptors.response.use(
   (response) => response,
-  (error: AxiosError) => Promise.reject(error),
+  (error: AxiosError) => {
+    const requestUrl = error.config?.url || ''
+    const headers = error.config?.headers
+    const authorization = typeof headers?.get === 'function'
+      ? headers.get('Authorization')
+      : headers?.Authorization
+    const storedToken = window.sessionStorage.getItem('studypilot_token')
+    const isCurrentSession = Boolean(storedToken && authorization === `Bearer ${storedToken}`)
+    const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/register')
+    if (error.response?.status === 401 && isCurrentSession && !isAuthRequest) {
+      const redirect = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      void notifySessionExpired(redirect).catch(() => undefined)
+    }
+    return Promise.reject(error)
+  },
+)
+
+// ---- aiApiClient 复用相同的拦截器 ----
+
+aiApiClient.interceptors.request.use((config) => {
+  const token = sessionStorage.getItem('studypilot_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  config.headers['X-Client-Version'] = 'frontend-mvp/0.1'
+  return config
+})
+
+aiApiClient.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => {
+    const requestUrl = error.config?.url || ''
+    const headers = error.config?.headers
+    const authorization = typeof headers?.get === 'function'
+      ? headers.get('Authorization')
+      : headers?.Authorization
+    const storedToken = window.sessionStorage.getItem('studypilot_token')
+    const isCurrentSession = Boolean(storedToken && authorization === `Bearer ${storedToken}`)
+    const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/register')
+    if (error.response?.status === 401 && isCurrentSession && !isAuthRequest) {
+      const redirect = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      void notifySessionExpired(redirect).catch(() => undefined)
+    }
+    return Promise.reject(error)
+  },
 )
 
 export const mockEnabled = import.meta.env.VITE_ENABLE_MOCK === 'true'

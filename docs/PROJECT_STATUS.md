@@ -154,3 +154,300 @@
 ### 下一轮候选
 
 - 评估真实课程详情闭环，或将关键首页路径纳入轻量浏览器回归。
+
+## Round 07：真实课程详情与课程上下文一致性
+
+### 已完成
+
+- 课程详情按 URL 读取真实课程，并分别加载课程限定的 Dashboard、资料、掌握度和学习记录；非法、不存在、跨用户及已归档课程不回退其他数据。
+- 上传、问答、计划、今日任务、掌握度和文档任务页保持真实 `courseId`；多课程切换会清除上一课程状态。
+- 接通真实编辑、归档、文档处理状态与重新解析；掌握度增加 `has_record`，学习记录补充可空的任务和知识点名称。
+- 补修文档与异步任务归属：新增文档限定任务详情接口，页面初始化和轮询均验证 `courseId → documentId → taskId` 链路。
+
+### 实际测试
+
+- `npm run build` 通过；完整后端测试 29 passed。
+- PostgreSQL 与无头 Chrome：课程 A/B 详情隔离、刷新、五个课程入口、浏览器真实上传及任务 URL、编辑持久化、非法/跨用户 404、归档后列表移除均通过。
+- 后端关闭时显示服务错误，不出现 Mock 或其他课程。
+- 本次补修：`npm run build` 通过；完整后端测试 30 passed，包含同课程/跨课程/跨用户、非文档任务、归档课程和已删除文档的任务错配 404。
+
+### 未解决问题
+
+- 浏览器检查尚未纳入长期 E2E 套件；掌握度模型没有历史快照，因此趋势诚实返回暂无。
+- 当前执行环境没有可用受控浏览器，无法实际操作验证本次手工替换 `taskId` 的页面 URL；后端资源链与前端构建已验证。
+- Harness、LangChain、MCP、第三方服务、缓存、定制计划、推荐系统和长时任务增强均保留为后续候选，本轮未实现。
+
+## Round 08：真实长时任务中心与 Celery 执行闭环
+
+### Round 08 补修：周报范围、时区与取消一致性
+
+- 周报任务仅统计当前用户、当前 active 计划及 active 版本的任务；candidate 和 superseded 版本均排除。
+- 周报与 Dashboard 共用用户时区工具，以本地日期转换的 UTC 左闭右开范围统计学习记录和学习天数；无效时区回退 UTC。
+- 写入周报成功结果前再次检查取消请求；周报重试安全转换课程资源 ID，并继续校验归属和归档状态。
+- 实际测试：定向异步任务测试 7 passed；完整后端测试 37 passed；`frontend npm run build` 通过。
+
+## Round 09：真实可解释推荐中心
+
+- 新增只读统一课程推荐，使用 active 计划任务、真实掌握度、就绪资料、考试日期和学习记录生成规则化解释。
+- 推荐查询不再写入历史；点击、有帮助和不感兴趣反馈按课程与推荐目标幂等持久化，并提供真实历史与交互计数。
+- 前端推荐中心接入真实课程上下文、推荐、反馈和历史；显式 Mock 保留独立演示路径。
+- 实际测试：`frontend npm run build` 通过；完整后端测试 39 passed。浏览器联调未执行（当前无可用受控浏览器）。
+
+### Round 09 补修：推荐归属与反馈状态
+
+- 推荐查询约束 KnowledgePoint 必须属于当前课程，防止不一致的掌握度或任务关联泄漏到推荐中。
+- 推荐卡片反馈成功后仅更新当前卡片状态；切换课程清空状态，历史弹窗打开时同步刷新。
+- 新增 6 个专项测试，连同原有 2 个推荐测试覆盖 active/candidate/superseded、completed 排除、A/B 用户与课程隔离、伪造 key、掌握度 attempts、文档状态、本地日期学习记录、排序、limit、稳定性及 GET 只读。
+- 测试暴露并修复：任务推荐信号使用的掌握度字典也必须联表校验 KnowledgePoint 属于当前课程。
+- 实际测试：推荐专项 `8 passed`；完整后端 `45 passed`；`frontend npm run build` 通过。
+- 未执行浏览器联调；本次范围集中于后端专项边界测试。
+
+### 已完成
+
+- 真实任务中心支持 `document_parse` 与 `weekly_report`：列表/详情、筛选分页、REST 自动刷新、URL 任务恢复、真实取消和重试。
+- 统一任务派发层按类型调用文档 Worker 或周报 Worker；未实现类型明确拒绝，派发失败持久化为 `failed`。
+- 周报基于当前用户真实学习记录、计划任务、课程和掌握度聚合；同步模式与 Celery 模式复用业务服务。
+- 扩充任务响应中的资源、输入、时间、结果、取消/重试能力字段；文档限定任务接口复用同一序列化结果。
+
+### 实际测试
+
+- `npm run build` 通过；完整后端测试：33 passed。
+- PostgreSQL + Redis + Celery Worker 联调：真实上传文档和创建课程周报均执行成功，结果持久化，刷新任务列表仍有两项。
+- 浏览器运行时无可用实例，未能执行任务中心页面交互验证。
+
+### 未解决问题
+
+- 浏览器联调及长期前端 E2E 套件仍未具备可用运行环境。
+- Harness、LangChain、MCP、外部模型、第三方日历、业务缓存、定制计划和推荐系统仍保留为后续候选。
+
+### 下一轮候选
+
+- 将多课程上下文关键路径纳入轻量 E2E，或按老师优先级评估上述工程能力。
+
+## Round 10：真实用户画像、学习偏好与定制学习计划
+
+- 完成真实个人资料与学习偏好读取、昵称/时区更新、偏好部分更新及用户隔离；未实现设置项明确标记暂未开放。
+- 计划生成按“本次显式覆盖 > 已保存偏好 > 系统默认”解析预算与单次时长，并在候选版本保存 `generation_context` 快照。
+- 规则计划使用真实偏好影响排期容量、任务时长、真实薄弱点排序、学习顺序、基础水平、难度、考试冲刺和推导任务；`attempts == 0` 不视为真实薄弱点。
+- 实际测试：前端 `npm run build` 通过；完整后端测试 `48 passed`；Docker 真实 API 验证了注册、资料与偏好保存、默认值生成、临时覆盖和快照。
+- 浏览器联调未执行（当前没有受控浏览器实例）。未解决：暂无前端 E2E 套件；MCP、第三方服务、缓存、Harness 与 LangChain 保留为后续候选。
+
+### Round 10 补修：偏好覆盖与 PATCH 边界
+
+- 计划页仅在表单值不同于已加载个人偏好时发送对应的临时覆盖字段；恢复默认值后不再误标覆盖。
+- 用户资料和学习偏好 PATCH 显式提交 `null` 统一返回 422，省略字段及空对象 PATCH 仍保持原值。
+- 昵称保存后立即以服务端去空格后的结果回填表单，并同步导航认证状态。
+- 实际测试：偏好专项 12 passed；完整后端 57 passed；前端 `npm run build` 通过。
+
+## Round 11：真实练习答题与错题本闭环（补修完成，等待独立审查）
+
+- `submission_id` 绑定原始 course、question、答案和耗时；完全一致才重放，错配统一返回 409。并发唯一约束冲突会回滚整个事务并重新校验持久化提交。
+- 前端首次提交冻结 UUID、答案和耗时，网络失败沿用同一 payload；提交期间锁定答案、课程和翻题操作，题目可答后才开始计时。显式 Mock 模式遵守同一幂等键绑定规则，真实模式不回退 Mock。
+- 今日任务和练习答题复用小型 mastery helper，保持原任务增长规则；练习正确不降分、错误不升分，所有数值限制在 0～1。
+- 每次新答题均写入 `record_type=practice` 的 LearningRecord；无知识点题目仍记录答题和学习时长，但不更新掌握度。
+- 题目 `total` 按过滤后、limit 前统计，并拒绝其他课程知识点；错题本 `total` 按过滤后、分页前统计，summary 始终使用整门课程未移除数据。
+- SQLite 专项测试：`18 passed, 1 skipped`；完整后端：`75 passed, 1 skipped`。跳过项为显式启用的 PostgreSQL API 并发用例。
+- PostgreSQL/API 并发测试：`1 passed, 18 deselected`；两个同步请求只产生一条 Attempt、一条 LearningRecord、一次 mastery attempt 和一次 wrong_count，并验证 409 错配、重复错题及分页汇总。
+- 前端 `npm run build` 通过；浏览器联调未执行。
+- 局限：规则题仍是知识点学习目标自测，非学科高质量题库；外部大模型题目与分析不在本轮范围。
+
+## Round 12：真实学习统计与 CSV 导出（完成，等待独立审查）
+
+- 新增 `/statistics/overview` 与 `/statistics/export.csv`；按用户时区用本地日期转 UTC 左闭右开区间，支持 7/30 天、课程筛选与 URL 恢复。
+- 学习时长只聚合已完成 LearningRecord；计划任务只统计当前 active 计划与 active 版本；练习正确率只聚合当前用户真实 PracticeAttempt。
+- 返回当前/上一周期比较、完整每日零值趋势、49 天热力图、最长连续学习天数、稳定排序的课程分布和最低 3 次样本的高效练习时段。
+- 洞察改为可复现的规则洞察，不调用模型、不写数据库、不使用预测文案；CSV 使用 UTF-8 BOM、用户范围数据、公式注入前缀保护。
+- Statistics 页面移除固定趋势、课程、热力图和 AI 文案；显式 Mock 模式返回同构演示数据，真实请求失败不回退 Mock。
+- 实际测试：统计专项 `6 passed`；完整后端 `81 passed, 1 skipped`；前端 `npm run build` 通过；PostgreSQL/API 与 CSV 联调通过。浏览器联调未执行。
+- 未解决：尚无浏览器 E2E 套件；规则洞察只描述现有数据，未提供预测或外部模型分析。
+
+### Round 12 验收补修：展示边界与统计覆盖
+
+- 修复学习时长在临界秒数下的分钟进位；前三张指标卡均显示真实上期比较，且加载错误与 CSV 导出错误分离。
+- 新增统计专项测试，覆盖上期比较、30 天零填充与 49 天热力图、连续天数、高效时段时区/排序、归档及用户隔离、CSV 一致性与洞察稳定性。
+- 实际验证：统计专项 13 passed；完整后端 88 passed, 1 skipped；前端 npm run build 通过。PostgreSQL/API 验证了 7 天比较（3600/1800/+1800 秒）和 30 天 CSV（BOM、空练习正确率、30 条日期轴）。
+- 浏览器联调未执行；仍缺少可维护的前端 E2E 套件。
+
+## Round 13：真实学习日历、ICS 与 MCP 日历工具
+
+- 本轮日历为 StudyPilot 本地 CalendarEvent；未连接 Outlook、Google 或其他第三方账户，ICS 可供手动导入。
+- URL 初始化与内部导航分离，课程/周切换先更新 URL 再加载；增加“今天”、事件详情、修改/删除两阶段确认及独立操作锁。
+- 日历查询支持用户本地日期并以 IANA 时区转换为 UTC 半开区间；前端按用户时区分组和显示 UTC 事件，覆盖 Asia/Shanghai 与 DST 边界。
+- 计划同步重复确认返回完整幂等重放；并发唯一约束冲突会回滚并严格校验整批事件。手工键使用 `manual` 命名空间，计划键使用 `plan-task` 命名空间。
+- MCP 日历写操作统一使用后端确认令牌；审计输入、输出和错误信息递归清理敏感字段，使用当前访问令牌持久化审计，审计失败不覆盖工具结果。
+- 后端专项：`10 passed, 1 skipped`；完整后端：`98 passed, 2 skipped`（两个跳过项均为显式 PostgreSQL 用例）；MCP：`8 passed, 1 skipped`（跳过项为显式真实后端联调）；前端 `npm run build` 通过。
+- PostgreSQL/API 并发用例显式运行 `1 passed`：两个客户端确认同一批任务及并发创建同一手工事件均为 200，一方创建、一方完整重放，事件只增加一次；同时验证本地周查询、ICS 与用户隔离。
+- MCP 真实工具联调显式运行 `1 passed`：空闲时间、创建/修改/删除的预览与确认均通过；PostgreSQL 审计 7 条，敏感字段泄漏计数 0。
+- 浏览器联调未执行：受控浏览器运行时可连接，但当前浏览器实例列表为空。未解决问题为尚无仓库内可维护的前端 E2E；等待独立审查，不提前宣布 Round 13 正式通过。
+
+## Round 14：真实全局快捷搜索与应用壳清理
+
+- 删除固定长时任务角标、无真实数据支撑的通知按钮/红点，以及智能问答固定 AI 角标；导航分组改为“智能学习”，日历入口和路由标题改为“学习日历”。
+- 新增共享导航配置，侧栏、移动抽屉和全局搜索复用同一组真实功能入口；搜索支持功能名称/关键词与当前用户未归档课程的名称/编号，并按需调用现有 `courseApi.list()`。
+- 搜索支持 Ctrl/Cmd+K、方向键、Enter、Esc 和移动端入口；课程请求失败时保留功能搜索并显示真实错误及重新加载操作。课程结果仅保存在内存，用户退出或切换账号后清空。
+- 显式 Mock 边界继续由现有 API service 控制；真实模式请求失败不会回退固定演示课程。
+- 实际验证：`cd frontend && npm run build` 通过。未运行后端、Docker、PostgreSQL、Redis、Celery、MCP 或浏览器联调；浏览器联调未执行。
+- 已知问题：尚无仓库内可维护的前端 E2E 套件；构建仍提示既有大 chunk 警告，本轮未做拆包优化。
+
+## Round 15：推荐多样性与分类体验
+
+- 推荐候选新增稳定用户级分类：学习任务、薄弱点复习、资料与问答、学习计划、学习复盘；保留原始 `item_type` 与 recommendation key，反馈和历史仍使用真实持久化资源身份。
+- 默认综合页采用评分优先的多样化选择：任务最多 2 条、其他分类各最多 1 条；补位阶段允许任务最多 `max(2, ceil(limit / 2))` 条。最高优先的逾期/今日任务会优先保留，只有名额无法填满时才突破两条高优先任务保护。
+- 推荐接口支持 `category=all|task|mastery|resource|plan|report`；分类查询返回该分类的全部真实候选（再按 limit 截断），`category_counts` 在 limit 前按全部候选计算，GET 保持只读。
+- 推荐页通过 `courseId` 与 `category` URL 参数恢复课程/分类，切换分类重新请求后端；显示真实分类数量、用户级优先级、明确空状态和可读历史标签，规则版本移至轻量说明。显式 Mock 返回同构分类合同；真实请求失败不回退 Mock。
+- 实际验证：推荐专项 SQLite 测试 `10 passed`；完整后端 SQLite 测试 `99 passed, 3 skipped`；前端 `npm run build` 通过。未运行 PostgreSQL、Redis、Celery、MCP 或浏览器联调；浏览器联调未执行。
+- 已知问题：尚无仓库内可维护的前端 E2E 套件；构建仍提示既有大 chunk 警告，本轮未做拆包优化。
+
+### 验收补修：推荐错误恢复与分类数量
+
+- 课程列表、推荐请求和 URL 课程错误拆分为独立状态；路由同步不再因既有错误永久早退。
+- 课程加载失败可直接重新加载并重新解析当前 URL；推荐加载失败后仍可刷新、切换课程或分类，旧请求继续受 requestVersion 保护。
+- 非法课程 URL 保留可用课程选择器以恢复；非法分类仍规范化为 `all`。
+- 分类标签统一展示后端 `category_counts`，不再在具体分类页错误复用当前分类的 `selection.returned`。
+- 实际验证：`cd frontend && npm run build` 通过。浏览器联调未执行。
+
+## Round 16：真实学习周报展示与 Markdown 导出
+
+- 周报聚合仅统计当前用户、未归档课程、已完成学习记录和 active 计划的 active 版本任务；按用户时区生成连续每日数据、课程分布与真实尝试的薄弱点。
+- 新增成功周报的 Markdown 下载接口，导出仅使用持久化 `result_data`，并进行表格字符串转义；任务中心支持结构化周报、旧报告兼容、导出错误状态和移动端详情展示。
+- 实际验证：前端 `npm run build` 通过；SQLite 容器专项测试 `8 passed`，完整后端测试 `100 passed, 3 skipped`。未启动 PostgreSQL、Redis、Celery、MCP 或浏览器；浏览器联调未执行。
+- 未解决问题：尚无仓库内可维护的前端 E2E 套件；构建仍有既有大 chunk 警告。
+
+### 验收补修：聚合精度与导出合同
+
+- 学习时长先按真实秒数分别聚合到总计、本地日期和课程，再使用稳定最大余数法分配整数分钟；`study_days` 按当天真实完成秒数大于零计算。
+- 活动计划任务新增 `StudyPlan.course_id == StudyTask.course_id` 一致性约束；继续排除归档课程、其他用户、零尝试与知识点课程错配数据。
+- Markdown 增加范围、时区、无生效计划任务文案和薄弱点百分比，兼容旧结构及异常持久化值；文件名仅接受合法 ISO 日期。
+- 前端按当前用户 IANA 时区生成默认日期并使用 date-only 运算，限制成功周报下载；显式 Mock 从同一份 `result_data` 渲染同构章节。
+- 实际验证：周报专项 `16 passed`；完整后端 `108 passed, 3 skipped`；前端 `npm run build` 通过。未启动 PostgreSQL、Redis、Celery 或 MCP；浏览器联调未执行。
+
+### 最终小型补修：不足一分钟课程明细
+
+- 课程明细改为依据真实完成学习秒数或生效计划任务纳入；不足一分钟且分配为 0 分钟的真实学习课程不再从 `course_breakdown` 消失。
+- 验证 31 秒双课程稳定保留 `1/0` 分钟两行、1 秒完成记录保留 0 分钟行，仅含 `completed=false` 记录的课程不纳入。
+- 实际验证：周报专项 `17 passed`；完整后端 `109 passed, 3 skipped`。本次未修改前端，因此未重新运行前端构建；未启动 PostgreSQL、Redis、Celery 或 MCP，浏览器联调未执行。
+
+## Round 17：可见交互验收与关键恢复补修（等待独立审查）
+
+- 建立桌面端与移动端 Playwright 隔离验收套件：使用短生命周期 SQLite 后端容器、真实前端路由和真实 API，不污染日常开发数据库；完整清单见 `docs/VISIBLE_FUNCTION_ACCEPTANCE.md`。
+- 补修带认证请求收到 401 后的全局会话清理与登录重定向；修复全局搜索跨用户缓存、长列表键盘滚动、推荐重复请求锁、日历标题和登录页无效可点击入口。
+- 日历计划同步拒绝 DST 不存在的本地时间，并增加合法非 DST 时区对照测试。
+- 实际验证：Playwright 桌面端与移动端共 `18 passed`；日历 DST 专项 `2 passed, 11 deselected`；相关后端 `85 passed, 3 skipped`；完整后端 `111 passed, 3 skipped`；前端 `npm run build` 通过。
+- 受控应用内浏览器实例不可用；改由仓库 Playwright 套件使用系统 Chrome 自动验收。未启动 PostgreSQL、Redis、Celery 或 MCP。
+- 未解决：验收清单中仍有 14 组未完成控件级实操，主要包括下载文件内容、完整 A/B 用户隔离故事、任务完成/反馈/历史、统计与日历全交互；这些项目保持 `BLOCKED`，未宣称通过。
+
+### Round 17 第二阶段：全部已实现可见交互验收
+
+- 重新统计并逐条补证 52 个清单条目；新增 `validate:acceptance` 自动校验 ID、状态和汇总。最终为 PASS 27、FIXED_AND_PASS 17、EXCLUDED 8、BLOCKED 0。
+- 共 27 个 Playwright 测试函数、54 个项目执行项。唯一一次完整矩阵原始结果为 desktop 27/27，mobile 21 passed、1 skipped、5 failed；修复移动引用区、练习选项覆盖、日历布局/dialog 触摸和周报日期 popper 竞态后，5 个失败均由对应 targeted spec 复测通过。最终 53 个可执行项有通过证据，1 个并发 401 用例按设计仅在 desktop 执行。
+- 浏览器真实验证了注册协议、重复邮箱、18 条生产路由、桌面/移动搜索入口、A/B/A 用户资源与搜索缓存隔离、并发 401、推荐独立反馈锁，以及全部现有课程、文档、问答、任务、练习、错题、掌握度、统计、周报和日历控件。
+- CSV、ICS、Markdown 均由页面按钮触发并通过 Playwright download 读取内容；文件写入用例临时目录并清理。A/B 故事在同一浏览器中验证课程、文档、任务、错题、反馈、周报和事件隔离及 A 数据恢复。
+- 保留 AI 学习助手、智能问答等产品定位；删除无真实来源的固定动态指标。问答仅使用离线 Provider 验证交互，不评价答案质量；外部 Chat/Embedding Provider 仍未接入并明确排除。
+- 本地日历、确认写入和 ICS 是真实功能；Outlook/Google 自动同步与真实 MCP Server 未接入。DST 春季不存在时间和秋季重复时间 `fold=0` 专项 `2 passed`。
+- 严重度台账：P0 0、P1 2、P2 16，逐项记录在 `VISIBLE_FUNCTION_ACCEPTANCE.md`。所有通过用例均启用 console/pageerror 审计，未发现未声明错误；写操作双击用请求计数验证未重复写入。
+- 实际验证：`npm run build` 通过（保留既有大 chunk 警告）；完整 SQLite 后端 `112 passed, 3 skipped`；验收脚本通过。未运行 MCP 测试，因为本轮未修改或启动 MCP。
+- 未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。隔离容器、SQLite、上传、下载、截图、trace、Playwright 报告和 test-results 在结束前清理。
+- 未解决问题仅为明确排除的未来能力与既有前端大 chunk 警告；本轮不提前宣布正式通过，等待独立审查。
+
+### Round 17 最终小型补修：推荐主操作锁
+
+- 推荐主操作改为页面级全局单锁：任一卡片等待 `clicked` 反馈时，所有卡片主操作均禁用；课程、请求版本或页面生命周期变化后，旧操作不会继续跳转。反馈失败仍只跳转一次，逐卡片“有帮助/不感兴趣”锁保持不变。
+- 推荐历史入口和刷新增加函数级防重复，快速连续触发分别只产生一个初始 GET 和一个刷新 GET。
+- `validate:acceptance` 现在除校验汇总一致性外，还强制 `BLOCKED=0`，并通过内存模拟非零 BLOCKED 验证失败分支。
+- 本次只运行 `learning-recommendations` 中 1 个推荐锁测试函数：desktop 1/1、mobile 1/1，共 `2 passed`；验收脚本在当前 `BLOCKED=0` 时通过、模拟非零时按预期退出 1；`npm run build` 通过。
+- 没有重新运行完整 Playwright 矩阵，也没有运行后端测试；未启动 PostgreSQL、Redis、Celery、MCP 或外部 AI。
+
+## AI integration handover verification and hardening (main: 3829651)
+
+- Baseline: `origin/main` commit `382965100e29dc7f476a5715d134843ce5b8dfa9`; validation is on a local repair branch only, without merging or pushing main.
+- Qwen: tracked templates and local non-sensitive `.env` values use `qwen`, `qwen3.7-plus`, `qwen3.7-text-embedding`, and `EMBEDDING_DIMENSION=1024`. `LLM_API_KEY` is deliberately blank; the user must rotate the exposed key and enter only the new key manually.
+- Embeddings: PostgreSQL uses `Vector(1024)`. Runtime configuration is constrained to 1024; the compatible API sends `dimensions` and `encoding_format=float`, validates item count/order/numeric values/dimension, and validates again before document writes and RAG retrieval.
+- Documents: PDF extraction uses PyMuPDF and weak pages use Tesseract OCR. Supported uploads are PDF, TXT, and Markdown; PPT/PPTX must be exported to PDF. Damaged-PDF errors no longer expose storage paths. Existing documents should be reparsed after changing provider; no local database was started in this verification.
+- Chat: grounded answers show course-material citations; remote insufficient-material answers use general knowledge without fabricated citations; offline Mock explicitly says it does not use general knowledge. The web page uses the RAG API; MCP remains a separate tool layer without verified web-agent invocation.
+- LaTeX: frontend uses the local `katex` package and bundled fonts, not jsDelivr/global `window.katex`; text is escaped and KaTeX trust is disabled.
+- Results: targeted SQLite/Mock AI tests `57 passed, 2 skipped`; full backend suite `tests/backend` `128 passed, 3 skipped`; `npm run build` passed with existing large-chunk warnings. Root `pytest -q` was blocked at MCP collection because that separate package was not installed.
+- Not run: Docker daemon was unavailable and `LLM_API_KEY` is blank, so no containers, remote Qwen calls, old-document reparse, or end-to-end AI smoke tests ran.
+
+## AI real-environment validation follow-up (pending browser evidence)
+
+- Real Docker stack: PostgreSQL, Redis, backend, Celery worker, and frontend started successfully; backend `/health` and frontend HTTP checks passed. A non-empty PostgreSQL backup was created in the system temporary directory before validation. The pre-existing database contained 13 ready documents, 125 chunks, and 13 ready document versions; those existing documents were not reparsed during this smoke run.
+- Real Qwen: `qwen3.7-text-embedding` returned a non-empty 1024-dimensional embedding through the running backend. A temporary isolated PDF completed processing (`ready`, one page, one chunk); PostgreSQL confirmed no vector-dimension mismatch.
+- Real product smoke flow: grounded RAG returned a citation for the isolated PDF; Qwen plan generation was confirmed and activated; active today tasks were present; practice generated questions and accepted one correct and one wrong attempt; wrong-book, mastery, and recommendations updated through real APIs.
+- Fixes found during real validation: an AI-generated plan could leave courses without knowledge points, preventing practice bootstrap; plans now persist validated Qwen-extracted points and fall back to existing seeded points only when extraction yields no usable point. RAG now requires a meaningful lexical overlap in addition to retrieval score before exposing a course citation, preventing unrelated general-knowledge questions from receiving a fabricated course citation. The real "capital of France" retest returned `sufficient_evidence=false` and zero citations.
+- Tests: targeted plan/practice/RAG tests `27 passed, 2 skipped`; full backend suite `129 passed, 3 skipped`; frontend `npm run build` passed. The first pytest invocation encountered a Windows default temporary-directory permission error; rerunning with an isolated, removed `--basetemp` passed.
+- Pending: the in-app browser runtime was unavailable, so real visible KaTeX rendering and targeted Playwright verification were not executed. Static checks confirm local `katex` is installed, `index.html` has no jsDelivr/global KaTeX dependency, and the production build includes bundled KaTeX fonts. No push is authorized until browser evidence is available.
+
+## AI validation finalization and document reparse
+
+- Final local baseline before this documentation update: `112b05c11e54730cb3f71f5957875eecc25c0a7e`. Docker PostgreSQL, Redis, backend, Celery worker, and frontend were healthy. The existing non-empty database backup remains in the system temporary directory.
+- Document migration: 16 ready documents, 16 active ready versions, and 128 chunks were found before reparse. All 16 documents were submitted through the existing reparse API; all 16 tasks succeeded, 0 failed, and 0 remain pending. Each document is ready on its active version, has current-version chunks, and every active chunk has dimension 1024.
+- Reparse RAG verification: a course-material question returned one citation from the document current version; the out-of-material question returned `sufficient_evidence=false` and zero citations; a real Qwen formula answer retained a LaTeX marker in the API response.
+- Existing real smoke results remain valid: Qwen plan generation/activation, today tasks, AI practice, correct and incorrect submissions, wrong-book, mastery, and recommendations completed through real APIs.
+- Final regression: `pytest -q tests/backend` with an isolated temporary base directory: `129 passed, 3 skipped`; `frontend/npm run build` passed. The test base directory and build output are not tracked.
+- Non-blocking validation boundaries: PPT/PPTX is intentionally documented as “export to PDF first”; OCR code/unit coverage exists through PyMuPDF, Tesseract, and Chinese/English packages but no scanned-PDF run was performed; MCP remains an independent tool layer and web chat does not invoke an MCP agent. No system Chrome, Edge, or Chromium executable was found, so KaTeX visual verification remains a short manual check; local KaTeX dependency, bundled fonts, no jsDelivr/global dependency, production build, and a real API LaTeX response were verified.
+
+## First-use onboarding (version 1)
+
+- Added server-authoritative per-user onboarding state to `user_preferences`: `onboarding_seen_version` defaults to `0`; `onboarding_completed_at` remains `null` after a skip and is server-stamped after normal completion. Existing databases receive both columns through the project's idempotent migration hook.
+- The authenticated app shell loads the current user's profile once, shows a welcome dialog only when `seen_version < 1`, and uses Element Plus Tour for five real navigation targets: courses, course materials, chat, plans, and practice. Missing targets, including the mobile collapsed navigation, fall back to the centered Tour card without blocking progress.
+- Skip, close, or Escape records version 1 as seen; completing the final step records the same version plus a completion timestamp. Settings can reopen the welcome flow without resetting either server value. The dashboard onboarding checklist remains deferred to the next round.
+- Backend preference coverage passed (`15 passed`); the full SQLite backend suite passed (`132 passed, 3 skipped`); and `frontend/npm run build` passed with the existing large-chunk warning. A focused Playwright onboarding spec was added but could not run because Docker Desktop's Linux engine pipe was unavailable; no browser result is claimed.
+
+## Round 20: real first-use checklist (version 1)
+
+- Extended the existing read-only Dashboard overview with server-computed onboarding progress: first owned course (including archived history), a current ready document version, a real user chat message, an active plan plus active version, and a completed task or completed learning record. The response also supplies only user-scoped usable course context for client-side navigation.
+- Replaced the previous derived four-step dashboard panel with a five-item `OnboardingChecklist` card. It shows `0–5 / 5`, a real progress bar, completed/incomplete states, a compact all-complete message, and no client-side completion cache. Task navigation uses existing pages: courses, a usable course upload page, ready-material chat, plan, and today; missing course/material context degrades to courses or upload with an explanatory message.
+- Isolated users through every aggregate query. Re-entering Dashboard refetches the overview; no high-frequency polling or separate persisted checklist state was added. The prior welcome dialog semantics remain unchanged.
+- Corrected the guided Tour target audit: course management remains a sidebar target, while course materials now targets the separate Dashboard upload shortcut; settings replay remains unchanged.
+- Tests: Dashboard onboarding backend coverage passed (`5 passed`); complete SQLite backend suite passed (`133 passed, 3 skipped`); `frontend/npm run build` passed (existing large-chunk warning remains). Playwright discovers 8 focused desktop/mobile onboarding tests, but browser execution was not possible because Docker Desktop's Linux engine pipe was unavailable.
+- Remaining: Round 20 still needs final browser acceptance once Docker/system browser is available; this includes visible checklist interaction, user-switch isolation, and mobile overflow verification.
+
+### Final visual acceptance
+
+- Docker Desktop was started for this acceptance. PostgreSQL, Redis, backend, worker and frontend were healthy; the frontend returned HTTP 200 and `/health` returned `status=ok`.
+- The isolated SQLite Playwright backend ran the focused onboarding spec in system Chrome. Final result: desktop `5/5` passed, mobile `5/5` passed, total `10/10` passed. It covers welcome/Tour completion and settings replay, skip persistence, `0/5`, real sequential `1/5` through `5/5`, ready-document routing, A/B isolation, and mobile Tour fallback when the collapsed sidebar has no course target.
+- The first browser attempt exposed two overly broad test locators (`完成` also matched checklist task names) and a mobile assertion that incorrectly required a desktop-only sidebar target. No production behavior was changed: the test now selects the exact Tour completion button and explicitly verifies the intended centered mobile fallback can advance.
+- Regression: `tests/backend/test_dashboard.py tests/backend/test_preferences_and_personalized_plans.py` passed (`20 passed`); `frontend/npm run build` passed with the existing large-chunk warning. The full backend suite was not rerun because production code did not change.
+- KaTeX visual inspection remains unverified in this acceptance: the controlled in-app browser had no available binding and no safe pre-authenticated real chat session was available. No KaTeX result is claimed.
+
+## Round 21: non-blocking AI enhancements
+
+- Root cause: recommendations, plan generation, and practice bootstrap synchronously waited for remote LLM/RAG work. A slow provider could therefore exhaust the normal frontend request window even while the backend process itself was alive.
+- The three primary routes are now rule-first. They return rule recommendations, a confirmable candidate plan, or active rule questions immediately, then create/reuse a persistent `AsyncTask` for optional Celery AI enrichment. AI failure is recorded on that task and never rolls back the usable rule result.
+- Practice AI output now has strict structured validation (exact non-empty A/B/C/D options, valid answer, explanation, source and difficulty). Historical questions and related attempts are preserved; inactive questions no longer block a new active bootstrap question; per-question savepoints keep partial enhancement failures isolated.
+- API/data contract: no migration was required. New persisted AsyncTask types are `ai_recommendation`, `plan_ai_enhancement`, and `practice_ai_enhancement`; recommendation and plan/practice bootstrap responses expose optional background-task metadata.
+- Verification: focused non-blocking coverage passed (`10 passed`, including repeat-plan task deduplication and controlled 8.1-second slow enhancement execution for recommendations, plans, and practice); recommendation returned in under one second and plan/practice rule results under two seconds; provider tests passed (`16 passed`); complete backend suite passed (`143 passed, 3 skipped`); `frontend/npm run build` passed with the existing chunk-size warning. Docker backend `/health` and frontend HTTP checks both returned 200 after rebuild.
+- Real Qwen was intentionally not invoked in this round, so remote-provider latency and output quality remain unverified. The remaining operational dependency is a healthy Celery broker/worker for enhancements; the rule-first flows remain usable if it is unavailable. Existing KaTeX visual-acceptance status is unchanged.
+
+### Round 21 acceptance repair: AI target binding, cancellation, and result visibility
+
+- AI enhancement deduplication now includes the complete target input. A newly generated candidate plan therefore receives a task that references its own `plan_id` and version; only queued/processing/success work for that exact target is reused, while failed/cancelled work can start a new round.
+- Worker cancellation is re-read after the provider returns and before any plan, practice, or recommendation success write. Cancellation rolls back pending business data before the task is independently committed as cancelled, so a cancelled plan cannot overwrite its summary/risks and a cancelled practice enhancement cannot add questions.
+- Recommendation, plan, and practice pages retain the asynchronous task id and use bounded, route-guarded polling. Success refreshes the matching persisted recommendation/plan/question data; failed or cancelled enhancement leaves the rule-first result usable and shows an honest fallback state.
+- AI practice source quotes must normalize to text actually present in the RAG context. Validation/persistence rejections now contribute requested, validated, rejected, created, skipped-existing, and failed counts, with warning data for an all-invalid result.
+- Verification: Round 21 specialist tests `14 passed`; related flows `44 passed, 2 skipped`; full backend suite `147 passed, 3 skipped`; `frontend/npm run build` passed (existing chunk-size warnings only). A controlled real Redis/Celery fake-provider run created an API task, had the worker execute it, and observed `queued -> success`; a controlled broker-dispatch failure returned the rule recommendation in under one second. Docker backend/PostgreSQL/Redis/frontend/worker were healthy after restoring the original worker.
+- Real Qwen was not invoked. Browser interaction testing was not run for this repair; frontend behavior is covered by type/build validation and bounded polling guards rather than a claimed browser result.
+
+## 最终封版补修与验收
+
+- AI 增强任务以稳定 base idempotency key 分组；查询会同时识别 base 与可查询的 `:retry:n` 任务。每组只复用一个 queued/processing/cancelling 任务，成功的有效结果可复用，failed/cancelled 或历史全无效练习结果可开始一轮新的 retry。worker 以条件 UPDATE 原子领取 queued 任务，重复 worker 调用不会再次调用模型。
+- 推荐 worker 读取并校验任务保存的 `target_date`，推荐数据、任务逾期、考试距离与提示日期不再退回服务器 `date.today()`；AI 建议经过 title/reason/priority/minutes/item_type 白名单验证。前端按结构化字段展示对象建议，不渲染 JSON。
+- 练习题引用仅比对 RAG 原始 quote 正文；空白、标点、短引用和非上下文引用被拒绝。全部无效的 AI 练习输出成为 `failed / AI_RESPONSE_INVALID`，可由后续请求重新触发；部分有效输出保留 success + warnings。
+- 计划增强传递 `unavailable_dates`；计划与练习页面对生成/bootstrap 请求保留 source course guard 并在进行中禁用课程切换。三页轮询在约 60 秒后只停止前端查询并诚实提示后台仍在运行，不伪造 failed。
+- 自动化：Round 21 专项 `24 passed`；完整后端 `157 passed, 3 skipped`；前端 `npm run build` 通过；定向 Playwright（结构化 AI 建议，无原始 JSON）desktop `1 passed`。Docker PostgreSQL、Redis、backend、worker、frontend 健康。
+- 真实 Qwen 验收：配置确认为 qwen/qwen3.7-plus。受控临时课程的推荐两次分别在约 13 秒 ReadTimeout，计划增强在约 20 秒失败；练习未执行，因前序计划失败而停止。该结果不视为通过，未通过延长超时掩盖。受控浏览器没有可用实例，因此三条网页人工验收、切课竞态人工检查与真实聊天 KaTeX 可视化仍未验证。
+
+## 最终真实 Qwen 轻量配置修正与封版记录
+
+- 推荐、计划和练习三类结构化后台增强请求现在显式传递 `enable_thinking=false`。`OpenAICompatibleProvider` 保持透传调用方参数；普通 RAG 问答不传递该字段，保留提供方的正常推理默认。输出上限分别收紧为推荐 700、计划 1400、练习 1800 tokens，未通过大幅调高 timeout 解决问题。
+- 受控实际 Qwen 运行环境使用 `qwen3.7-plus`。极短的非思考 JSON 请求成功返回 `{"ok":true}`。推荐后台任务 success，耗时 8.8 秒；计划后台任务 success，耗时 10.9 秒；练习任务实际获得 embedding 和 chat 200，耗时 7.0 秒，但模型返回的 source_quote 不通过现有严格溯源校验，因而按设计标记 `AI_RESPONSE_INVALID`。未切换为 flash 模型，也未继续无限重试。
+- 实际链路发现并修复了练习 RAG 调用漏传 `document_ids` 的问题；现在显式传递 `None`，避免在调用模型前由 TypeError 失败。
+- 验证：结构化 AI/Provider 专项 `34 passed`；完整后端 `159 passed, 3 skipped`；`frontend/npm run build` 通过。自动浏览器与真实聊天 KaTeX 可视化本次未执行。JWT HMAC 密钥长度和 Starlette TestClient 兼容性警告仍为已知非阻塞问题。
+
+## 最终内容质量补修
+
+- 计划、练习和推荐不再把“核心概念、重点原理、综合应用”当作可用学习内容。历史记录保留；关联历史题已停用，新内容统一通过 `course_content` 过滤这些旧占位点。
+- 已接入现有 RAG 知识点提取链路：就绪课程资料但没有真实知识点时会创建可复用的后台提取任务；提取结果必须包含可核验的原文、文档和页码。课程 82 实际 Qwen 提取成功 8 项，耗时 28.3 秒。
+- 规则计划只围绕真实知识点和其来源章节安排学习/复习任务；AI 计划增强只请求摘要和风险，不再花费 Token 生成最终不会使用的 tasks。规则练习题从真实文档 chunk 生成，带来源、页码和引用，答案按稳定规则分散 A/B/C/D；无可信来源时返回诚实空状态。
+- 课程 82 实际核验：历史 6 条占位关联题已停用；生成 8 道来源题，新候选计划和推荐主体均展示具体知识点。真实 Qwen 本次仅执行一次知识点提取；计划、练习、推荐最终内容检查未额外调用 Qwen。
+- 验证：内容质量专项及关联推荐/练习专项通过；完整 SQLite 后端测试 `161 passed, 3 skipped`；`frontend/npm run build` 通过。浏览器人工验收未执行；构建仍只有既有大 chunk 警告。

@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+
+from backend.app.config import Settings
+from backend.app.providers.llm import (
+    MockLLMProvider,
+    OpenAICompatibleProvider,
+    get_llm_provider,
+    llm_runtime_status,
+)
+from backend.app.services.rag import answer_from_sources
+
+
+def test_chat_provider_can_use_local_embedding_fallback() -> None:
+    settings = Settings(
+        llm_provider="deepseek",
+        llm_base_url="https://api.deepseek.com",
+        llm_api_key="test-key",
+        llm_chat_model="deepseek-chat",
+        llm_embedding_model="",
+        embedding_dimension=1024,
+    )
+
+    provider = get_llm_provider(settings)
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    embeddings = asyncio.run(provider.embed(["local fallback embedding"]))
+    assert len(embeddings) == 1
+    assert len(embeddings[0]) == 1024
+
+
+def test_remote_embeddings_are_requested_in_ordered_batches(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class MockResponse:
+        def __init__(self, texts: list[str]) -> None:
+            self.texts = texts
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": [
+                    {"index": index, "embedding": [float(index)] * 1024}
+                    for index, _text in reversed(list(enumerate(self.texts)))
+                ]
+            }
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json, timeout=None):
+            del headers
+            assert timeout is not None
+            requests.append(json)
+            return MockResponse(json["input"])
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: MockClient())
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen-chat",
+        llm_embedding_model="qwen-embedding",
+        llm_embedding_batch_size=2,
+    )
+
+    embeddings = asyncio.run(get_llm_provider(settings).embed(["a", "b", "c", "d", "e"]))
+
+    assert [request["input"] for request in requests] == [["a", "b"], ["c", "d"], ["e"]]
+    assert all(request["dimensions"] == 1024 for request in requests)
+    assert all(request["encoding_format"] == "float" for request in requests)
+    assert [embedding[0] for embedding in embeddings] == [0.0, 1.0, 0.0, 1.0, 0.0]
+    assert all(len(embedding) == 1024 for embedding in embeddings)
+
+
+def test_remote_embedding_dimension_mismatch_is_rejected(monkeypatch) -> None:
+    class MockResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"data": [{"index": 0, "embedding": [0.0, 1.0]}]}
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: MockClient())
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen-chat",
+        llm_embedding_model="text-embedding-v4",
+    )
+
+    with pytest.raises(ValueError, match="EMBEDDING_DIMENSION_MISMATCH"):
+        asyncio.run(get_llm_provider(settings).embed(["dimension check"]))
+
+
+def test_embedding_dimension_must_match_persisted_vector_schema() -> None:
+    with pytest.raises(ValueError, match="EMBEDDING_DIMENSION must be 1024"):
+        Settings(embedding_dimension=512)
+
+
+def test_remote_provider_configuration_never_silently_falls_back_to_mock() -> None:
+    settings = Settings(
+        llm_provider="deepseek",
+        llm_base_url="https://api.deepseek.com",
+        llm_api_key="",
+        llm_chat_model="deepseek-chat",
+    )
+
+    with pytest.raises(ValueError, match="LLM_API_KEY"):
+        get_llm_provider(settings)
+
+
+def test_mock_provider_and_runtime_status_are_explicit() -> None:
+    settings = Settings(llm_provider="mock", llm_chat_model="ignored")
+
+    assert isinstance(get_llm_provider(settings), MockLLMProvider)
+    assert llm_runtime_status(settings) == {
+        "provider": "mock",
+        "chat_model": "",
+        "chat_mode": "mock",
+        "embedding_mode": "local",
+        "is_mock": True,
+    }
+
+
+def test_remote_runtime_status_exposes_model_without_secret() -> None:
+    settings = Settings(
+        llm_provider="deepseek",
+        llm_base_url="https://api.deepseek.com",
+        llm_api_key="secret-key",
+        llm_chat_model="deepseek-chat",
+        llm_embedding_model="",
+    )
+
+    assert llm_runtime_status(settings) == {
+        "provider": "deepseek",
+        "chat_model": "deepseek-chat",
+        "chat_mode": "remote",
+        "embedding_mode": "local",
+        "is_mock": False,
+    }
+
+
+def test_remote_chat_only_disables_thinking_when_callers_request_it(monkeypatch) -> None:
+    """Structured jobs opt out explicitly; ordinary chat keeps provider defaults."""
+    requests: list[dict] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    class Client:
+        async def post(self, _url, *, headers, json, timeout):
+            del headers, timeout
+            requests.append(json)
+            return Response()
+
+        @property
+        def is_closed(self) -> bool:
+            return False
+
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen3.7-plus",
+    )
+    provider = OpenAICompatibleProvider(settings)
+    monkeypatch.setattr(provider, "_http_client", lambda: Client())
+
+    asyncio.run(provider.chat([{"role": "user", "content": "json"}], enable_thinking=False, max_tokens=20))
+    asyncio.run(provider.chat([{"role": "user", "content": "ordinary chat"}], max_tokens=20))
+
+    assert requests[0]["enable_thinking"] is False
+    assert "enable_thinking" not in requests[1]
+
+
+def test_strict_rag_mode_calls_chat_provider_with_grounding_prompt() -> None:
+    class RecordingProvider:
+        messages: list[dict[str, str]] = []
+        kwargs: dict = {}
+
+        async def chat(self, messages, **kwargs):
+            self.messages = messages
+            self.kwargs = kwargs
+            return "该协议使用 cobalt lanterns。[S1]"
+
+        async def embed(self, _texts):
+            return [[1.0]]
+
+    provider = RecordingProvider()
+    sources = [
+        {
+            "document_name": "protocol.txt",
+            "page_number": 1,
+            "quote": "The protocol uses cobalt lanterns.",
+            "score": 0.9,
+        }
+    ]
+
+    answer, sufficient = asyncio.run(
+        answer_from_sources(provider, "What does the protocol use?", sources, "strict")
+    )
+
+    assert sufficient is True
+    assert "cobalt lanterns" in answer
+    assert provider.messages[0]["role"] == "system"
+    assert "课程资料" in provider.messages[0]["content"]
+    assert "[S1]" in provider.messages[1]["content"]

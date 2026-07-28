@@ -24,16 +24,16 @@ def test_course_crud_and_exam_date(
     updated = client.patch(
         f"/api/v1/courses/{course_id}",
         headers=auth_headers,
-        json={"name": "Applied Machine Learning", "archived": True},
+        json={"name": "Applied Machine Learning"},
     )
     assert updated.status_code == 200
     assert updated.json()["data"]["name"] == "Applied Machine Learning"
 
-    assert client.get("/api/v1/courses", headers=auth_headers).json()["data"]["items"] == []
-    archived = client.get(
+    assert len(client.get("/api/v1/courses", headers=auth_headers).json()["data"]["items"]) == 1
+    including_archived = client.get(
         "/api/v1/courses?include_archived=true", headers=auth_headers
     )
-    assert len(archived.json()["data"]["items"]) == 1
+    assert len(including_archived.json()["data"]["items"]) == 1
 
     exam = client.put(
         f"/api/v1/courses/{course_id}/exam-date",
@@ -46,7 +46,8 @@ def test_course_crud_and_exam_date(
     deleted = client.delete(f"/api/v1/courses/{course_id}", headers=auth_headers)
     assert deleted.status_code == 200
     assert deleted.json()["data"]["status"] == "archived"
-    assert client.get(f"/api/v1/courses/{course_id}", headers=auth_headers).status_code == 200
+    assert client.get(f"/api/v1/courses/{course_id}", headers=auth_headers).status_code == 404
+    assert client.get("/api/v1/courses", headers=auth_headers).json()["data"]["items"] == []
 
 
 def test_course_isolation_between_users(

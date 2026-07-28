@@ -1,38 +1,357 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Calendar, Delete, Download, Edit } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { Calendar, Check, Connection, Lock, Warning } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { calendarApi, courseApi, mcpApi } from '@/api/services'
+import { getApiErrorMessage } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
+import type {
+  CalendarEventItem,
+  CalendarEventPreview,
+  CalendarEventUpdateRequest,
+  CalendarPlanSyncPreview,
+  CourseListItem,
+  MCPToolCallItem,
+  MCPToolInfo,
+} from '@/types'
 
-const confirmVisible = ref(false)
-const connected = ref(true)
-const previewEvents = [
-  { day: '周三 07/15', time: '20:00–20:45', title: '第二范式与第三范式', type: '阅读', conflict: false },
-  { day: '周三 07/15', time: '21:00–21:30', title: '候选码判断练习', type: '练习', conflict: false },
-  { day: '周四 07/16', time: '19:30–20:20', title: 'BCNF 与模式分解', type: '阅读', conflict: false },
-  { day: '周四 07/16', time: '20:30–21:05', title: '范式综合小测', type: '测试', conflict: true },
-]
-function sync() { confirmVisible.value=false; ElMessage.success('已通过 MCP 创建 3 个事件，1 个冲突事件已跳过') }
+const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
+const courses = ref<CourseListItem[]>([])
+const events = ref<CalendarEventItem[]>([])
+const tools = ref<MCPToolInfo[]>([])
+const calls = ref<MCPToolCallItem[]>([])
+const weekStart = ref('')
+const courseId = ref<number | undefined>()
+const timezone = computed(() => auth.user?.timezone || 'UTC')
+const calendarError = ref('')
+const eventSelectionError = ref('')
+const toolError = ref('')
+const auditError = ref('')
+const exportError = ref('')
+const loadingEvents = ref(false)
+const previewingPlan = ref(false)
+const confirmingPlan = ref(false)
+const exportingIcs = ref(false)
+const previewingUpdate = ref(false)
+const updatingEvent = ref(false)
+const previewingDelete = ref(false)
+const deletingEvent = ref(false)
+const syncVisible = ref(false)
+const detailVisible = ref(false)
+const selected = ref<CalendarEventItem | null>(null)
+const planPreview = ref<CalendarPlanSyncPreview | null>(null)
+const updatePreview = ref<CalendarEventPreview | null>(null)
+const deletePreview = ref<CalendarEventPreview | null>(null)
+const dailyStart = ref('20:00')
+const gap = ref(10)
+const editTitle = ref('')
+const editStart = ref('')
+const editEnd = ref('')
+let internalNavigation = false
+let requestVersion = 0
+
+function parseDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  return match ? { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) } : null
+}
+function formatDateOnly(year: number, month: number, day: number) {
+  return [year, month, day].map((value, index) => String(value).padStart(index ? 2 : 4, '0')).join('-')
+}
+function addDateDays(value: string, amount: number) {
+  const parts = parseDateOnly(value)
+  if (!parts) return value
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + amount))
+  return formatDateOnly(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())
+}
+function mondayOf(value: string) {
+  const parts = parseDateOnly(value)
+  if (!parts) return value
+  const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()
+  return addDateDays(value, -((weekday + 6) % 7))
+}
+function zonedParts(value: Date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone.value,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(value)
+  const get = (type: string) => Number(parts.find((item) => item.type === type)?.value || 0)
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour'), minute: get('minute'), second: get('second') }
+}
+function todayInUserZone() {
+  const parts = zonedParts(new Date())
+  return formatDateOnly(parts.year, parts.month, parts.day)
+}
+function eventLocal(event: CalendarEventItem) {
+  const start = zonedParts(new Date(event.start_at))
+  const end = zonedParts(new Date(event.end_at))
+  const startDate = formatDateOnly(start.year, start.month, start.day)
+  const endDate = formatDateOnly(end.year, end.month, end.day)
+  const startTime = `${String(start.hour).padStart(2, '0')}:${String(start.minute).padStart(2, '0')}`
+  const endTime = `${String(end.hour).padStart(2, '0')}:${String(end.minute).padStart(2, '0')}`
+  return { startDate, endDate, startTime, endTime, range: startDate === endDate ? `${startTime}–${endTime}` : `${startDate} ${startTime} – ${endDate} ${endTime}` }
+}
+function previewRange(startAt: string, endAt: string) {
+  return eventLocal({ start_at: startAt, end_at: endAt } as CalendarEventItem).range
+}
+function localDateTimeToUtc(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value)
+  if (!match) throw new Error('本地日期时间格式无效')
+  const desired = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]))
+  let guess = desired
+  for (let index = 0; index < 4; index += 1) {
+    const actual = zonedParts(new Date(guess))
+    const represented = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second)
+    guess += desired - represented
+  }
+  const verified = zonedParts(new Date(guess))
+  if (
+    verified.year !== Number(match[1])
+    || verified.month !== Number(match[2])
+    || verified.day !== Number(match[3])
+    || verified.hour !== Number(match[4])
+    || verified.minute !== Number(match[5])
+  ) throw new Error('该本地时间在当前时区不存在，请选择其他时间')
+  return new Date(guess).toISOString()
+}
+function toLocalInput(value: string) {
+  const parts = zonedParts(new Date(value))
+  return `${formatDateOnly(parts.year, parts.month, parts.day)}T${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`
+}
+
+const weekDays = computed(() => Array.from({ length: 7 }, (_, index) => addDateDays(weekStart.value, index)))
+const calendarTools = computed(() => tools.value.filter((tool) => ['get_available_time', 'create_calendar_event', 'update_calendar_event', 'delete_calendar_event'].includes(tool.name)))
+const operationBusy = computed(() => previewingUpdate.value || updatingEvent.value || previewingDelete.value || deletingEvent.value)
+
+function clearRangeState() {
+  events.value = []
+  planPreview.value = null
+  selected.value = null
+  detailVisible.value = false
+  updatePreview.value = null
+  deletePreview.value = null
+  calendarError.value = ''
+  eventSelectionError.value = ''
+}
+async function initializeFromRoute() {
+  if (!courses.value.length) courses.value = (await courseApi.list()).items.filter((course) => !course.archived)
+  const rawWeek = String(route.query.weekStart || '')
+  weekStart.value = parseDateOnly(rawWeek) ? mondayOf(rawWeek) : mondayOf(todayInUserZone())
+  const rawCourse = Number(route.query.courseId)
+  courseId.value = courses.value.some((course) => course.id === rawCourse) ? rawCourse : undefined
+  const needsNormalize = rawWeek !== weekStart.value || (route.query.courseId && courseId.value === undefined)
+  if (needsNormalize) {
+    internalNavigation = true
+    await router.replace({
+      query: {
+        weekStart: weekStart.value,
+        ...(courseId.value ? { courseId: String(courseId.value) } : {}),
+        ...(typeof route.query.eventId === 'string' ? { eventId: route.query.eventId } : {}),
+      },
+    })
+    internalNavigation = false
+  }
+}
+async function loadCalendarData() {
+  const version = ++requestVersion
+  clearRangeState()
+  loadingEvents.value = true
+  const params = { start_date: weekStart.value, end_date: weekDays.value[6], course_id: courseId.value }
+  try {
+    const data = await calendarApi.list(params)
+    if (version === requestVersion) {
+      events.value = data.items
+      const rawEventId = typeof route.query.eventId === 'string' ? Number(route.query.eventId) : null
+      if (route.query.eventId !== undefined) {
+        const event = Number.isInteger(rawEventId) && rawEventId! > 0
+          ? data.items.find((item) => item.id === rawEventId)
+          : undefined
+        if (event) openEvent(event)
+        else eventSelectionError.value = '日历事件不存在或不属于当前账号'
+      }
+    }
+  } catch (error) {
+    if (version === requestVersion) calendarError.value = getApiErrorMessage(error, '日历事件加载失败')
+  } finally {
+    if (version === requestVersion) loadingEvents.value = false
+  }
+  toolError.value = ''
+  try { tools.value = (await mcpApi.listTools()).items } catch (error) { toolError.value = getApiErrorMessage(error, 'MCP 工具加载失败') }
+  auditError.value = ''
+  try { calls.value = (await mcpApi.listCalls({ calendar_only: true })).items } catch (error) { auditError.value = getApiErrorMessage(error, 'MCP 审计加载失败') }
+}
+async function updateRouteAndLoad(nextWeek: string, nextCourse: number | undefined) {
+  clearRangeState()
+  weekStart.value = nextWeek
+  courseId.value = nextCourse
+  internalNavigation = true
+  await router.push({ query: { weekStart: nextWeek, ...(nextCourse ? { courseId: String(nextCourse) } : {}) } })
+  internalNavigation = false
+  await loadCalendarData()
+}
+async function onCourseChange(value: number | undefined) { await updateRouteAndLoad(weekStart.value, value) }
+async function changeWeek(amount: number) { await updateRouteAndLoad(addDateDays(weekStart.value, amount * 7), courseId.value) }
+async function goToday() { await updateRouteAndLoad(mondayOf(todayInUserZone()), courseId.value) }
+function invalidatePlanPreview() { planPreview.value = null }
+
+async function previewPlan() {
+  if (previewingPlan.value) return
+  previewingPlan.value = true
+  calendarError.value = ''
+  try {
+    planPreview.value = await calendarApi.previewPlanSync({ start_date: weekStart.value, end_date: weekDays.value[6], course_id: courseId.value, daily_start_time: dailyStart.value, gap_minutes: gap.value })
+  } catch (error) { calendarError.value = getApiErrorMessage(error, '计划预览失败') }
+  finally { previewingPlan.value = false }
+}
+async function confirmPlan() {
+  if (!planPreview.value || confirmingPlan.value) return
+  confirmingPlan.value = true
+  try {
+    const result = await calendarApi.confirmPlanSync(planPreview.value, planPreview.value.confirmation_token)
+    ElMessage.success(`创建 ${result.created_count} 项，幂等重放 ${result.replayed_count} 项`)
+    syncVisible.value = false
+    planPreview.value = null
+    await loadCalendarData()
+  } catch (error) { calendarError.value = getApiErrorMessage(error, '计划确认失败，请重新预览') }
+  finally { confirmingPlan.value = false }
+}
+async function exportIcs() {
+  if (exportingIcs.value) return
+  exportingIcs.value = true
+  exportError.value = ''
+  try {
+    const file = await calendarApi.exportIcs({ start_date: weekStart.value, end_date: weekDays.value[6], course_id: courseId.value })
+    const url = URL.createObjectURL(file.blob)
+    const anchor = document.createElement('a')
+    anchor.href = url; anchor.download = file.filename; anchor.click(); URL.revokeObjectURL(url)
+  } catch (error) { exportError.value = getApiErrorMessage(error, 'ICS 导出失败') }
+  finally { exportingIcs.value = false }
+}
+function openEvent(event: CalendarEventItem) {
+  selected.value = event
+  editTitle.value = event.title
+  editStart.value = toLocalInput(event.start_at)
+  editEnd.value = toLocalInput(event.end_at)
+  updatePreview.value = null
+  deletePreview.value = null
+  detailVisible.value = true
+}
+function updatePayload(): CalendarEventUpdateRequest {
+  return { title: editTitle.value.trim(), start_at: localDateTimeToUtc(editStart.value), end_at: localDateTimeToUtc(editEnd.value) }
+}
+async function previewUpdate() {
+  if (!selected.value || previewingUpdate.value) return
+  previewingUpdate.value = true
+  calendarError.value = ''
+  try { updatePreview.value = await calendarApi.previewUpdate(selected.value.id, updatePayload()) }
+  catch (error) { calendarError.value = getApiErrorMessage(error, '修改预览失败') }
+  finally { previewingUpdate.value = false }
+}
+async function confirmUpdate() {
+  if (!selected.value || !updatePreview.value || updatingEvent.value) return
+  updatingEvent.value = true
+  try {
+    await calendarApi.updateEvent(selected.value.id, updatePayload(), updatePreview.value.confirmation_token)
+    detailVisible.value = false
+    ElMessage.success('本地日历事件已更新')
+    await loadCalendarData()
+  } catch (error) { calendarError.value = getApiErrorMessage(error, '事件已变化或令牌过期，请重新预览') }
+  finally { updatingEvent.value = false }
+}
+async function previewDelete() {
+  if (!selected.value || previewingDelete.value) return
+  previewingDelete.value = true
+  try { deletePreview.value = await calendarApi.previewDelete(selected.value.id) }
+  catch (error) { calendarError.value = getApiErrorMessage(error, '删除预览失败') }
+  finally { previewingDelete.value = false }
+}
+async function confirmDelete() {
+  if (!selected.value || !deletePreview.value || deletingEvent.value) return
+  deletingEvent.value = true
+  try {
+    await calendarApi.deleteEvent(selected.value.id, deletePreview.value.confirmation_token)
+    detailVisible.value = false
+    ElMessage.success('本地日历事件已删除')
+    await loadCalendarData()
+  } catch (error) { calendarError.value = getApiErrorMessage(error, '事件已变化或令牌过期，请重新预览') }
+  finally { deletingEvent.value = false }
+}
+
+watch([dailyStart, gap], invalidatePlanPreview)
+watch(() => [route.query.weekStart, route.query.courseId], async () => {
+  if (internalNavigation) return
+  try { await initializeFromRoute(); await loadCalendarData() }
+  catch (error) { calendarError.value = getApiErrorMessage(error, '日历初始化失败') }
+})
+onMounted(async () => {
+  try { await initializeFromRoute(); await loadCalendarData() }
+  catch (error) { calendarError.value = getApiErrorMessage(error, '日历初始化失败') }
+})
 </script>
 
 <template>
   <div>
-    <PageHeader title="日历同步" eyebrow="MCP CALENDAR" description="通过 MCP 查询空闲时间并同步学习计划；所有写入都在你确认后执行。"><el-button type="primary" @click="confirmVisible=true"><el-icon><Calendar /></el-icon>同步当前计划</el-button></PageHeader>
-    <section class="calendar-layout">
+    <PageHeader title="学习日历" eyebrow="计划日程" description="将当前活动学习计划同步到 StudyPilot 本地日历，并可导出 ICS 文件。">
+      <el-select :model-value="courseId" clearable placeholder="全部课程" @change="onCourseChange"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id"/></el-select>
+      <el-button plain :loading="exportingIcs" :disabled="loadingEvents" @click="exportIcs"><el-icon><Download/></el-icon>导出 ICS</el-button>
+      <el-button type="primary" :disabled="loadingEvents || !courses.length" @click="syncVisible=true"><el-icon><Calendar/></el-icon>同步学习计划</el-button>
+    </PageHeader>
+    <el-alert v-if="exportError" :title="exportError" type="error"/>
+    <el-alert v-if="calendarError" :title="calendarError" type="error"/>
+    <el-alert v-if="eventSelectionError" :title="eventSelectionError" type="warning"/>
+    <section class="layout">
       <main>
-        <article class="account-card content-card"><div class="calendar-logo"><el-icon><Calendar /></el-icon></div><div><span>已连接</span><h2>Microsoft Outlook 日历</h2><p>lin.zhixia@university.edu · 上次同步：今天 09:18</p></div><div class="permission"><el-icon><Lock /></el-icon><span><b>最小权限</b><small>读取空闲时间 · 创建/修改 StudyPilot 事件</small></span></div><el-switch v-model="connected" /></article>
-        <article class="content-card card-pad week-calendar"><div class="card-header"><div><h2>本周安排</h2><p>7 月 13 日 — 7 月 19 日</p></div><div><el-button plain size="small">‹</el-button><el-button plain size="small">今天</el-button><el-button plain size="small">›</el-button></div></div><div class="week-grid"><div class="time-col"><span v-for="time in ['18:00','19:00','20:00','21:00','22:00']" :key="time">{{ time }}</span></div><div v-for="day in ['一 13','二 14','三 15','四 16','五 17','六 18','日 19']" :key="day" class="day-cell" :class="{ today:day==='二 14' }"><header><span>周{{ day.split(' ')[0] }}</span><b>{{ day.split(' ')[1] }}</b></header><div class="grid-lines"><i v-for="n in 5" :key="n"></i></div><div v-if="day==='二 14'" class="event blue" style="top:92px;height:63px"><b>函数依赖练习</b><small>20:00–20:25</small></div><div v-if="day==='三 15'" class="event green" style="top:91px;height:96px"><b>第二、三范式</b><small>20:00–20:45</small></div><div v-if="day==='四 16'" class="event orange" style="top:64px;height:88px"><b>BCNF 学习</b><small>19:30–20:20</small></div><div v-if="day==='六 18'" class="event purple" style="top:119px;height:105px"><b>模拟卷一</b><small>20:30–21:30</small></div></div></div></article>
+        <article class="content-card card-pad local-state"><b>StudyPilot 本地日历：可用</b><span>用户时区：{{ timezone }}</span><span>外部日历账户：未连接</span><span>ICS 可手动导入 Outlook、Google Calendar 等应用</span></article>
+        <article class="content-card card-pad">
+          <div class="head"><h2>自然周安排</h2><span>{{ weekStart }} 至 {{ weekDays[6] }}</span><div class="head-actions"><el-button size="small" @click="changeWeek(-1)">上一周</el-button><el-button size="small" @click="goToday">今天</el-button><el-button size="small" @click="changeWeek(1)">下一周</el-button></div></div>
+          <div v-if="loadingEvents" v-loading="true" class="loading"/>
+          <el-empty v-else-if="!events.length" description="当前周暂无本地日历事件"/>
+          <div v-else class="days"><div v-for="day in weekDays" :key="day"><h3>{{ day }}</h3><button v-for="event in events.filter(item=>eventLocal(item).startDate===day)" :key="event.id" class="event" @click="openEvent(event)"><b>{{ event.title }}</b><small>{{ eventLocal(event).range }}</small><small>{{ event.course_name || '本地事件' }} · {{ event.task_type || '手工事件' }}</small></button></div></div>
+        </article>
       </main>
       <aside>
-        <article class="content-card card-pad"><div class="card-header"><div><h2>MCP 工具状态</h2><p>calendar-server v0.3.0</p></div><span class="online"><i></i>在线</span></div><div class="tool-list"><div><span><el-icon><Connection /></el-icon></span><p><b>calendar.find_free_time</b><small>只读 · 自动允许</small></p><em>12ms</em></div><div><span><el-icon><Calendar /></el-icon></span><p><b>calendar.create_events</b><small>写操作 · 需要确认</small></p><em>待调用</em></div><div><span><el-icon><Calendar /></el-icon></span><p><b>calendar.update_event</b><small>写操作 · 需要确认</small></p><em>可用</em></div></div></article>
-        <article class="content-card card-pad audit"><div class="card-header"><div><h2>最近调用日志</h2><p>所有 MCP 调用均留痕</p></div></div><div><span><el-icon><Check /></el-icon></span><p><b>查询 7 天空闲时间</b><small>calendar.find_free_time · 成功</small><em>今天 09:17:42 · 186ms</em></p></div><div><span><el-icon><Check /></el-icon></span><p><b>创建 6 个学习事件</b><small>calendar.create_events · 用户已确认</small><em>昨天 20:26:08 · 820ms</em></p></div><button>查看全部审计日志 →</button></article>
+        <article class="content-card card-pad"><h2>MCP 日历工具</h2><el-alert v-if="toolError" :title="toolError" type="error"/><p v-else>已注册 {{ calendarTools.length }} 个日历工具；写操作需要二次确认。</p><div v-for="tool in calendarTools" :key="tool.name" class="line"><b>{{tool.name}}</b><small>{{tool.requires_confirmation?'写操作 · 需要确认':'只读'}}</small></div></article>
+        <article class="content-card card-pad"><h2>最近 MCP 日历调用</h2><el-alert v-if="auditError" :title="auditError" type="error"/><el-empty v-else-if="!calls.length" description="暂无 MCP 日历调用记录" :image-size="55"/><div v-for="call in calls" :key="call.id" class="line"><b>{{call.tool_name}}</b><small>{{call.status}} · {{call.duration_ms}}ms</small></div></article>
       </aside>
     </section>
-
-    <el-dialog v-model="confirmVisible" title="确认同步到 Outlook 日历" width="min(650px, 94vw)"><div class="write-warning"><el-icon><Warning /></el-icon><div><b>即将执行外部写操作</b><p>StudyPilot 将通过 MCP 在你的 Outlook 日历中创建以下事件。系统不会修改现有非 StudyPilot 事件。</p></div></div><div class="event-preview"><div v-for="event in previewEvents" :key="event.title" :class="{ conflict:event.conflict }"><span>{{ event.day }}<small>{{ event.time }}</small></span><p><b>{{ event.title }}</b><small>{{ event.type }} · 数据库系统</small></p><em v-if="event.conflict">时间冲突，将跳过</em><el-icon v-else><Check /></el-icon></div></div><div class="confirm-meta"><span>将创建 <b>3</b> 个事件</span><span>跳过 <b>1</b> 个冲突</span><span>MCP 调用将记录审计日志</span></div><template #footer><el-button @click="confirmVisible=false">取消</el-button><el-button plain>调整时间</el-button><el-button type="primary" @click="sync">确认并同步 3 个事件</el-button></template></el-dialog>
+    <el-dialog v-model="syncVisible" class="calendar-dialog" title="同步学习计划到本地日历" width="min(720px,94vw)" append-to-body align-center>
+      <el-form label-position="top"><el-form-item label="每日开始时间"><el-time-select v-model="dailyStart" start="06:00" step="00:30" end="23:30"/></el-form-item><el-form-item label="任务间隔（分钟）"><el-input-number v-model="gap" :min="0" :max="120"/></el-form-item></el-form>
+      <el-button :loading="previewingPlan" :disabled="confirmingPlan" @click="previewPlan">生成真实预览</el-button>
+      <div v-if="planPreview" class="preview"><p>可创建 {{planPreview.ready_count}} 项；冲突 {{planPreview.conflict_count}} 项；已同步 {{planPreview.already_synced_count}} 项；跨日 {{planPreview.outside_day_count}} 项。</p><div v-for="item in planPreview.items" :key="item.task_id"><b>{{item.title}}</b><span>{{item.status}} · {{item.reason || previewRange(item.start_at,item.end_at)}}</span></div></div>
+      <template #footer><el-button :disabled="confirmingPlan" @click="syncVisible=false">取消</el-button><el-button type="primary" :loading="confirmingPlan" :disabled="!planPreview?.ready_count || previewingPlan" @click="confirmPlan">确认创建</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="detailVisible" class="calendar-dialog" title="本地日历事件" width="min(620px,94vw)" append-to-body align-center>
+      <template v-if="selected">
+        <div class="details"><p><b>课程：</b>{{selected.course_name || '无关联课程'}}</p><p><b>任务类型：</b>{{selected.task_type || '手工事件'}}</p><p><b>来源：</b>{{selected.provider}} / {{selected.sync_status}}</p></div>
+        <el-form label-position="top"><el-form-item label="标题"><el-input v-model="editTitle" @input="updatePreview=null"/></el-form-item><el-form-item label="本地开始时间"><el-input v-model="editStart" type="datetime-local" @input="updatePreview=null"/></el-form-item><el-form-item label="本地结束时间"><el-input v-model="editEnd" type="datetime-local" @input="updatePreview=null"/></el-form-item></el-form>
+        <el-alert v-if="updatePreview" title="修改预览已生成，请确认写入。" type="warning"/><el-alert v-if="deletePreview" :title="'将删除事件：'+selected.title" type="warning"/>
+      </template>
+      <template #footer><el-button type="danger" :loading="previewingDelete || deletingEvent" :disabled="operationBusy && !previewingDelete && !deletingEvent" @click="deletePreview ? confirmDelete() : previewDelete()"><el-icon><Delete/></el-icon>{{deletePreview?'确认删除':'预览删除'}}</el-button><el-button :loading="previewingUpdate || updatingEvent" :disabled="operationBusy && !previewingUpdate && !updatingEvent" @click="updatePreview ? confirmUpdate() : previewUpdate()"><el-icon><Edit/></el-icon>{{updatePreview?'确认修改':'预览修改'}}</el-button><el-button :disabled="operationBusy" @click="detailVisible=false">关闭</el-button></template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
-.calendar-layout{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:17px}.account-card{display:flex;align-items:center;gap:13px;padding:17px 19px;margin-bottom:15px}.calendar-logo{width:42px;height:42px;display:grid;place-items:center;border-radius:12px;background:#eaf3ff;color:#397cc4;font-size:20px}.account-card>div:nth-child(2){display:flex;flex:1;flex-direction:column}.account-card>div:nth-child(2)>span{color:#16a088;font-size:7px;font-weight:750}.account-card h2{margin:4px 0;font-size:11px}.account-card p{margin:0;color:#919bad;font-size:8px}.permission{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:9px;background:#f4f6fa;color:#69748c}.permission span{display:flex;flex-direction:column}.permission b{font-size:8px}.permission small{margin-top:4px;color:#929bad;font-size:7px}.week-calendar{overflow:auto}.week-grid{min-width:760px;display:grid;grid-template-columns:50px repeat(7,1fr);border:1px solid #e6e9f0;border-radius:12px;overflow:hidden}.time-col{display:grid;grid-template-rows:45px repeat(5,55px);padding-top:45px;background:#fafbfc}.time-col span{text-align:center;color:#9aa2b3;font-size:7px;transform:translateY(-4px)}.day-cell{position:relative;min-height:320px;border-left:1px solid #e8ebf1}.day-cell.today{background:#fafaff}.day-cell header{height:45px;display:flex;align-items:center;justify-content:center;gap:5px;border-bottom:1px solid #e8ebf1;color:#8b95a8;font-size:8px}.day-cell header b{font-size:11px;color:#4e596f}.day-cell.today header b{width:24px;height:24px;display:grid;place-items:center;border-radius:50%;background:#5f6de6;color:white}.grid-lines{display:grid;grid-template-rows:repeat(5,55px)}.grid-lines i{border-bottom:1px solid #edf0f4}.event{position:absolute;left:5px;right:5px;padding:6px;border-left:3px solid;border-radius:6px;overflow:hidden}.event b{display:block;font-size:7px}.event small{display:block;margin-top:4px;font-size:6px}.event.blue{border-color:#5d6ce3;background:#edf0ff;color:#5361cf}.event.green{border-color:#17a78c;background:#e9f8f4;color:#178a75}.event.orange{border-color:#e38a3a;background:#fff2e6;color:#ca782f}.event.purple{border-color:#9a61db;background:#f5ecff;color:#8652c2}.online{display:flex;align-items:center;gap:5px;color:#168f78;font-size:8px}.online i{width:6px;height:6px;border-radius:50%;background:#18a98c}.tool-list{display:grid;gap:10px}.tool-list>div{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #e8ebf1;border-radius:9px}.tool-list>div>span{width:28px;height:28px;display:grid;place-items:center;border-radius:8px;background:#eef0ff;color:#5f6de1}.tool-list p{display:flex;flex:1;min-width:0;flex-direction:column;margin:0}.tool-list b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:7px Consolas,monospace;color:#4b566e}.tool-list small{margin-top:4px;color:#939cae;font-size:7px}.tool-list em{color:#8490a5;font-size:7px;font-style:normal}.audit{margin-top:14px}.audit>div:not(.card-header){display:flex;gap:9px;padding:10px 0;border-bottom:1px solid #edf0f4}.audit>div>span{width:22px;height:22px;display:grid;place-items:center;border-radius:7px;background:#eaf8f4;color:#15927a}.audit p{display:flex;flex-direction:column;margin:0}.audit b{font-size:8px}.audit small{margin-top:4px;color:#8c96a9;font-size:7px}.audit em{margin-top:4px;color:#a1a8b7;font-size:6px;font-style:normal}.audit>button{margin-top:12px;padding:0;border:0;background:transparent;color:#5f6ddf;font-size:8px}.write-warning{display:flex;gap:10px;padding:13px;border-radius:11px;background:#fff5e9;color:#db842e}.write-warning>.el-icon{font-size:19px}.write-warning b{font-size:10px}.write-warning p{margin:5px 0 0;color:#8b6e4f;font-size:8px;line-height:1.5}.event-preview{display:grid;gap:8px;margin:14px 0}.event-preview>div{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #e6e9ef;border-radius:10px}.event-preview>div>span{width:95px;display:flex;flex-direction:column;color:#515c75;font-size:8px}.event-preview>div>span small{margin-top:4px;color:#8c96a9}.event-preview p{display:flex;flex:1;flex-direction:column;margin:0}.event-preview p b{font-size:9px}.event-preview p small{margin-top:4px;color:#929bad;font-size:7px}.event-preview>.conflict{border-color:#edc6c6;background:#fff7f7}.event-preview em{color:#d86267;font-size:7px;font-style:normal}.event-preview>.el-icon{color:#15947c}.confirm-meta{display:flex;gap:20px;padding:10px;border-radius:8px;background:#f4f6fa;color:#7c879b;font-size:8px}@media(max-width:1000px){.calendar-layout{grid-template-columns:1fr}.calendar-layout>aside{display:grid;grid-template-columns:1fr 1fr;gap:14px}.audit{margin:0}}@media(max-width:650px){.account-card{align-items:flex-start;flex-wrap:wrap}.permission{order:4;width:100%}.calendar-layout>aside{grid-template-columns:1fr}.confirm-meta{align-items:flex-start;flex-direction:column;gap:6px}}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}.local-state{display:flex;gap:16px;color:#758096}.local-state b{color:#168f78}.head{display:flex;align-items:center;gap:8px}.head span{flex:1;color:#8791a4;font-size:9px}.days{display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:8px;overflow:auto}.days>div{min-height:170px;border:1px solid #e8ebf1;padding:8px;border-radius:8px}.days h3{font-size:9px}.event{display:flex;width:100%;flex-direction:column;gap:4px;margin:6px 0;padding:8px;border:0;border-left:3px solid #5e6de7;background:#eff1ff;text-align:left}.event b,.event small{font-size:8px}.event small{color:#7d879b}.loading{min-height:320px}.line{display:flex;flex-direction:column;gap:4px;padding:8px 0;border-bottom:1px solid #edf0f4}.line b{font:8px Consolas,monospace}.line small{color:#7d879b;font-size:7px}.preview{display:grid;gap:7px;margin-top:12px;padding:10px;background:#f5f7fb}.preview>div{display:flex;justify-content:space-between;font-size:9px}.details{display:flex;gap:14px;font-size:9px}@media(max-width:900px){.layout{grid-template-columns:1fr}.local-state{align-items:flex-start;flex-direction:column}}
+@media(max-width:900px){
+  .head{display:grid;grid-template-columns:1fr}
+  .head span{grid-row:2}
+  .head-actions{display:flex;flex-wrap:wrap;gap:8px}
+  .head-actions :deep(.el-button){margin-left:0}
+  .details{flex-wrap:wrap}
+  :global(.calendar-dialog .el-dialog__footer){display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+  :global(.calendar-dialog .el-dialog__footer .el-button){flex:1 1 120px;margin-left:0}
+  :global(.calendar-dialog.el-dialog),:global(.calendar-dialog .el-dialog){display:flex;max-height:94vh;margin:0 auto!important;flex-direction:column}
+  :global(.calendar-dialog .el-dialog__body){min-height:0;overflow-y:auto}
+  :global(.calendar-dialog .el-dialog__header),:global(.calendar-dialog .el-dialog__footer){flex:none}
+}
 </style>

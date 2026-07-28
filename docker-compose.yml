@@ -48,12 +48,17 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       UPLOAD_DIR: /app/backend/storage/uploads
+      PDF_OCR_ENABLED: ${PDF_OCR_ENABLED:-true}
+      PDF_OCR_LANGUAGE: ${PDF_OCR_LANGUAGE:-chi_sim+eng}
+      PDF_OCR_DPI: ${PDF_OCR_DPI:-300}
+      PDF_OCR_MIN_TEXT_CHARS: ${PDF_OCR_MIN_TEXT_CHARS:-80}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-}
+      LLM_EMBEDDING_BATCH_SIZE: ${LLM_EMBEDDING_BATCH_SIZE:-20}
     ports:
       - "8000:8000"
     volumes:
@@ -84,12 +89,17 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       UPLOAD_DIR: /app/backend/storage/uploads
+      PDF_OCR_ENABLED: ${PDF_OCR_ENABLED:-true}
+      PDF_OCR_LANGUAGE: ${PDF_OCR_LANGUAGE:-chi_sim+eng}
+      PDF_OCR_DPI: ${PDF_OCR_DPI:-300}
+      PDF_OCR_MIN_TEXT_CHARS: ${PDF_OCR_MIN_TEXT_CHARS:-80}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-}
       LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-}
+      LLM_EMBEDDING_BATCH_SIZE: ${LLM_EMBEDDING_BATCH_SIZE:-20}
     volumes:
       - uploads:/app/backend/storage/uploads
     depends_on:

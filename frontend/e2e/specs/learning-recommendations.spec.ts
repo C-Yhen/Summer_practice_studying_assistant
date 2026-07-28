@@ -1,0 +1,343 @@
+import { expect, test } from '../fixtures'
+import {
+  apiData,
+  authenticatePage,
+  bootstrapPractice,
+  createActivePlan,
+  createCourse,
+  createLearningRecord,
+  listTodayTasks,
+  localDate,
+  registerAndLogin,
+  submitPractice,
+  uploadDocument,
+} from '../helpers/api'
+
+test('today filters, URL task restore, completion lock, refresh persistence and idempotency are real', async ({ page, request, consoleAudit }) => {
+  consoleAudit.allow(/503.*study-tasks\/today|study-tasks\/today.*503|Failed to load resource.*503/)
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Today Flow ${Date.now()}`)
+  await createActivePlan(request, token, course.id)
+  const before = await listTodayTasks(request, token, course.id)
+  expect(before.items.length).toBeGreaterThan(0)
+  const task = before.items[0]
+  await authenticatePage(page, token)
+  await page.goto(`/today?date=${task.scheduled_date}&courseId=${course.id}&taskId=${task.id}`)
+  const completionDialog = page.getByRole('dialog', { name: '完成学习任务' })
+  await expect(completionDialog).toBeVisible()
+  await expect(completionDialog.getByText(task.title, { exact: true })).toBeVisible()
+  const actual = completionDialog.getByRole('spinbutton')
+  let completions = 0
+  page.on('request', (seen) => {
+    if (seen.method() === 'POST' && seen.url().endsWith(`/study-tasks/${task.id}/complete`)) completions += 1
+  })
+  await actual.fill('')
+  await completionDialog.getByRole('button', { name: '确认完成' }).click()
+  await expect(page.locator('.el-message--warning')).toContainText('至少为 1 分钟')
+  expect(completions).toBe(0)
+  await actual.fill('17')
+  await completionDialog.getByRole('button', { name: '确认完成' }).dblclick()
+  await expect(page.getByText('已完成', { exact: true }).last()).toBeVisible()
+  expect(completions).toBe(1)
+  await page.reload()
+  await expect(page.getByText('实际 17 分钟')).toBeVisible()
+  const replay = await apiData(request, token, 'post', `/study-tasks/${task.id}/complete`, { data: { actual_minutes: 99 } })
+  expect(replay.idempotent_replay).toBe(true)
+  expect(replay.actual_minutes).toBe(17)
+
+  await page.locator('.page-heading .el-select').click()
+  await page.getByRole('option', { name: new RegExp(course.name) }).click()
+  await expect(page).toHaveURL(new RegExp(`courseId=${course.id}`))
+  await page.getByRole('button', { name: '刷新' }).click()
+  await expect(page.getByText('已完成', { exact: true }).last()).toBeVisible()
+
+  let listFailures = 1
+  await page.route('**/api/v1/study-tasks/today?**', async (route) => {
+    if (listFailures-- > 0) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"TODAY_TEMPORARY"}' })
+    } else await route.continue()
+  })
+  await page.getByRole('button', { name: '刷新' }).click()
+  await expect(page.getByText('TODAY_TEMPORARY')).toBeVisible()
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByText('TODAY_TEMPORARY')).toBeHidden()
+
+  const dateInput = page.locator('.page-heading input[type="date"]')
+  await dateInput.fill(localDate(30))
+  await dateInput.press('Tab')
+  await expect(page.getByText(/没有活动计划任务/)).toBeVisible()
+  await dateInput.fill(task.scheduled_date)
+  await dateInput.press('Tab')
+  await expect(page.getByText('实际 17 分钟')).toBeVisible()
+
+  await apiData(request, token, 'post', `/courses/${course.id}/study-plans/generate`, {
+    data: {
+      start_date: task.scheduled_date,
+      end_date: task.scheduled_date,
+      daily_availability: { default_minutes: 60 },
+      session_minutes: 30,
+      goal: 'candidate must remain hidden',
+    },
+  })
+  const afterCandidate = await listTodayTasks(request, token, course.id, task.scheduled_date)
+  expect(afterCandidate.items.every((item: { id: number }) => before.items.some((old: { id: number }) => old.id === item.id))).toBe(true)
+})
+
+test('practice retries the identical submission, shows results, and drives wrong-book and mastery UI', async ({ page, request, consoleAudit }) => {
+  consoleAudit.allow(/ERR_FAILED.*attempts|attempts.*ERR_FAILED|Failed to load resource.*attempts/)
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Practice Flow ${Date.now()}`)
+  const other = await createCourse(request, token, `Practice Empty ${Date.now()}`)
+  await createActivePlan(request, token, course.id)
+  await createActivePlan(request, token, other.id)
+  const questions = await bootstrapPractice(request, token, course.id)
+  expect(questions.items.length).toBeGreaterThan(1)
+  await authenticatePage(page, token)
+  await page.goto(`/practice?courseId=${course.id}`)
+  const firstOption = page.locator('.el-radio').filter({ hasText: 'B.' }).first()
+  await firstOption.click()
+  await page.locator('.el-radio').filter({ hasText: 'C.' }).first().click()
+  await firstOption.click()
+
+  const payloads: string[] = []
+  let aborted = false
+  await page.route(`**/api/v1/courses/${course.id}/practice/questions/*/attempts`, async (route) => {
+    payloads.push(route.request().postData() || '')
+    if (!aborted) {
+      aborted = true
+      await route.abort('failed')
+    } else {
+      await route.continue()
+    }
+  })
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await expect(page.locator('.el-message--error')).toContainText(/提交失败|网络|无法连接后端/)
+  await page.getByRole('button', { name: '提交答案' }).dblclick()
+  await expect(page.getByText(/回答错误，正确答案：A/)).toBeVisible()
+  expect(payloads).toHaveLength(2)
+  expect(payloads[1]).toBe(payloads[0])
+  await expect(page.getByText(/规则提示：关联知识点/)).toBeVisible()
+
+  await page.getByRole('button', { name: '下一题' }).click()
+  await page.locator('.el-radio').filter({ hasText: 'A.' }).first().click()
+  await page.getByRole('button', { name: '提交答案' }).dblclick()
+  await expect(page.getByText('回答正确', { exact: true })).toBeVisible()
+  await page.locator('.page-heading .el-select').click()
+  await page.getByRole('option', { name: other.name }).click()
+  await expect(page.getByText('暂无题目；请先生成并确认学习计划以获得知识点')).toBeVisible()
+
+  await page.goto(`/wrong-book?courseId=${course.id}`)
+  await expect(page.getByText(/错误 1 次/)).toBeVisible()
+  await page.getByRole('button', { name: '开始错题复习' }).click()
+  await expect(page).toHaveURL(/mode=wrong/)
+  await page.goBack()
+  await expect(page.getByText(/错误 1 次/)).toBeVisible()
+  await page.getByRole('button', { name: '查看解析' }).click()
+  await expect(page.getByText(/错题解析：/)).toBeVisible()
+  let wrongBookWrites = 0
+  page.on('request', (seen) => {
+    if (seen.method() === 'PATCH' && /\/wrong-book\//.test(seen.url())) wrongBookWrites += 1
+  })
+  await page.getByRole('button', { name: '标记已掌握' }).dblclick()
+  await expect(page.locator('.summary')).toContainText('已掌握')
+  expect(wrongBookWrites).toBe(1)
+  await page.locator('.el-radio-button__inner').filter({ hasText: '已掌握' }).click()
+  await expect(page.locator('.item')).toHaveCount(1)
+  await page.getByPlaceholder('搜索题干或知识点').fill('不存在')
+  await page.getByPlaceholder('搜索题干或知识点').press('Enter')
+  await expect(page.getByText('没有符合条件的真实错题')).toBeVisible()
+  await page.getByPlaceholder('搜索题干或知识点').fill('')
+  await page.getByPlaceholder('搜索题干或知识点').press('Enter')
+  await page.locator('.el-radio-button__inner').filter({ hasText: '全部' }).click()
+  await page.getByRole('button', { name: '移除' }).dblclick()
+  await expect(page.getByText('没有符合条件的真实错题')).toBeVisible()
+
+  await page.goto(`/mastery?courseId=${course.id}`)
+  await expect(page.getByText('已有记录')).toBeVisible()
+  await expect(page.getByText(/\d+ 次尝试/).first()).toBeVisible()
+  await page.getByRole('button', { name: '刷新' }).click()
+  await page.locator('.page-heading .el-select').click()
+  await page.getByRole('option', { name: other.name }).click()
+  await expect(page.getByText('当前课程尚无真实掌握记录')).toBeVisible()
+  await expect(page.getByText('尚无学习记录').first()).toBeVisible()
+})
+
+test('recommendation feedback locks are per card, history refreshes, and primary action is single-shot', async ({ page, request, consoleAudit }) => {
+  consoleAudit.allow(/503.*recommendations\/feedback|recommendations\/feedback.*503|Failed to load resource.*503/)
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Recommendation Flow ${Date.now()}`)
+  await createActivePlan(request, token, course.id)
+  await uploadDocument(request, token, course.id, 'recommendation-source.txt')
+  await createLearningRecord(request, token, course.id)
+  await authenticatePage(page, token)
+  await page.goto(`/recommendations?courseId=${course.id}`)
+  const cards = page.locator('.recommend-card')
+  await expect.poll(() => cards.count()).toBeGreaterThanOrEqual(2)
+
+  const writes: { recommendation_key: string; action: string }[] = []
+  let clickedMode: 'hold' | 'fail' = 'hold'
+  let releaseClicked: (() => void) | undefined
+  let markClickedStarted: (() => void) | undefined
+  const clickedStarted = new Promise<void>((resolve) => { markClickedStarted = resolve })
+  const clickedGate = new Promise<void>((resolve) => { releaseClicked = resolve })
+  await page.route(`**/api/v1/courses/${course.id}/recommendations/feedback`, async (route) => {
+    const body = route.request().postDataJSON() as { recommendation_key: string; action: string }
+    writes.push(body)
+    if (body.action === 'clicked') {
+      if (clickedMode === 'hold') {
+        markClickedStarted?.()
+        await clickedGate
+        await route.continue()
+        return
+      }
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"FEEDBACK_TEMPORARY"}' })
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, body.action === 'saved' ? 250 : 400))
+    await route.continue()
+  })
+  let historyGets = 0
+  await page.route(`**/api/v1/courses/${course.id}/recommendations/history**`, async (route) => {
+    historyGets += 1
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await route.continue()
+  })
+  const first = cards.nth(0)
+  const second = cards.nth(1)
+  await first.getByRole('button', { name: '有帮助' }).dblclick()
+  await second.getByRole('button', { name: '不感兴趣' }).dblclick()
+  await expect(first.getByRole('button', { name: '已标记有帮助' })).toBeVisible()
+  await expect(second.getByRole('button', { name: '已标记不感兴趣' })).toBeVisible()
+  expect(writes.filter((item) => item.action === 'saved')).toHaveLength(1)
+  expect(writes.filter((item) => item.action === 'skipped')).toHaveLength(1)
+
+  const historyButton = page.getByRole('button', { name: '推荐历史' })
+  await historyButton.evaluate((button) => {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  const historyDialog = page.getByRole('dialog', { name: '推荐历史' })
+  await expect(historyDialog).toBeVisible()
+  await expect.poll(() => historyGets).toBe(1)
+  await expect(page.getByText('有帮助 1')).toBeVisible()
+  await expect(page.getByText('不感兴趣 1')).toBeVisible()
+  const historyRefresh = page.getByRole('button', { name: '刷新历史' })
+  await historyRefresh.evaluate((button) => {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await expect.poll(() => historyGets).toBe(2)
+  await historyDialog.locator('.el-dialog__headerbtn').click()
+
+  const actionButtons = page.locator('.recommend-card .card-actions .el-button--primary')
+  await expect.poll(() => actionButtons.count()).toBeGreaterThanOrEqual(2)
+  const expectedPath: Record<string, RegExp> = {
+    进入今日任务: /\/today(?:\?|$)/,
+    查看掌握度: /\/mastery(?:\?|$)/,
+    开始课程问答: /\/chat(?:\?|$)/,
+    创建学习计划: /\/plan(?:\?|$)/,
+    上传课程资料: /\/upload(?:\?|$)/,
+    前往任务中心: /\/tasks(?:\?|$)/,
+  }
+  const firstActionLabel = (await actionButtons.nth(0).innerText()).trim()
+  const firstDestination = expectedPath[firstActionLabel]
+  if (!firstDestination) throw new Error(`Unexpected recommendation action: ${firstActionLabel}`)
+  let actionNavigations = 0
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame() && !new URL(frame.url()).pathname.endsWith('/recommendations')) {
+      actionNavigations += 1
+    }
+  })
+  await actionButtons.evaluateAll((buttons) => {
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await clickedStarted
+  for (let index = 0; index < await actionButtons.count(); index += 1) {
+    await expect(actionButtons.nth(index)).toBeDisabled()
+  }
+  releaseClicked?.()
+  await expect(page).toHaveURL(firstDestination)
+  expect(actionNavigations).toBe(1)
+  expect(writes.filter((item) => item.action === 'clicked')).toHaveLength(1)
+
+  await page.goto(`/recommendations?courseId=${course.id}`)
+  await expect(page).toHaveURL(/\/recommendations/)
+  await expect.poll(() => actionButtons.count()).toBeGreaterThanOrEqual(2)
+  actionNavigations = 0
+  clickedMode = 'fail'
+  const failedActionLabel = (await actionButtons.nth(0).innerText()).trim()
+  const failedDestination = expectedPath[failedActionLabel]
+  if (!failedDestination) throw new Error(`Unexpected recommendation action: ${failedActionLabel}`)
+  await page.evaluate(() => {
+    const state = window as typeof window & {
+      __round17WarningCount?: number
+      __round17WarningObserver?: MutationObserver
+    }
+    state.__round17WarningCount = 0
+    state.__round17WarningObserver?.disconnect()
+    state.__round17WarningObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (
+            node instanceof Element
+            && (node.matches('.el-message--warning') || node.querySelector('.el-message--warning'))
+          ) {
+            state.__round17WarningCount = (state.__round17WarningCount || 0) + 1
+          }
+        }
+      }
+    })
+    state.__round17WarningObserver.observe(document.body, { childList: true, subtree: true })
+  })
+  await actionButtons.evaluateAll((buttons) => {
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { __round17WarningCount?: number }).__round17WarningCount,
+  )).toBe(1)
+  await expect(page).toHaveURL(failedDestination)
+  expect(actionNavigations).toBe(1)
+  expect(writes.filter((item) => item.action === 'clicked')).toHaveLength(2)
+})
+
+test('AI recommendation objects render as structured fields instead of raw JSON', async ({ page, request }) => {
+  const { token } = await registerAndLogin(request)
+  const course = await createCourse(request, token, `Structured AI recommendation ${Date.now()}`)
+  await authenticatePage(page, token)
+  await page.route(`**/api/v1/courses/${course.id}/recommendations?**`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        code: 0,
+        message: 'ok',
+        data: {
+          course: { id: course.id, name: course.name },
+          target_date: localDate(),
+          algorithm_version: 'v1',
+          strategy_summary: 'Rule recommendations remain available.',
+          items: [],
+          category_counts: { all: 0, task: 0, mastery: 0, resource: 0, plan: 0, report: 0 },
+          selection: { mode: 'diverse', returned: 0, candidate_total: 0 },
+          ai_enhancement: {
+            task_id: 'structured-ai-task', status: 'success', current_step: 'completed',
+            summary: 'A safe AI summary.',
+            suggestions: [{ title: 'Structured title', reason: 'Structured reason', estimated_minutes: 25, priority: 0.8, item_type: 'study_task' }],
+            failure_type: null,
+          },
+        },
+        request_id: 'structured-ai-test',
+      }),
+    })
+  })
+  await page.goto(`/recommendations?courseId=${course.id}`)
+  const panel = page.locator('.ai-result')
+  await expect(panel).toContainText('Structured title')
+  await expect(panel).toContainText('Structured reason')
+  await expect(panel).toContainText('25 分钟')
+  await expect(panel).not.toContainText('{"title"')
+})

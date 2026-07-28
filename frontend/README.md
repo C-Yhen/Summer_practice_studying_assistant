@@ -80,3 +80,23 @@ VITE_ENABLE_MOCK=true
 4. 展示 AI 调整计划的原因和 `v2 → v3` 差异，再演示用户确认机制。
 5. 完成一道练习，展示错题分析、掌握度变化和可解释推荐。
 6. 在日历页预览事件，强调 MCP 只读调用可自动执行，写操作必须经用户确认且全部记录日志。
+
+## 可见功能 E2E 验收
+
+仓库包含桌面端与移动端 Playwright 验收套件。它会启动一个短生命周期的 SQLite 后端容器、同步任务模式、离线 Provider 和本地 Vite 服务，不依赖 PostgreSQL、Redis、Celery 或 MCP Server，也不会写入日常开发数据库。
+
+```powershell
+cd frontend
+powershell -ExecutionPolicy Bypass -File .\e2e\run-isolated.ps1
+```
+
+Docker 可执行文件按 `-DockerExecutable` 参数、`DOCKER_EXE` 环境变量、`Get-Command docker` 和 Docker Desktop 默认路径的顺序发现。例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\e2e\run-isolated.ps1 `
+  -DockerExecutable "D:\tools\docker.exe"
+```
+
+运行前需要 Docker Desktop 可用，并已安装前端依赖和系统 Chrome；Playwright 直接使用系统 Chrome，不重复下载浏览器。测试中的 CSV、ICS 和 Markdown 由浏览器真实下载到每个用例的临时目录，完成后随 Playwright 输出、隔离 SQLite 和上传目录一起清理。
+
+当前问答链路使用离线 Provider，只验收发送、会话历史、引用和错误恢复，不评价模型回答质量，也不声称外部 Chat 或 Embedding Provider 已连接。Outlook 和 Google Calendar 尚未自动接入；StudyPilot 本地日历以及手动下载 ICS 是已经实现并经过浏览器验收的真实功能。各可见功能的实际覆盖与明确排除项记录在 `docs/VISIBLE_FUNCTION_ACCEPTANCE.md`。
