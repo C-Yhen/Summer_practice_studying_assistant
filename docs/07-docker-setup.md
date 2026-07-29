@@ -12,7 +12,7 @@
 | `postgres` | PostgreSQL 16、pgvector、业务事实数据 | `5432` | `postgres_data` |
 | `redis` | Celery Broker/Result Backend 和任务进度缓存 | `6379` | `redis_data` |
 
-默认使用离线 Mock LLM 和 Mock Embedding，不需要 API Key 即可完成演示。生产前端强制关闭 Mock 回退，接口错误不会被假数据掩盖。
+Compose 在未设置 `LLM_PROVIDER` 时会回退到离线 Mock LLM 和 Mock Embedding；但当前 `.env.example` 提供的是 Qwen 配置模板，复制后必须填写本机 `LLM_API_KEY`，或主动改为 `LLM_PROVIDER=mock` 进行离线演示。生产前端强制关闭 Mock 回退，接口错误不会被假数据掩盖。
 
 ## 2. Windows 前置条件
 
