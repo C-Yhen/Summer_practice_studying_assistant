@@ -19,7 +19,10 @@ if errorlevel 1 (
 if not exist ".env" (
   copy /y ".env.example" ".env" >nul
   echo 已从 .env.example 创建 .env。
-  echo 请按需检查 JWT_SECRET、POSTGRES_PASSWORD 和 Qwen API Key；不要提交 .env。
+  echo .env.example 提供 Qwen 配置模板。使用真实 Qwen 请在本机 .env 填写 LLM_API_KEY。
+  echo 没有 Qwen Key 时，请将 .env 中的 LLM_PROVIDER 改为 mock；不要提交 .env 或真实密钥。
+) else (
+  echo 检测到已有 .env，将直接使用现有本机配置（不会覆盖）。
 )
 
 echo [StudyPilot] 正在检查 Compose 配置...

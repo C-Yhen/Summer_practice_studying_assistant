@@ -40,7 +40,7 @@ StudyPilot 是面向课程学习场景的全栈学习辅助平台。用户可围
 ## 最快启动
 
 1. 安装并启动 Docker Desktop。
-2. 在项目根目录复制环境变量模板：
+2. 若当前电脑已经有项目作者配置好的本机 `.env`，直接保留并使用它；`start.bat` 不会覆盖该文件。老师或其他人员首次取得源码时，源码包不包含 `.env` 与真实密钥，应复制模板：
 
    ```powershell
    Copy-Item .env.example .env
@@ -55,6 +55,8 @@ StudyPilot 是面向课程学习场景的全栈学习辅助平台。用户可围
 4. 打开 <http://localhost:8080>。
 
 首次使用建议先注册账号、创建课程并上传一份课程资料，等待资料状态为 `ready` 后再使用问答、计划和练习。
+
+`.env.example` 仅保留 Qwen 配置模板，不含真实 Key。使用真实 Qwen 时在自己的本机 `.env` 填写 `LLM_API_KEY`；没有 Qwen Key 时，将 `LLM_PROVIDER` 改为 `mock` 进行离线演示。无需、也不得要求项目作者提供或提交个人 API Key。
 
 ## 文档导航
 
