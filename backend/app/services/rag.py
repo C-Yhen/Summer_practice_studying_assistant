@@ -137,6 +137,8 @@ async def answer_from_sources(
     question: str,
     sources: list[dict[str, Any]],
     mode: str,
+    *,
+    timeout_seconds: float = 60,
 ) -> tuple[str, bool]:
     sufficient = bool(
         sources
@@ -194,6 +196,7 @@ async def answer_from_sources(
             ],
             temperature=0.3 if sufficient else 0.6,
             max_tokens=1200,
+            _timeout=timeout_seconds,
         )
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError("invalid chat response")

@@ -274,3 +274,4 @@ def test_strict_rag_mode_calls_chat_provider_with_grounding_prompt() -> None:
     assert provider.messages[0]["role"] == "system"
     assert "课程资料" in provider.messages[0]["content"]
     assert "[S1]" in provider.messages[1]["content"]
+    assert provider.kwargs["_timeout"] == 60

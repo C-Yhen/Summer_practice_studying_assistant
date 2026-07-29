@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     llm_chat_model: str = ""
     llm_embedding_model: str = ""
     llm_embedding_batch_size: int = 20
+    # Interactive course Q&A may need more time than compact structured jobs.
+    rag_chat_timeout_seconds: int = 60
     # Remote AI is optional enhancement work. These bounds protect a worker from
     # a slow provider; interactive endpoints never wait for them.
     ai_recommend_timeout_seconds: int = 12

@@ -138,7 +138,13 @@ async def ask_question(
             embedding_dimension=settings.embedding_dimension,
         )
         mode = payload.mode or session.mode
-        answer, sufficient = await answer_from_sources(provider, payload.question, sources, mode)
+        answer, sufficient = await answer_from_sources(
+            provider,
+            payload.question,
+            sources,
+            mode,
+            timeout_seconds=settings.rag_chat_timeout_seconds,
+        )
     except (RagProviderError, ValueError):
         db.rollback()
         raise HTTPException(status_code=503, detail="RAG_PROVIDER_UNAVAILABLE") from None
