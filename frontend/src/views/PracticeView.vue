@@ -7,6 +7,7 @@ import { asyncTaskApi, courseApi, practiceApi } from '@/api/services'
 import { getApiErrorMessage } from '@/api/client'
 import type {
   CourseListItem,
+  CourseContentReadiness,
   PracticeAttemptRequest,
   PracticeAttemptResult,
   PracticeQuestion,
@@ -33,6 +34,8 @@ const result = ref<PracticeAttemptResult | null>(null)
 const pendingSubmission = ref<PendingSubmission | null>(null)
 const loading = ref(false)
 const booting = ref(false)
+const contentRetrying = ref(false)
+const contentState = ref<CourseContentReadiness | null>(null)
 const aiEnhancementStatus = ref<'queued' | 'processing' | 'failed' | 'cancelled' | null>(null)
 const aiPollingTimedOut = ref(false)
 const submitting = ref(false)
@@ -130,6 +133,7 @@ async function load() {
   const version = ++requestVersion
   loading.value = true
   error.value = ''
+  contentState.value = null
   try {
     const availableCourses = (await courseApi.list()).items.filter((item) => !item.archived)
     if (version !== requestVersion) return
@@ -161,6 +165,10 @@ async function load() {
       questions.value = []
       summary.value = null
       resetAnswer(false)
+      const readiness = await courseApi.contentReadiness(resolvedCourseId)
+      if (version !== requestVersion || resolvedCourseId !== courseId.value) return
+      contentState.value = readiness
+      if (!readiness.ready) return
       const data = await practiceApi.questions(resolvedCourseId, mode.value)
       if (version !== requestVersion || resolvedCourseId !== courseId.value) return
       questions.value = data.items
@@ -201,6 +209,21 @@ async function bootstrap() {
     ElMessage.error(getApiErrorMessage(bootstrapError, '生成基础自测题失败'))
   } finally {
     booting.value = false
+  }
+}
+
+async function retryContentPreparation() {
+  if (!courseId.value || contentRetrying.value) return
+  const sourceCourseId = courseId.value
+  contentRetrying.value = true
+  try {
+    await courseApi.retryContentPreparation(sourceCourseId)
+    ElMessage.success('已重新提交课程内容准备任务，请在处理进度页查看。')
+    if (courseId.value === sourceCourseId) await load()
+  } catch (retryError) {
+    ElMessage.error(getApiErrorMessage(retryError, '重新准备课程内容失败'))
+  } finally {
+    contentRetrying.value = false
   }
 }
 
@@ -361,6 +384,36 @@ onBeforeUnmount(stopAiPolling)
         <el-tab-pane label="开始练习" name="practice">
           <div class="tab-body">
             <el-alert v-if="error" :title="error" type="error" show-icon />
+            <el-alert
+              v-else-if="contentState && !contentState.ready"
+              :title="contentState.status === 'failed' || contentState.status === 'cancelled'
+                ? `课程内容准备失败：${contentState.failure_type || '未知原因'}`
+                : contentState.document_count
+                  ? '课程资料正在准备知识点和题目，显示“已就绪”后即可直接练习。'
+                  : '请先上传课程资料。'"
+              :type="contentState.status === 'failed' || contentState.status === 'cancelled' ? 'error' : 'info'"
+              :closable="false"
+              show-icon
+            >
+              <template #default>
+                <el-button
+                  v-if="contentState.can_retry"
+                  :loading="contentRetrying"
+                  :disabled="contentRetrying"
+                  size="small"
+                  @click="retryContentPreparation"
+                >
+                  重新准备课程内容
+                </el-button>
+                <el-button
+                  v-else
+                  size="small"
+                  @click="router.push({ name: 'document-tasks', query: courseId ? { courseId: String(courseId) } : {} })"
+                >
+                  查看处理进度
+                </el-button>
+              </template>
+            </el-alert>
             <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '基础题已可用，AI 增强题正在后台生成。'" type="info" :closable="false" show-icon />
             <el-alert v-else-if="aiEnhancementStatus === 'failed' || aiEnhancementStatus === 'cancelled'" title="AI 增强题未生成，现有基础题仍可正常练习。" type="warning" :closable="false" show-icon />
             <div v-if="!error" v-loading="loading">
@@ -400,13 +453,13 @@ onBeforeUnmount(stopAiPolling)
                   :description="mode === 'wrong' ? '太棒了，当前没有待复习错题' : '当前课程还没有可练习题目'"
                 >
                   <el-button
-                    v-if="mode === 'all'"
+                    v-if="mode === 'all' && contentState?.ready"
                     type="primary"
                     :loading="booting"
                     :disabled="submitting"
                     @click="bootstrap"
                   >
-                    生成基础自测题
+                    刷新课程题目
                   </el-button>
                   <el-button v-else @click="switchMode('all')">返回课程练习</el-button>
                 </el-empty>

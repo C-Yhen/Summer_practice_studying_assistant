@@ -6,7 +6,7 @@ import { Calendar, Check, Clock, Refresh, Warning } from '@element-plus/icons-vu
 import PageHeader from '@/components/PageHeader.vue'
 import { getApiErrorMessage, isUnauthorizedError } from '@/api/client'
 import { asyncTaskApi, courseApi, planApi, profileApi } from '@/api/services'
-import type { CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask, UserPreferences } from '@/types'
+import type { CourseContentReadiness, CourseListItem, CurrentStudyPlanResponse, StudyPlanGenerateRequest, StudyPlanTask, UserPreferences } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,6 +21,8 @@ const preferencesLoading = ref(false)
 const plan = ref<CurrentStudyPlanResponse | null>(null)
 const planLoading = ref(false)
 const planError = ref('')
+const contentState = ref<CourseContentReadiness | null>(null)
+const contentLoading = ref(false)
 const generating = ref(false)
 const confirming = ref(false)
 const confirmVisible = ref(false)
@@ -183,10 +185,28 @@ async function loadCurrentPlan() {
   }
 }
 
+async function loadContentReadiness() {
+  if (!selectedCourseId.value) return
+  const courseId = selectedCourseId.value
+  contentLoading.value = true
+  try {
+    const result = await courseApi.contentReadiness(courseId)
+    if (selectedCourseId.value === courseId) contentState.value = result
+  } catch (error) {
+    if (selectedCourseId.value === courseId) {
+      contentState.value = null
+      planError.value = pageError(error, '课程内容状态加载失败')
+    }
+  } finally {
+    if (selectedCourseId.value === courseId) contentLoading.value = false
+  }
+}
+
 async function selectCourse(courseId: number) {
   if (generating.value) return
   stopAiPolling()
   plan.value = null
+  contentState.value = null
   planError.value = ''
   confirmVisible.value = false
   await router.replace({ name: 'plan', query: { courseId: String(courseId) } })
@@ -211,11 +231,14 @@ async function initialize() {
     internalRouteUpdate = false
   }
   if (version !== initializationVersion) return
-  await loadCurrentPlan()
+  await Promise.all([loadCurrentPlan(), loadContentReadiness()])
 }
 
 async function generatePlan() {
   if (generating.value || !selectedCourseId.value || !preferences.value) return
+  if (!contentState.value?.ready) {
+    return ElMessage.warning('课程内容尚未就绪，请先在文档处理进度页完成知识点和题目准备。')
+  }
   const goal = form.goal.trim()
   if (!goal) return ElMessage.warning('请填写学习目标')
   if (!form.startDate || !form.endDate) return ElMessage.warning('请选择计划起止日期')
@@ -343,7 +366,7 @@ onBeforeUnmount(stopAiPolling)
 
     <template v-else-if="selectedCourseId && preferences">
       <section class="content-card form-card">
-          <div class="section-head"><div><span>第 1 步 · 告诉我你的目标</span><h2>{{ plan ? '重新规划学习节奏' : '创建一份可执行的学习计划' }}</h2><p>时长默认采用个人偏好，你可以只为本次计划临时调整。系统会先生成预览，由你确认后再生效。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复默认时长</el-button><el-button type="primary" :loading="generating" :disabled="generating" @click="generatePlan">{{ generating ? '正在生成计划预览…' : '生成计划预览' }}</el-button></div></div>
+          <div class="section-head"><div><span>第 1 步 · 告诉我你的目标</span><h2>{{ plan ? '重新规划学习节奏' : '创建一份可执行的学习计划' }}</h2><p>时长默认采用个人偏好，你可以只为本次计划临时调整。系统会先生成预览，由你确认后再生效。</p></div><div><el-button plain :disabled="preferencesLoading" @click="resetPreferenceDefaults">恢复默认时长</el-button><el-button type="primary" :loading="generating || contentLoading" :disabled="generating || contentLoading || !contentState?.ready" @click="generatePlan">{{ generating ? '正在生成计划预览…' : '生成计划预览' }}</el-button></div></div>
         <el-form label-position="top" class="plan-form">
           <el-form-item label="学习目标"><el-input v-model="form.goal" maxlength="500" show-word-limit /></el-form-item>
           <el-form-item label="开始日期"><el-input v-model="form.startDate" type="date" /></el-form-item>
@@ -352,6 +375,23 @@ onBeforeUnmount(stopAiPolling)
           <el-form-item label="单次学习分钟"><el-input-number v-model="form.sessionMinutes" :min="15" :max="180" /></el-form-item>
         </el-form>
       </section>
+
+      <el-alert
+        v-if="contentState && !contentState.ready"
+        :title="contentState.status === 'failed' || contentState.status === 'cancelled'
+          ? `课程内容准备失败：${contentState.failure_type || '未知原因'}`
+          : '课程资料正在准备真实知识点和题目；显示“已就绪”后即可快速生成计划。'"
+        :type="contentState.status === 'failed' || contentState.status === 'cancelled' ? 'error' : 'info'"
+        :closable="false"
+        show-icon
+        class="page-alert"
+      >
+        <template #default>
+          <el-button size="small" @click="router.push({ name: 'document-tasks', query: { courseId: String(selectedCourseId) } })">
+            查看处理进度
+          </el-button>
+        </template>
+      </el-alert>
 
       <el-alert v-if="planError" :title="planError" type="error" :closable="false" show-icon class="page-alert"><template #default><el-button size="small" @click="loadCurrentPlan">重新加载</el-button></template></el-alert>
       <el-alert v-if="aiEnhancementStatus === 'queued' || aiEnhancementStatus === 'processing'" :title="aiPollingTimedOut ? 'AI 增强仍在后台运行，可稍后刷新或在任务中心查看。' : '计划预览已可确认，AI 摘要与风险提示正在后台补充。'" type="info" :closable="false" show-icon class="page-alert" />

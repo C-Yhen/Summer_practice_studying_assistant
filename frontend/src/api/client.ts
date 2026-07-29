@@ -83,6 +83,13 @@ export function getApiErrorMessage(error: unknown, fallback = '请求失败，�
   if (detail?.startsWith('KNOWLEDGE_POINTS_PROCESSING')) {
     return '课程资料正在提取可用知识点，请稍后重新生成；也可在任务中心查看进度。'
   }
+  if (detail?.startsWith('COURSE_CONTENT_PREPARING')) {
+    return '课程资料仍在准备知识点和练习题，请在文档处理进度页等待“已就绪”。'
+  }
+  if (detail?.startsWith('COURSE_CONTENT_PREPARATION_FAILED')) {
+    const failure = detail.split(':', 2)[1]
+    return `课程内容准备失败${failure ? `（${failure}）` : ''}，请在文档处理进度页点击“重新准备课程内容”。`
+  }
   const knownDetails: Record<string, string> = {
     'Email is already registered': '该邮箱已注册',
     FILE_EMPTY: '文件不能为空',

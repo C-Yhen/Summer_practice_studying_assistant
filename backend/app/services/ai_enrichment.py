@@ -23,9 +23,16 @@ from backend.app.providers.llm import OpenAICompatibleProvider, get_llm_provider
 from backend.app.services.ai_recommend import generate_recommendations, validate_recommendation_result
 from backend.app.services.async_tasks import dispatch_async_task, mark_task_cancelled
 from backend.app.services.practice_gen import generate_questions_batch, persist_ai_questions
-from backend.app.planning.ai_planner import extract_knowledge_points, generate_plan_one_shot
+from backend.app.planning.ai_planner import (
+    KnowledgePointExtractionError,
+    extract_knowledge_points,
+    generate_plan_one_shot,
+)
 from backend.app.services.course_content import (
+    all_course_documents_ready,
+    current_document_snapshot,
     deactivate_legacy_placeholder_questions,
+    ensure_grounded_rule_questions,
     persist_extracted_knowledge_points,
 )
 
@@ -84,6 +91,7 @@ async def queue_ai_enhancement(
     user_id: int,
     course_id: int,
     input_data: dict[str, Any],
+    allow_terminal_retry: bool = True,
 ) -> AsyncTask | None:
     """Create/reuse one persistent AI task without delaying an API response."""
     if settings.llm_provider.strip().lower() == "mock":
@@ -99,6 +107,10 @@ async def queue_ai_enhancement(
     if reusable is not None:
         db.refresh(reusable)
         return reusable
+    if tasks and not allow_terminal_retry:
+        latest = tasks[0]
+        db.refresh(latest)
+        return latest
 
     created = False
     if not tasks:
@@ -143,6 +155,38 @@ async def queue_ai_enhancement(
     return task
 
 
+async def ensure_course_content_preparation(
+    db: Session,
+    settings: Any,
+    *,
+    user_id: int,
+    course_id: int,
+    allow_retry: bool,
+) -> AsyncTask | None:
+    """Create one course-level preparation task for the current document snapshot.
+
+    Passive callers never turn a terminal failure into another provider call.
+    Only the explicit retry endpoint sets ``allow_retry=True``.
+    """
+    if not all_course_documents_ready(db, course_id):
+        return None
+    snapshot = current_document_snapshot(db, course_id)
+    if not snapshot:
+        return None
+    return await queue_ai_enhancement(
+        db,
+        settings,
+        task_type="knowledge_point_extraction",
+        user_id=user_id,
+        course_id=course_id,
+        input_data={
+            "document_ids": [item["document_id"] for item in snapshot],
+            "document_versions": snapshot,
+        },
+        allow_terminal_retry=allow_retry,
+    )
+
+
 def ai_enhancement_payload(task: AsyncTask | None) -> dict[str, Any] | None:
     if task is None:
         return None
@@ -180,6 +224,9 @@ def _start(db: Session, task: AsyncTask) -> bool:
 
 
 def _safe_failure_type(exc: Exception) -> str:
+    explicit = getattr(exc, "failure_type", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
     name = type(exc).__name__.upper()
     if "TIMEOUT" in name:
         return "AI_TIMEOUT"
@@ -224,6 +271,9 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
 
         if task.task_type == "knowledge_point_extraction":
             document_ids = [int(item) for item in task.input_data.get("document_ids", [])]
+            task.progress = 35
+            task.current_step = "extracting_knowledge_points"
+            db.commit()
             raw_points = await extract_knowledge_points(
                 db, provider, course.id, document_ids=document_ids or None
             )
@@ -233,11 +283,26 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
             # Keep old plan/attempt history but make stale placeholder questions
             # invisible to all future practice sessions.
             deactivated = deactivate_legacy_placeholder_questions(db, course.id)
-            if not points:
-                raise ValueError("AI_RESPONSE_INVALID")
+            if len(points) < 6:
+                raise KnowledgePointExtractionError(
+                    "SOURCE_VALIDATION_FAILED",
+                    "fewer than six source-grounded knowledge points survived persistence",
+                )
+            task.progress = 75
+            task.current_step = "preparing_course_questions"
+            db.flush()
+            question_result = ensure_grounded_rule_questions(db, course.id, minimum=6)
+            if question_result["question_count"] < question_result["required_count"]:
+                raise KnowledgePointExtractionError(
+                    "SOURCE_VALIDATION_FAILED",
+                    "not enough source-grounded questions could be prepared",
+                )
             result = {
                 "summary": f"已从课程资料提取 {len(points)} 个可用知识点。",
                 "suggestions": [],
+                "knowledge_point_count": len(points),
+                "question_count": question_result["question_count"],
+                "rule_questions_created": question_result["created_count"],
                 "knowledge_points": [
                     {"id": point.id, "name": point.name, "description": point.description}
                     for point in points
@@ -341,9 +406,17 @@ async def process_ai_enhancement(db: Session, task: AsyncTask, settings: Any) ->
         if managed is not None:
             managed.status = "failed"
             managed.progress = min(managed.progress, 99)
-            managed.current_step = "ai_enhancement_failed"
-            managed.error_message = _safe_failure_type(exc)
-            managed.result_data = {"failure_type": _safe_failure_type(exc), "duration_ms": round((perf_counter() - started) * 1000, 1)}
+            failure_type = _safe_failure_type(exc)
+            managed.current_step = (
+                "course_content_preparation_failed"
+                if managed.task_type == "knowledge_point_extraction"
+                else "ai_enhancement_failed"
+            )
+            managed.error_message = failure_type
+            managed.result_data = {
+                "failure_type": failure_type,
+                "duration_ms": round((perf_counter() - started) * 1000, 1),
+            }
             managed.finished_at = utcnow()
             db.commit()
         logger.warning("ai_enhancement_failed task_type=%s task_id=%s failure_type=%s", task.task_type, task.public_id, _safe_failure_type(exc))

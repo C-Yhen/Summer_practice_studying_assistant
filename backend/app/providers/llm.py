@@ -57,6 +57,10 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
 
+class ModelResponseTruncatedError(RuntimeError):
+    """The provider stopped a structured response because its output limit was reached."""
+
+
 class MockLLMProvider(LLMProvider):
     """Deterministic offline provider used by tests and the no-key demo."""
 
@@ -108,6 +112,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 raise RuntimeError("chat model is not configured")
             return await self.fallback.chat(messages, **kwargs)
         timeout = float(kwargs.pop("_timeout", 30))
+        require_complete = bool(kwargs.pop("_require_complete", False))
         response = await self._http_client().post(
             f"{self.settings.llm_base_url.rstrip('/')}/chat/completions",
             headers=self.headers,
@@ -115,7 +120,11 @@ class OpenAICompatibleProvider(LLMProvider):
             timeout=httpx.Timeout(timeout),
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        payload = response.json()
+        choice = payload["choices"][0]
+        if require_complete and choice.get("finish_reason") in {"length", "max_tokens"}:
+            raise ModelResponseTruncatedError("MODEL_RESPONSE_TRUNCATED")
+        return choice["message"]["content"]
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.settings.llm_embedding_model:

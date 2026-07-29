@@ -3,10 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 
-from backend.app.dependencies import CurrentUser, DBSession
+from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import Course
 from backend.app.responses import ok
 from backend.app.schemas import CourseCreate, CourseRead, CourseUpdate, ExamDateUpdate
+from backend.app.services.ai_enrichment import ensure_course_content_preparation
+from backend.app.services.course_content import course_content_readiness
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -54,6 +56,43 @@ def list_courses(
 def read_course(course_id: int, db: DBSession, current_user: CurrentUser) -> dict:
     course = _owned_course(db, course_id, current_user.id)
     return ok(CourseRead.model_validate(course).model_dump(mode="json"))
+
+
+@router.get("/{course_id}/content-readiness")
+def read_course_content_readiness(
+    course_id: int, db: DBSession, current_user: CurrentUser
+) -> dict:
+    _owned_course(db, course_id, current_user.id)
+    return ok(course_content_readiness(db, course_id, user_id=current_user.id))
+
+
+@router.post("/{course_id}/content-preparation/retry")
+async def retry_course_content_preparation(
+    course_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+    settings: AppSettings,
+) -> dict:
+    _owned_course(db, course_id, current_user.id)
+    state = course_content_readiness(db, course_id, user_id=current_user.id)
+    if not state["documents_ready"]:
+        raise HTTPException(status_code=409, detail="COURSE_DOCUMENTS_NOT_READY")
+    task = await ensure_course_content_preparation(
+        db,
+        settings,
+        user_id=current_user.id,
+        course_id=course_id,
+        allow_retry=True,
+    )
+    if task is None:
+        raise HTTPException(status_code=409, detail="COURSE_CONTENT_PREPARATION_UNAVAILABLE")
+    return ok(
+        {
+            "task_id": task.public_id,
+            "status": task.status,
+            "current_step": task.current_step,
+        }
+    )
 
 
 @router.patch("/{course_id}")

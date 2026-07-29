@@ -7,6 +7,7 @@ import pytest
 
 from backend.app.config import Settings
 from backend.app.providers.llm import (
+    ModelResponseTruncatedError,
     MockLLMProvider,
     OpenAICompatibleProvider,
     get_llm_provider,
@@ -197,6 +198,48 @@ def test_remote_chat_only_disables_thinking_when_callers_request_it(monkeypatch)
 
     assert requests[0]["enable_thinking"] is False
     assert "enable_thinking" not in requests[1]
+
+
+def test_remote_chat_rejects_truncated_structured_output(monkeypatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"knowledge_points": ['},
+                    }
+                ]
+            }
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+        @property
+        def is_closed(self) -> bool:
+            return False
+
+    settings = Settings(
+        llm_provider="qwen",
+        llm_base_url="https://example.test/v1",
+        llm_api_key="test-key",
+        llm_chat_model="qwen3.7-plus",
+    )
+    provider = OpenAICompatibleProvider(settings)
+    monkeypatch.setattr(provider, "_http_client", lambda: Client())
+
+    with pytest.raises(ModelResponseTruncatedError, match="MODEL_RESPONSE_TRUNCATED"):
+        asyncio.run(
+            provider.chat(
+                [{"role": "user", "content": "structured output"}],
+                _require_complete=True,
+                max_tokens=20,
+            )
+        )
 
 
 def test_strict_rag_mode_calls_chat_provider_with_grounding_prompt() -> None:

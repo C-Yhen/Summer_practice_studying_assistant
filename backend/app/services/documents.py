@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from backend.app.config import Settings
-from backend.app.models import AsyncTask, Document, DocumentChunk, DocumentVersion, utcnow
+from backend.app.models import AsyncTask, Course, Document, DocumentChunk, DocumentVersion, utcnow
 from backend.app.providers.llm import LLMProvider, validate_embedding_batch
 from backend.app.services.async_tasks import mark_task_cancelled
 
@@ -320,6 +320,32 @@ async def process_document(
         }
         task.finished_at = utcnow()
         db.commit()
+        # The last current document to finish starts exactly one course-level
+        # preparation task. Other documents, plan pages and practice pages only
+        # observe that task; they never create extra provider calls.
+        if settings is not None:
+            from backend.app.services.ai_enrichment import (
+                ensure_course_content_preparation,
+            )
+
+            owner_id = db.scalar(
+                select(Course.owner_id).where(Course.id == document.course_id)
+            )
+            if owner_id is not None:
+                preparation = await ensure_course_content_preparation(
+                    db,
+                    settings,
+                    user_id=owner_id,
+                    course_id=document.course_id,
+                    allow_retry=False,
+                )
+                if preparation is not None:
+                    db.refresh(task)
+                    task.result_data = {
+                        **(task.result_data or {}),
+                        "course_preparation_task_id": preparation.public_id,
+                    }
+                    db.commit()
     except DocumentProcessingCancelled:
         return
     except Exception as exc:

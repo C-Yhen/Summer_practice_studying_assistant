@@ -25,7 +25,11 @@ from backend.app.schemas import AdjustmentCreate, PlanConfirm, PlanGenerate, Tas
 from backend.app.services.confirmation import issue_confirmation, verify_confirmation
 from backend.app.services.mastery import apply_mastery_evidence
 from backend.app.services.ai_enrichment import queue_ai_enhancement
-from backend.app.services.course_content import persist_extracted_knowledge_points, usable_knowledge_points
+from backend.app.services.course_content import (
+    course_content_readiness,
+    persist_extracted_knowledge_points,
+    primary_knowledge_points,
+)
 
 router = APIRouter(tags=["study-plans"])
 
@@ -39,7 +43,7 @@ def _owned_plan(db: DBSession, plan_id: int, user_id: int) -> StudyPlan:
 
 def _seed_points(db: DBSession, course_id: int) -> list[KnowledgePoint]:
     """Compatibility name: never create generic points without source material."""
-    return usable_knowledge_points(db, course_id)
+    return primary_knowledge_points(db, course_id)
 
     points = list(db.scalars(select(KnowledgePoint).where(KnowledgePoint.course_id == course_id)))
     if points:
@@ -177,33 +181,24 @@ async def generate_plan(
         "overrides": {"daily_minutes": daily_override, "session_minutes": session_override},
     }
 
+    # Courses with uploaded material must finish the whole persisted content
+    # preparation (points + grounded question batch) before plans are exposed.
+    content_state = course_content_readiness(
+        db, course_id, user_id=current_user.id
+    )
+    if content_state["document_count"] and not content_state["ready"]:
+        detail = (
+            f"COURSE_CONTENT_PREPARATION_FAILED:{content_state['failure_type'] or 'UNKNOWN'}"
+            if content_state["status"] in {"failed", "cancelled"}
+            else f"COURSE_CONTENT_PREPARING:{content_state['task_id'] or ''}"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
     # Candidate scheduling is always rule-first, but only with points that can
     # be traced to ready course material; never invent generic seed labels.
     points = _seed_points(db, course_id)
     if not points:
-        ready_document_ids = list(
-            db.scalars(
-                select(Document.id).where(
-                    Document.course_id == course_id,
-                    Document.status == "ready",
-                    Document.is_deleted.is_(False),
-                )
-            )
-        )
-        if not ready_document_ids:
-            raise HTTPException(status_code=422, detail="COURSE_CONTENT_NOT_READY")
-        extraction_task = await queue_ai_enhancement(
-            db,
-            settings,
-            task_type="knowledge_point_extraction",
-            user_id=current_user.id,
-            course_id=course_id,
-            input_data={"document_ids": ready_document_ids},
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=f"KNOWLEDGE_POINTS_PROCESSING:{extraction_task.public_id if extraction_task else ''}",
-        )
+        raise HTTPException(status_code=422, detail="COURSE_CONTENT_NOT_READY")
     input_data = PlanInput(
         start_date=payload.start_date,
         end_date=payload.end_date,

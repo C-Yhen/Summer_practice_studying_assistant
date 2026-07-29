@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,8 +11,6 @@ from backend.app.dependencies import AppSettings, CurrentUser, DBSession
 from backend.app.models import (
     KnowledgeMastery,
     KnowledgePoint,
-    Document,
-    DocumentChunk,
     LearningRecord,
     PracticeAttempt,
     PracticeQuestion,
@@ -22,171 +19,67 @@ from backend.app.models import (
 from backend.app.responses import ok
 from backend.app.schemas import PracticeAttemptCreate, WrongBookUpdate
 from backend.app.services.mastery import apply_mastery_evidence
-from backend.app.services.ai_enrichment import queue_ai_enhancement
 from backend.app.services.course_content import (
+    course_content_readiness,
     deactivate_legacy_placeholder_questions,
+    ensure_grounded_rule_questions,
     is_legacy_placeholder_point,
-    usable_knowledge_points,
+    primary_knowledge_points,
 )
 
 router = APIRouter(tags=["practice"])
-
-
-def _next_rule_seed(db: DBSession, course_id: int, point_id: int) -> str:
-    prefix = f"rule_seed:kp:{point_id}"
-    version = 1
-    while db.scalar(select(PracticeQuestion.id).where(
-        PracticeQuestion.course_id == course_id,
-        PracticeQuestion.seed_key == (prefix if version == 1 else f"{prefix}:v{version}"),
-    )) is not None:
-        version += 1
-    return prefix if version == 1 else f"{prefix}:v{version}"
-
-
-def _source_for_point(db: DBSession, course_id: int, point: KnowledgePoint) -> DocumentChunk | None:
-    """Prefer a ready chunk that actually names the extracted knowledge point."""
-    chunks = list(
-        db.scalars(
-            select(DocumentChunk)
-            .join(Document, Document.id == DocumentChunk.document_id)
-            .where(
-                DocumentChunk.course_id == course_id,
-                DocumentChunk.is_active.is_(True),
-                Document.status == "ready",
-                Document.is_deleted.is_(False),
-            )
-            .order_by(DocumentChunk.id)
-        )
-    )
-    direct = next((chunk for chunk in chunks if point.name in chunk.content), None)
-    if direct is not None:
-        return direct
-    # Extracted points retain a concise locator in their description.  Use it
-    # as the verified fallback when a normalized AI name is not verbatim in the
-    # chunk body (for example “主存储器与高速缓冲存储器”).
-    description = point.description or ""
-    match = re.search(r"来源：(.+?) 第(\d+)页", description)
-    if match is None:
-        return None
-    title, page = match.group(1), int(match.group(2))
-    return next(
-        (
-            chunk for chunk in chunks
-            if chunk.page_number == page and chunk.document.title == title
-        ),
-        None,
-    )
-
-
-def _rule_question_from_source(
-    *, db: DBSession, course_id: int, point: KnowledgePoint, source: DocumentChunk, distractors: list[KnowledgePoint]
-) -> PracticeQuestion:
-    """Build a small, source-backed diagnostic question without canned prose."""
-    quote = " ".join(source.content.split())[:420]
-    answer = quote[:130].rstrip("，。；; ")
-    other_descriptions = [
-        (item.description or item.name).split("来源：", 1)[0].strip()[:110]
-        for item in distractors
-        if item.id != point.id and (item.description or item.name).strip()
-    ]
-    fillers = [text for text in other_descriptions if text and text != answer]
-    while len(fillers) < 3:
-        fillers.append(f"与“{point.name}”无直接对应关系的另一课程内容")
-    answer_key = "ABCD"[(point.id - 1) % 4]
-    options: list[dict[str, str]] = []
-    iterator = iter(fillers[:3])
-    for key in "ABCD":
-        options.append({"key": key, "text": answer if key == answer_key else next(iterator)})
-    return PracticeQuestion(
-        course_id=course_id,
-        knowledge_point_id=point.id,
-        seed_key=_next_rule_seed(db, course_id=course_id, point_id=point.id),
-        stem=f"根据资料中关于“{point.name}”的表述，下列哪项描述正确？",
-        options=options,
-        correct_option=answer_key,
-        explanation=f"资料原文指出：{quote}",
-        difficulty=point.difficulty,
-        origin="rule_source",
-        source_document_id=source.document_id,
-        source_page_number=source.page_number,
-        source_quote=quote,
-    )
 
 
 async def _bootstrap_source_grounded(
     db: DBSession, course_id: int, user_id: int, settings: AppSettings
 ) -> dict:
     deactivate_legacy_placeholder_questions(db, course_id)
-    points = usable_knowledge_points(db, course_id)[:10]
-    if not points:
-        document_ids = list(
-            db.scalars(
-                select(Document.id).where(
-                    Document.course_id == course_id,
-                    Document.status == "ready",
-                    Document.is_deleted.is_(False),
-                )
-            )
+    points = primary_knowledge_points(db, course_id)
+    state = course_content_readiness(db, course_id, user_id=user_id)
+    # Offline unit/demo fixtures historically seed source-backed points without
+    # a background preparation task. Real providers must wait for the automatic
+    # course preparation chain; mock mode may materialize those fixture questions.
+    mock_fixture_can_prepare = (
+        settings.llm_provider.strip().lower() == "mock" and bool(points)
+    )
+    if state["document_count"] and not state["ready"] and not mock_fixture_can_prepare:
+        reason = (
+            "COURSE_CONTENT_PREPARATION_FAILED"
+            if state["status"] in {"failed", "cancelled"}
+            else "COURSE_CONTENT_PREPARING"
         )
-        extraction_task = None
-        if document_ids:
-            extraction_task = await queue_ai_enhancement(
-                db,
-                settings,
-                task_type="knowledge_point_extraction",
-                user_id=user_id,
-                course_id=course_id,
-                input_data={"document_ids": document_ids},
-            )
         return ok({
             "generation_mode": "source_required",
             "created_count": 0,
             "existing_count": 0,
             "total": 0,
-            "reason": "KNOWLEDGE_POINTS_PROCESSING" if extraction_task else "NO_SOURCE_GROUNDED_KNOWLEDGE_POINTS",
-            "knowledge_point_task_id": extraction_task.public_id if extraction_task else None,
+            "reason": reason,
+            "knowledge_point_task_id": state["task_id"],
+            "failure_type": state["failure_type"],
         })
 
-    created = existing = skipped = 0
-    for point in points:
-        active = db.scalar(
-            select(PracticeQuestion.id).where(
-                PracticeQuestion.course_id == course_id,
-                PracticeQuestion.knowledge_point_id == point.id,
-                PracticeQuestion.is_active.is_(True),
-            )
-        )
-        if active is not None:
-            existing += 1
-            continue
-        source = _source_for_point(db, course_id, point)
-        if source is None:
-            skipped += 1
-            continue
-        db.add(_rule_question_from_source(
-            db=db, course_id=course_id, point=point, source=source, distractors=points,
-        ))
-        created += 1
+    if not points:
+        return ok({
+            "generation_mode": "source_required",
+            "created_count": 0,
+            "existing_count": 0,
+            "total": 0,
+            "reason": "NO_SOURCE_GROUNDED_KNOWLEDGE_POINTS",
+        })
+
+    prepared = ensure_grounded_rule_questions(db, course_id, minimum=6)
     db.commit()
-    ai_task = await queue_ai_enhancement(
-        db,
-        settings,
-        task_type="practice_ai_enhancement",
-        user_id=user_id,
-        course_id=course_id,
-        input_data={"knowledge_point_ids": [point.id for point in points[:3]]},
-    )
     return ok({
         "generation_mode": "source_grounded_rule_first",
-        "rule_created_count": created,
+        "rule_created_count": prepared["created_count"],
         "ai_created_count": 0,
         "failed_count": 0,
-        "skipped_without_source_count": skipped,
-        "ai_enhancement_task_id": ai_task.public_id if ai_task else None,
-        "created_count": created,
-        "existing_count": existing,
-        "total": created + existing,
-        "reason": None if created + existing else "NO_SOURCE_GROUNDED_QUESTIONS",
+        "skipped_without_source_count": prepared["skipped_count"],
+        "ai_enhancement_task_id": None,
+        "created_count": prepared["created_count"],
+        "existing_count": prepared["existing_count"],
+        "total": prepared["question_count"],
+        "reason": None if prepared["question_count"] else "NO_SOURCE_GROUNDED_QUESTIONS",
     })
 
 
@@ -344,72 +237,6 @@ async def bootstrap(
 ) -> dict:
     course = _owned_course(db, course_id, current_user.id)
     return await _bootstrap_source_grounded(db, course.id, current_user.id, settings)
-
-    points = list(
-        db.scalars(
-            select(KnowledgePoint)
-            .where(KnowledgePoint.course_id == course.id)
-            .order_by(KnowledgePoint.id)
-            .limit(10)
-        )
-    )
-    if not points:
-        return ok({
-            "created_count": 0,
-            "existing_count": 0,
-            "total": 0,
-            "reason": "NO_KNOWLEDGE_POINTS",
-        })
-
-    created = existing = 0
-    # Rule questions are the interactive contract. AI is scheduled only after
-    # this commit and cannot replace/delete questions with answer history.
-    for point in points:
-        has_any = db.scalar(
-            select(PracticeQuestion.id).where(
-                PracticeQuestion.course_id == course.id,
-                PracticeQuestion.knowledge_point_id == point.id,
-                PracticeQuestion.is_active.is_(True),
-            )
-        )
-        if has_any:
-            existing += 1
-            continue
-        key = _next_rule_seed(db, course.id, point.id)
-        name = point.name
-        db.add(PracticeQuestion(
-            course_id=course.id, knowledge_point_id=point.id, seed_key=key,
-            stem=f'关于知识点"{name}"，下列哪项最符合完成该知识点学习后的要求？',
-            options=[
-                {"key": "A", "text": f'能够用自己的话解释"{name}"的核心含义，并说明基本适用场景。'},
-                {"key": "B", "text": "只浏览任务标题即可。"},
-                {"key": "C", "text": "只累计学习时长而无需理解。"},
-                {"key": "D", "text": "跳过该知识点并直接标记完成。"},
-            ],
-            correct_option="A",
-            explanation=point.description or f'这是课程"{course.name}"中"{name}"的规则化基础自测题。',
-            difficulty=point.difficulty, origin="rule_seed",
-        ))
-        created += 1
-    db.commit()
-    ai_task = await queue_ai_enhancement(
-        db,
-        settings,
-        task_type="practice_ai_enhancement",
-        user_id=current_user.id,
-        course_id=course.id,
-        input_data={"knowledge_point_ids": [point.id for point in points[:3]]},
-    )
-    return ok({
-        "generation_mode": "rule_first",
-        "rule_created_count": created,
-        "ai_created_count": 0,
-        "failed_count": 0,
-        "ai_enhancement_task_id": ai_task.public_id if ai_task else None,
-        "created_count": created, "existing_count": existing,
-        "total": created + existing,
-        "reason": "NO_KNOWLEDGE_POINTS" if not points else None,
-    })
 
 
 @router.get("/courses/{course_id}/practice/questions")

@@ -82,11 +82,33 @@ def test_plan_confirmation_mastery_and_recommendations(
     client.post(
         f"/api/v1/courses/{course_id}/documents",
         headers=auth_headers,
-        files={"file": ("db.txt", b"Database keys and normalization review.", "text/plain")},
+        files={
+            "file": (
+                "db.txt",
+                "第三范式用于消除传递依赖，是数据库规范化的重要要求。".encode(),
+                "text/plain",
+            )
+        },
     )
     with client.app.state.database.session_factory() as db:
-        db.add(KnowledgePoint(course_id=course_id, name="第三范式", description="Third normal form removes transitive dependencies. 来源：db.txt 第1页。", estimated_minutes=30))
+        db.add(
+            KnowledgePoint(
+                course_id=course_id,
+                name="第三范式",
+                description=(
+                    "第三范式用于消除传递依赖。"
+                    "\n来源：db.txt 第1页。"
+                    "依据：第三范式用于消除传递依赖，是数据库规范化的重要要求。"
+                ),
+                estimated_minutes=30,
+            )
+        )
         db.commit()
+    prepared = client.post(
+        f"/api/v1/courses/{course_id}/practice/questions/bootstrap",
+        headers=auth_headers,
+    )
+    assert prepared.status_code == 200
     generated = client.post(
         f"/api/v1/courses/{course_id}/study-plans/generate",
         headers=auth_headers,

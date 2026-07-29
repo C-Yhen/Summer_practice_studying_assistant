@@ -74,6 +74,22 @@ export interface CourseListResult {
   total: number
 }
 
+export interface CourseContentReadiness {
+  course_id: number
+  status: 'empty' | 'pending' | 'processing' | 'ready' | 'failed' | 'cancelled'
+  ready: boolean
+  stage: string
+  progress: number
+  task_id: string | null
+  failure_type: string | null
+  document_count: number
+  documents_ready: boolean
+  knowledge_point_count: number
+  question_count: number
+  document_versions: Array<{ document_id: number; version: number }>
+  can_retry: boolean
+}
+
 export interface BackendDocument {
   id: number
   course_id: number

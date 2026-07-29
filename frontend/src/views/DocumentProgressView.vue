@@ -6,7 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import { getApiErrorMessage, isApiError, isUnauthorizedError } from '@/api/client'
 import { courseApi, documentApi } from '@/api/services'
-import type { BackendAsyncTask, BackendDocument, CourseListItem } from '@/types'
+import type { BackendAsyncTask, BackendDocument, CourseContentReadiness, CourseListItem } from '@/types'
 
 const POLL_INTERVAL_MS = 1500
 const MAX_POLL_FAILURES = 3
@@ -17,16 +17,20 @@ const STEP_LABELS: Record<string, string> = {
   extracting: '提取文本 / OCR',
   chunking: '清洗与切块',
   embedding: '生成向量',
+  queued_for_ai_enhancement: '等待提取课程知识点',
+  extracting_knowledge_points: '正在提取课程知识点',
+  preparing_course_questions: '正在准备课程题目',
+  course_content_preparation_failed: '课程内容准备失败',
   completed: '处理完成',
   cancelled_by_user: '用户已取消',
 }
 const PIPELINE_STAGES = [
-  { key: 'queued', label: '等待处理' },
-  { key: 'worker_started', label: '任务启动' },
-  { key: 'extracting', label: '提取文本' },
-  { key: 'chunking', label: '清洗与切块' },
-  { key: 'embedding', label: '生成向量' },
-  { key: 'completed', label: '处理完成' },
+  { key: 'uploaded', label: '上传中' },
+  { key: 'extracting', label: '资料解析中' },
+  { key: 'embedding', label: '向量化处理中' },
+  { key: 'extracting_knowledge_points', label: '提取课程知识点' },
+  { key: 'preparing_course_questions', label: '准备课程题目' },
+  { key: 'completed', label: '已就绪' },
 ]
 
 const route = useRoute()
@@ -43,13 +47,23 @@ const documentError = ref('')
 const task = ref<BackendAsyncTask | null>(null)
 const activeTaskId = ref('')
 const taskError = ref('')
+const contentState = ref<CourseContentReadiness | null>(null)
+const contentError = ref('')
+const contentRetrying = ref(false)
 const polling = ref(false)
 let pollTimer: number | undefined
+let contentPollTimer: number | undefined
 let pollFailures = 0
 let initializationVersion = 0
 
 const selectedCourse = computed(() => courses.value.find((course) => course.id === selectedCourseId.value) || null)
-const progress = computed(() => Math.min(100, Math.max(0, Math.round(task.value?.progress || 0))))
+const progress = computed(() => {
+  if (contentState.value?.ready) return 100
+  if (task.value?.status === 'success' && contentState.value) {
+    return Math.min(99, 55 + Math.round(contentState.value.progress * 0.44))
+  }
+  return Math.min(55, Math.max(0, Math.round((task.value?.progress || 0) * 0.55)))
+})
 const chunkCount = computed(() => {
   const value = task.value?.result_data?.chunk_count
   return typeof value === 'number' ? value : null
@@ -86,11 +100,22 @@ const currentStepLabel = computed(() => {
 })
 const currentStageIndex = computed(() => {
   if (!task.value) return -1
-  if (task.value.status === 'success') return PIPELINE_STAGES.length - 1
-  return PIPELINE_STAGES.findIndex((stage) => stage.key === task.value?.current_step)
+  if (contentState.value?.ready) return PIPELINE_STAGES.length - 1
+  if (task.value.status !== 'success') {
+    if (task.value.current_step === 'embedding') return 2
+    if (task.value.current_step === 'extracting' || task.value.current_step === 'chunking') return 1
+    return 0
+  }
+  if (contentState.value?.stage === 'preparing_course_questions') return 4
+  return 3
 })
 const refreshLabel = computed(() => {
   if (taskError.value) return '状态读取失败'
+  if (contentState.value?.ready) return '课程已就绪'
+  if (contentState.value?.status === 'failed' || contentState.value?.status === 'cancelled') {
+    return '课程内容准备已停止'
+  }
+  if (contentState.value?.status === 'processing') return '课程内容自动准备中'
   if (task.value && TERMINAL_STATUSES.has(task.value.status)) return '处理已停止'
   return polling.value ? '自动刷新中' : '未启动自动刷新'
 })
@@ -125,6 +150,46 @@ function stopPolling() {
   if (pollTimer !== undefined) window.clearTimeout(pollTimer)
   pollTimer = undefined
   polling.value = false
+}
+
+function stopContentPolling() {
+  if (contentPollTimer !== undefined) window.clearTimeout(contentPollTimer)
+  contentPollTimer = undefined
+}
+
+async function loadContentState(courseId: number, keepPolling = true) {
+  try {
+    const state = await courseApi.contentReadiness(courseId)
+    if (selectedCourseId.value !== courseId) return
+    contentState.value = state
+    contentError.value = ''
+    stopContentPolling()
+    if (keepPolling && state.status === 'processing') {
+      contentPollTimer = window.setTimeout(() => void loadContentState(courseId, true), POLL_INTERVAL_MS)
+    }
+  } catch (error) {
+    if (selectedCourseId.value === courseId) {
+      contentError.value = documentErrorMessage(error, '课程内容准备状态读取失败')
+      stopContentPolling()
+    }
+  }
+}
+
+async function retryContentPreparation() {
+  if (!selectedCourseId.value || contentRetrying.value) return
+  const courseId = selectedCourseId.value
+  contentRetrying.value = true
+  contentError.value = ''
+  try {
+    await courseApi.retryContentPreparation(courseId)
+    await loadContentState(courseId, true)
+  } catch (error) {
+    if (selectedCourseId.value === courseId) {
+      contentError.value = documentErrorMessage(error, '重新准备课程内容失败')
+    }
+  } finally {
+    contentRetrying.value = false
+  }
 }
 
 function isCurrentTask(documentId: number, taskId: string) {
@@ -189,6 +254,7 @@ async function readTask(documentId: number, taskId: string, isPoll = false) {
       stopPolling()
       if (activeDocument.value?.id === documentId) void refreshActiveDocument(documentId)
       if (selectedCourseId.value) void loadDocuments(selectedCourseId.value)
+      if (result.status === 'success' && selectedCourseId.value) void loadContentState(selectedCourseId.value, true)
     } else {
       schedulePoll(documentId, taskId)
     }
@@ -230,6 +296,7 @@ async function resolveTask(documentId: number, requestedTaskId: string) {
 async function initialize() {
   const version = ++initializationVersion
   stopPolling()
+  stopContentPolling()
   pollFailures = 0
   selectedCourseId.value = null
   documents.value = []
@@ -239,6 +306,8 @@ async function initialize() {
   documentsError.value = ''
   documentError.value = ''
   taskError.value = ''
+  contentState.value = null
+  contentError.value = ''
 
   await loadCourses()
   if (version !== initializationVersion || coursesError.value) return
@@ -283,7 +352,10 @@ async function initialize() {
     }
   }
 
-  if (selectedCourseId.value) await loadDocuments(selectedCourseId.value)
+  if (selectedCourseId.value) {
+    await loadDocuments(selectedCourseId.value)
+    await loadContentState(selectedCourseId.value, true)
+  }
   if (version !== initializationVersion) return
   if (requestedDocumentId) await resolveTask(requestedDocumentId, requestedTaskId)
 }
@@ -301,6 +373,7 @@ function selectDocument(document: BackendDocument) {
 
 async function refreshAll() {
   if (selectedCourseId.value) await loadDocuments(selectedCourseId.value)
+  if (selectedCourseId.value) await loadContentState(selectedCourseId.value, true)
   if (activeDocument.value) await refreshActiveDocument(activeDocument.value.id)
   if (activeTaskId.value) {
     stopPolling()
@@ -329,6 +402,7 @@ watch(() => route.fullPath, () => void initialize(), { immediate: true })
 onBeforeUnmount(() => {
   initializationVersion += 1
   stopPolling()
+  stopContentPolling()
 })
 </script>
 
@@ -367,7 +441,7 @@ onBeforeUnmount(() => {
       <template v-if="task">
         <el-progress :percentage="progress" :show-text="false" :stroke-width="9" color="#6675ed" />
         <div class="stage-list">
-          <div v-for="(stage,index) in PIPELINE_STAGES" :key="stage.key" :class="{ done: index < currentStageIndex || task.status === 'success', active: index === currentStageIndex && task.status !== 'success' }"><span><i></i></span><b>{{ stage.label }}</b></div>
+          <div v-for="(stage,index) in PIPELINE_STAGES" :key="stage.key" :class="{ done: index < currentStageIndex || contentState?.ready, active: index === currentStageIndex && !contentState?.ready }"><span><i></i></span><b>{{ stage.label }}</b></div>
         </div>
         <div class="task-detail-grid">
           <p><span>任务 ID</span><b class="mono">{{ task.task_id }}</b></p>
@@ -387,6 +461,30 @@ onBeforeUnmount(() => {
           <div><span>OCR 识别页</span><b>{{ ocrPageCount ?? '—' }}</b></div>
         </div>
         <el-alert v-if="task.error_message" :title="processingErrorMessage(task.error_message)" type="error" :closable="false" show-icon class="inner-alert" />
+        <el-alert
+          v-if="contentState?.status === 'failed' || contentState?.status === 'cancelled'"
+          :title="`课程内容准备失败：${contentState.failure_type || '未知原因'}`"
+          type="error"
+          :closable="false"
+          show-icon
+          class="inner-alert"
+        >
+          <template #default>
+            <el-button :loading="contentRetrying" :disabled="contentRetrying" size="small" @click="retryContentPreparation">
+              重新准备课程内容
+            </el-button>
+          </template>
+        </el-alert>
+        <el-alert
+          v-else-if="contentState?.ready"
+          :title="`课程已就绪：${contentState.knowledge_point_count} 个真实知识点，${contentState.question_count} 道课程题目。`"
+          type="success"
+          :closable="false"
+          show-icon
+          class="inner-alert"
+        />
+        <el-alert v-else-if="contentState?.status === 'processing'" :title="STEP_LABELS[contentState.stage] || '课程内容正在准备'" type="info" :closable="false" show-icon class="inner-alert" />
+        <el-alert v-if="contentError" :title="contentError" type="error" :closable="false" show-icon class="inner-alert"><template #default><el-button size="small" @click="selectedCourseId && loadContentState(selectedCourseId, true)">重试读取课程状态</el-button></template></el-alert>
         <el-alert v-if="taskError" :title="taskError" type="error" :closable="false" show-icon class="inner-alert"><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>
       </template>
       <el-alert v-else-if="taskError" :title="taskError" type="warning" :closable="false" show-icon><template #default><el-button size="small" @click="retryTaskStatus">重试读取状态</el-button></template></el-alert>

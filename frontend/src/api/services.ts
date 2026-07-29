@@ -19,6 +19,7 @@ import type {
   ChatSessionCreateResponse,
   ChatSessionListResponse,
   CourseCreateRequest,
+  CourseContentReadiness,
   CourseUpdateRequest,
   CourseRecommendationItem,
   CourseRecommendationsResponse,
@@ -601,6 +602,38 @@ export const courseApi = {
     }
     return toCourseListItem(
       unwrapApiResponse<BackendCourse>(await apiClient.get(`/courses/${courseId}`)),
+    )
+  },
+
+  async contentReadiness(courseId: number): Promise<CourseContentReadiness> {
+    if (mockEnabled) {
+      await mockDelay()
+      const documents = mockDocuments.filter((item) => item.course_id === courseId)
+      const ready = documents.length > 0 && documents.every((item) => item.status === 'ready')
+      return {
+        course_id: courseId,
+        status: ready ? 'ready' : documents.length ? 'processing' : 'empty',
+        ready,
+        stage: ready ? 'completed' : documents.length ? 'processing_documents' : 'waiting_for_documents',
+        progress: ready ? 100 : 0,
+        task_id: null,
+        failure_type: null,
+        document_count: documents.length,
+        documents_ready: ready,
+        knowledge_point_count: ready ? 1 : 0,
+        question_count: ready ? 1 : 0,
+        document_versions: documents.map((item) => ({ document_id: item.id, version: item.current_version })),
+        can_retry: false,
+      }
+    }
+    return unwrapApiResponse<CourseContentReadiness>(
+      await apiClient.get(`/courses/${courseId}/content-readiness`),
+    )
+  },
+
+  async retryContentPreparation(courseId: number): Promise<{ task_id: string; status: string; current_step: string }> {
+    return unwrapApiResponse(
+      await apiClient.post(`/courses/${courseId}/content-preparation/retry`),
     )
   },
 

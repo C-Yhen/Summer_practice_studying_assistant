@@ -33,6 +33,29 @@ def _point(client: TestClient, course_id: int, name: str = "Point") -> int:
         db.add(DocumentChunk(document_id=document.id, course_id=course_id, document_version=1, chunk_index=0, content=source, page_number=1, embedding=[]))
         point = KnowledgePoint(course_id=course_id, name=name, description=f"{source}\n来源：{document.title} 第1页。依据：{source}", difficulty="basic", estimated_minutes=30)
         db.add(point)
+        db.flush()
+        db.add(
+            PracticeQuestion(
+                course_id=course_id,
+                knowledge_point_id=point.id,
+                stem=f"Which statement accurately describes {name}?",
+                options=[
+                    {"label": "A", "text": source},
+                    {"label": "B", "text": f"{name} is unrelated to this course."},
+                    {"label": "C", "text": f"{name} never uses source material."},
+                    {"label": "D", "text": f"{name} can be skipped without study."},
+                ],
+                correct_option="A",
+                explanation=source,
+                difficulty="basic",
+                origin="rule_source",
+                seed_key=f"prepared:{point.id}",
+                source_document_id=document.id,
+                source_page_number=1,
+                source_quote=source,
+                is_active=True,
+            )
+        )
         db.commit()
         return point.id
 
@@ -82,11 +105,12 @@ def test_rule_endpoints_return_without_waiting_for_slow_remote_ai(client: TestCl
     assert elapsed_practice < 2
     body = practice.json()["data"]
     assert body["generation_mode"] == "source_grounded_rule_first"
-    assert body["rule_created_count"] >= 1
-    assert body["ai_enhancement_task_id"]
+    assert body["existing_count"] >= 1
+    assert body["ai_enhancement_task_id"] is None
     listed = client.get(f"/api/v1/courses/{course_id}/practice/questions", headers=auth_headers).json()["data"]
     assert listed["items"] and all(len(item["options"]) == 4 for item in listed["items"])
-    assert {"ai_recommendation", "plan_ai_enhancement", "practice_ai_enhancement"}.issubset(queued)
+    assert {"ai_recommendation", "plan_ai_enhancement"}.issubset(queued)
+    assert "practice_ai_enhancement" not in queued
 
 
 def test_broker_dispatch_failure_does_not_block_rule_recommendations(
@@ -140,8 +164,8 @@ def test_eight_second_fake_llm_runs_only_in_background_task(client: TestClient, 
         assert result["summary"] == "background only"
 
 
-def test_slow_plan_and_practice_enhancements_do_not_delay_rule_routes(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Plan and practice use the same worker boundary as recommendations."""
+def test_slow_plan_enhancement_does_not_delay_prepared_plan_or_practice_routes(client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A prepared course returns both rule plan and persisted practice immediately."""
     course_id = _course(client, auth_headers, "Slow plan and practice AI")
     _point(client, course_id)
     _enable_remote_task_queue(client, monkeypatch)
@@ -161,22 +185,14 @@ def test_slow_plan_and_practice_enhancements_do_not_delay_rule_routes(client: Te
         await asyncio.sleep(8.1)
         return {"summary": "background plan", "risks": [], "tasks": []}
 
-    async def slow_practice(*args, **kwargs):
-        await asyncio.sleep(8.1)
-        return []
-
     monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda settings: object())
     monkeypatch.setattr("backend.app.services.ai_enrichment.generate_plan_one_shot", slow_plan)
-    monkeypatch.setattr("backend.app.services.ai_enrichment.generate_questions_batch", slow_practice)
     with client.app.state.database.session_factory() as db:
         plan_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == plan_response.json()["data"]["ai_enhancement_task_id"]))
-        practice_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == practice_response.json()["data"]["ai_enhancement_task_id"]))
-        assert plan_task is not None and practice_task is not None
+        assert plan_task is not None
+        assert practice_response.json()["data"]["ai_enhancement_task_id"] is None
         started = time.perf_counter()
         assert asyncio.run(process_ai_enhancement(db, plan_task, client.app.state.settings))["summary"] == "background plan"
-        assert time.perf_counter() - started >= 8
-        started = time.perf_counter()
-        assert asyncio.run(process_ai_enhancement(db, practice_task, client.app.state.settings))["ai_created_count"] == 0
         assert time.perf_counter() - started >= 8
 
 
@@ -497,6 +513,21 @@ def test_cancelled_enhancements_discard_plan_and_practice_writes(client: TestCli
         json={"goal": "keep rule summary", "start_date": "2026-08-01", "end_date": "2026-08-03"},
     ).json()["data"]
     practice_data = client.post(f"/api/v1/courses/{course_id}/practice/questions/bootstrap", headers=auth_headers).json()["data"]
+    assert practice_data["ai_enhancement_task_id"] is None
+    with client.app.state.database.session_factory() as db:
+        owner_id = db.scalar(select(Course.owner_id).where(Course.id == course_id))
+        practice_task_seed = asyncio.run(
+            queue_ai_enhancement(
+                db,
+                client.app.state.settings,
+                task_type="practice_ai_enhancement",
+                user_id=owner_id,
+                course_id=course_id,
+                input_data={"knowledge_point_ids": [point_id], "requested_count": 1},
+            )
+        )
+        assert practice_task_seed is not None
+        practice_task_id = practice_task_seed.public_id
 
     def cancel(task_id: str) -> None:
         with client.app.state.database.session_factory() as other:
@@ -510,7 +541,7 @@ def test_cancelled_enhancements_discard_plan_and_practice_writes(client: TestCli
         return {"summary": "must not persist", "risks": ["must not persist"], "tasks": []}
 
     async def cancelled_practice(*args, **kwargs):
-        cancel(practice_data["ai_enhancement_task_id"])
+        cancel(practice_task_id)
         return [{"knowledge_point_id": point_id, "stem": "must not persist", "options": [{"label": "A", "text": "one"}, {"label": "B", "text": "two"}, {"label": "C", "text": "three"}, {"label": "D", "text": "four"}], "correct_option": "A", "explanation": "because", "source_quote": "material quote", "difficulty": "basic"}]
 
     monkeypatch.setattr("backend.app.services.ai_enrichment.get_llm_provider", lambda settings: object())
@@ -519,7 +550,7 @@ def test_cancelled_enhancements_discard_plan_and_practice_writes(client: TestCli
     with client.app.state.database.session_factory() as db:
         original_summary = db.scalar(select(StudyPlanVersion.summary).where(StudyPlanVersion.plan_id == plan_data["plan_id"]))
         plan_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == plan_data["ai_enhancement_task_id"]))
-        practice_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == practice_data["ai_enhancement_task_id"]))
+        practice_task = db.scalar(select(AsyncTask).where(AsyncTask.public_id == practice_task_id))
         assert plan_task is not None and practice_task is not None
         assert asyncio.run(process_ai_enhancement(db, plan_task, client.app.state.settings))["cancelled"]
         assert asyncio.run(process_ai_enhancement(db, practice_task, client.app.state.settings))["cancelled"]
@@ -559,6 +590,10 @@ def test_inactive_question_does_not_block_new_rule_question(client: TestClient, 
     course_id = _course(client, auth_headers, "Inactive question")
     point_id = _point(client, course_id)
     with client.app.state.database.session_factory() as db:
+        for existing in db.scalars(
+            select(PracticeQuestion).where(PracticeQuestion.course_id == course_id)
+        ):
+            existing.is_active = False
         db.add(PracticeQuestion(course_id=course_id, knowledge_point_id=point_id, seed_key=f"rule_seed:kp:{point_id}", stem="old", options=[{"key": "A", "text": "old"}], correct_option="A", explanation="old", is_active=False))
         db.commit()
     result = client.post(f"/api/v1/courses/{course_id}/practice/questions/bootstrap", headers=auth_headers)
